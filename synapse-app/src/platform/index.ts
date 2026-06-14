@@ -24,6 +24,47 @@ export interface WallpaperAsset {
   addedAt: number;
 }
 
+// ===== git worktree (M2-4) =====
+export interface WorktreeEntry {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  bare: boolean;
+  detached: boolean;
+  locked: boolean;
+}
+
+export interface WorktreeListResult {
+  worktrees?: WorktreeEntry[];
+  error?: boolean;
+  message?: string;
+}
+
+export interface WorktreeCreateResult {
+  success?: boolean;
+  path?: string;
+  branch?: string;
+  error?: boolean;
+  message?: string;
+}
+
+export interface WorktreeRemoveResult {
+  success?: boolean;
+  path?: string;
+  error?: boolean;
+  message?: string;
+}
+
+export interface WorktreeStatusResult {
+  clean?: boolean;
+  files?: Array<{ status: string; file: string }>;
+  error?: boolean;
+  message?: string;
+}
+
+/** Web 模式下 worktree 不可用时统一返回的提示。 */
+const WORKTREE_WEB_ONLY = 'git worktree 管理仅在 Electron 桌面模式下可用';
+
 export interface SynapseAPI {
   platform: {
     info: () => Promise<PlatformInfo>;
@@ -109,6 +150,13 @@ export interface SynapseAPI {
   };
   command: {
     exec: (cmd: string, cwd?: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  };
+  // git worktree 管理 (M2-4)。Web 模式下各方法返回 { error:true, message } 降级，不崩溃。
+  worktree?: {
+    list: (opts: { repoRoot: string }) => Promise<WorktreeListResult>;
+    create: (opts: { repoRoot: string; branch: string; path?: string; name?: string }) => Promise<WorktreeCreateResult>;
+    remove: (opts: { repoRoot: string; path: string; force?: boolean }) => Promise<WorktreeRemoveResult>;
+    status: (opts: { repoRoot: string; path: string }) => Promise<WorktreeStatusResult>;
   };
 }
 
@@ -365,6 +413,13 @@ function getWebMock(): SynapseAPI {
     },
     command: {
       exec: async (cmd) => ({ stdout: `[Web Mock] 命令不可用: ${cmd}`, stderr: '', exitCode: 1 }),
+    },
+    // Web 模式无本地 git，worktree 全部降级返回明确错误（不抛异常、不崩溃）。
+    worktree: {
+      list: async () => ({ error: true, message: WORKTREE_WEB_ONLY }),
+      create: async () => ({ error: true, message: WORKTREE_WEB_ONLY }),
+      remove: async () => ({ error: true, message: WORKTREE_WEB_ONLY }),
+      status: async () => ({ error: true, message: WORKTREE_WEB_ONLY }),
     },
   };
 }

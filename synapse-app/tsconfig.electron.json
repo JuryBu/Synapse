@@ -6,6 +6,8 @@
     "outDir": "./dist-electron",
     "rootDir": ".",
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,

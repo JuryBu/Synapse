@@ -63,6 +63,16 @@ contextBridge.exposeInMainWorld('synapse', {
     exec: (cmd: string, cwd?: string) => ipcRenderer.invoke('command:exec', cmd, cwd),
   },
 
+  // git worktree 管理 (M2-4)
+  worktree: {
+    list: (opts: { repoRoot: string }) => ipcRenderer.invoke('worktree:list', opts),
+    create: (opts: { repoRoot: string; branch: string; path?: string; name?: string }) =>
+      ipcRenderer.invoke('worktree:create', opts),
+    remove: (opts: { repoRoot: string; path: string; force?: boolean }) =>
+      ipcRenderer.invoke('worktree:remove', opts),
+    status: (opts: { repoRoot: string; path: string }) => ipcRenderer.invoke('worktree:status', opts),
+  },
+
   // 终端 (Stage 13 实现)
   terminal: {
     create: (opts: any) => ipcRenderer.invoke('terminal:create', opts),

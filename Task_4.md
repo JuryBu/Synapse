@@ -95,4 +95,7 @@
 - 2026-06-14 M2 探索方案（子代理）：拆 M2-1 回溯 clamp / M2-2(可选)回溯重生成 / M2-3 对话分支 / M2-4 git worktree MVP / M2-5(大,待定)agent 在 worktree 执行 / M2-6 复制消息+mode per-conv。核心难点：record contentMd 无轮次结构、纯 clamp 数字回退不了正文 → 采方案②(只 clamp 水位,稳省)。
 - 2026-06-14 ✅ **M2-1 回溯 record 水位 clamp 完成**：`recordStore.clampRecord`（覆盖区内不动 / 否则 clamp totalRounds+totalSteps+lastUpdatedRound / 归零才删，contentMd 不动）；`AgentPanel.invalidateRecordForTruncation` 由「整条删」改 clampRecord，step 口径对齐 agentLoop（不含 tool）。编译 build+electron:build 过。
   - 小本本：① handleEdit/handleRetry 的 record 操作仍 void 不 await + setTimeout(run,100)，竞态极少（本地 IPC<100ms）可后续改 await；② M2-1 真机验证（回溯后 record 水位 clamp）攒到 M2-3 后一起做（调小阈值场景）。
-  - ⏳ 待主人决策（M2-4/M2-5）：git worktree 在学习平台的用途/优先级 +「agent 任务在 worktree 执行」是否纳入（大工程，牵动所有 fs 工具）。
+  - 用户答：git worktree **完整做**（含 M2-5 agent 在 worktree 执行）。
+- 2026-06-14 ✅ **M2-4 git worktree 管理后端完成**（ultracode workflow，5 agents）：`electron/ipc/worktree.ts`（list/create/remove/status IPC，child_process spawn 数组传参防注入、路径穿越双向校验、remove 默认不 force、`listWorktreePaths` 归属校验已接线 remove/status）+ main 注册 + preload + platform 抽象/Web 降级 + SettingsPanel「工作树」UI（纯加法不重构）+ tsconfig.electron 补 noUnusedLocals。编译 build+electron:build 过；3 skeptic 独立验证 + fix 修了归属校验(Task #19)。
+  - 小本本(low)：spawn 加 killSignal 兜底超时；SAFE_NAME 拒前导连字符；runGit 剔除 env.GIT_DIR/GIT_WORK_TREE；status 已暴露未被 UI 消费(可等 M2-5)。
+  - ⏳ git worktree 真机验证（create/list/remove）攒到 M2-5 一起。下一步 **M2-5 agent 在 worktree 内执行**（架构级，单独一波）。

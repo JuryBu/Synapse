@@ -45,7 +45,7 @@ import { describeCapabilities } from '@/services/modelCapabilities';
 import type { AIModelOption } from '@/types/aiModel';
 import { addNotification } from '@/store/slices/notifications';
 import { isElectron, platform } from '@/platform';
-import type { PlatformInfo } from '@/platform';
+import type { PlatformInfo, WorktreeEntry } from '@/platform';
 import '@/styles/settings.css';
 
 type PluginEntry = {
@@ -169,6 +169,13 @@ export function SettingsPanel() {
   const [mcpServers, setMcpServers] = useState<Record<string, McpServerInfo>>({});
   const [loadingMcpStatus, setLoadingMcpStatus] = useState(false);
   const [platformInfo, setPlatformInfo] = useState<PlatformInfo | null>(null);
+  // ── git worktree (M2-4) ──
+  const [worktreeRepoRoot, setWorktreeRepoRoot] = useState('');
+  const [worktrees, setWorktrees] = useState<WorktreeEntry[]>([]);
+  const [worktreeNewBranch, setWorktreeNewBranch] = useState('');
+  const [worktreeForce, setWorktreeForce] = useState(false);
+  const [worktreeBusy, setWorktreeBusy] = useState(false);
+  const [worktreeLoaded, setWorktreeLoaded] = useState(false);
   const pluginSkills = useMemo<PluginEntry[]>(() => extensionManager.getSkills().map(skill => ({
     name: skill.name,
     description: skill.description,
@@ -258,6 +265,7 @@ export function SettingsPanel() {
     { id: 'synopsis', label: '📊 Synopsis' },
     { id: 'multiAI', label: '🤝 Multi-AI' },
     { id: 'plugins', label: '🧩 插件' },
+    { id: 'worktree', label: '🌿 工作树' },
     { id: 'data', label: '📤 数据' },
     { id: 'about', label: 'ℹ️ 关于' },
   ];
@@ -457,6 +465,107 @@ export function SettingsPanel() {
     void refreshStorageUsage();
     dispatch(addNotification({ type: 'success', title: '缓存已清理', message: `已移除 ${removed} 个缓存条目` }));
   }, [dispatch, refreshStorageUsage]);
+
+  // ── git worktree (M2-4) 操作 ──
+  const pickWorktreeRepo = useCallback(async () => {
+    if (!isElectron) return;
+    try {
+      const ws = await platform.workspace.open();
+      if (ws?.path) {
+        setWorktreeRepoRoot(ws.path);
+        setWorktrees([]);
+        setWorktreeLoaded(false);
+      }
+    } catch (error: any) {
+      dispatch(addNotification({ type: 'error', title: '选择仓库失败', message: error?.message ?? '无法打开文件夹选择器' }));
+    }
+  }, [dispatch]);
+
+  const refreshWorktrees = useCallback(async () => {
+    if (!isElectron || !platform.worktree) return;
+    const repoRoot = worktreeRepoRoot.trim();
+    if (!repoRoot) {
+      dispatch(addNotification({ type: 'warning', title: '未选择仓库', message: '请先选择一个 git 仓库目录' }));
+      return;
+    }
+    setWorktreeBusy(true);
+    try {
+      const result = await platform.worktree.list({ repoRoot });
+      if (result?.error) {
+        setWorktrees([]);
+        setWorktreeLoaded(true);
+        dispatch(addNotification({ type: 'error', title: '列出工作树失败', message: result.message ?? '请确认目录是 git 仓库' }));
+        return;
+      }
+      setWorktrees(result.worktrees ?? []);
+      setWorktreeLoaded(true);
+    } catch (error: any) {
+      dispatch(addNotification({ type: 'error', title: '列出工作树失败', message: error?.message ?? '未知错误' }));
+    } finally {
+      setWorktreeBusy(false);
+    }
+  }, [dispatch, worktreeRepoRoot]);
+
+  const createWorktree = useCallback(async () => {
+    if (!isElectron || !platform.worktree) return;
+    const repoRoot = worktreeRepoRoot.trim();
+    const branch = worktreeNewBranch.trim();
+    if (!repoRoot) {
+      dispatch(addNotification({ type: 'warning', title: '未选择仓库', message: '请先选择一个 git 仓库目录' }));
+      return;
+    }
+    if (!branch) {
+      dispatch(addNotification({ type: 'warning', title: '缺少分支名', message: '请输入新建工作树的分支名' }));
+      return;
+    }
+    setWorktreeBusy(true);
+    try {
+      const result = await platform.worktree.create({ repoRoot, branch });
+      if (result?.error) {
+        dispatch(addNotification({ type: 'error', title: '新建工作树失败', message: result.message ?? '请检查分支名是否合法或已存在' }));
+        return;
+      }
+      dispatch(addNotification({ type: 'success', title: '工作树已创建', message: `${branch} → ${result.path ?? ''}` }));
+      setWorktreeNewBranch('');
+      await refreshWorktrees();
+    } catch (error: any) {
+      dispatch(addNotification({ type: 'error', title: '新建工作树失败', message: error?.message ?? '未知错误' }));
+    } finally {
+      setWorktreeBusy(false);
+    }
+  }, [dispatch, worktreeRepoRoot, worktreeNewBranch, refreshWorktrees]);
+
+  const removeWorktree = useCallback(async (targetPath: string) => {
+    if (!isElectron || !platform.worktree) return;
+    const repoRoot = worktreeRepoRoot.trim();
+    if (!repoRoot) return;
+    // 二次确认：worktree remove 会操作 .git，force 模式可能丢弃未提交改动。
+    const warnForce = worktreeForce
+      ? '\n\n⚠️ 已勾选「强制删除」：该工作树内未提交的改动将被永久丢弃，且不可恢复！'
+      : '';
+    const confirmed = window.confirm(
+      `确定删除工作树吗？\n\n${targetPath}\n\n此操作会移除该工作树目录并更新仓库的 .git 记录。${warnForce}`,
+    );
+    if (!confirmed) return;
+    setWorktreeBusy(true);
+    try {
+      const result = await platform.worktree.remove({ repoRoot, path: targetPath, force: worktreeForce });
+      if (result?.error) {
+        dispatch(addNotification({
+          type: 'error',
+          title: '删除工作树失败',
+          message: result.message ?? '若有未提交改动，可勾选「强制删除」后重试（会丢弃改动）',
+        }));
+        return;
+      }
+      dispatch(addNotification({ type: 'warning', title: '工作树已删除', message: targetPath }));
+      await refreshWorktrees();
+    } catch (error: any) {
+      dispatch(addNotification({ type: 'error', title: '删除工作树失败', message: error?.message ?? '未知错误' }));
+    } finally {
+      setWorktreeBusy(false);
+    }
+  }, [dispatch, worktreeRepoRoot, worktreeForce, refreshWorktrees]);
 
   const exportSettings = useCallback(() => {
     const settingsDump = sanitizeSettingsExport(collectLocalStorage(isSettingsStorageKey));
@@ -1172,6 +1281,110 @@ export function SettingsPanel() {
                     </div>
                   </div>
                 ))}
+              </>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'worktree' && (
+          <div className="settings-section">
+            <h3>🌿 Git 工作树</h3>
+            <p className="setting-hint">
+              在一个 git 仓库基础上创建、查看、删除独立的工作树（git worktree），为隔离任务环境做准备。
+              {' '}这是磁盘上真实的 git worktree，区别于对话分支。
+            </p>
+            {!isElectron ? (
+              <div className="setting-item">
+                <span className="plugin-status muted">git worktree 管理仅在 Electron 桌面模式下可用</span>
+              </div>
+            ) : (
+              <>
+                <div className="setting-item">
+                  <label>目标仓库</label>
+                  <div className="setting-control-row">
+                    <input
+                      type="text"
+                      placeholder="选择或填写 git 仓库根目录"
+                      value={worktreeRepoRoot}
+                      onChange={e => { setWorktreeRepoRoot(e.target.value); setWorktreeLoaded(false); }}
+                    />
+                    <button className="settings-btn" type="button" onClick={pickWorktreeRepo} disabled={worktreeBusy} style={{ flexShrink: 0 }}>
+                      📁 选择
+                    </button>
+                    <button className="settings-btn" type="button" onClick={refreshWorktrees} disabled={worktreeBusy || !worktreeRepoRoot.trim()} style={{ flexShrink: 0 }}>
+                      {worktreeBusy ? '⏳' : '🔄 列出'}
+                    </button>
+                  </div>
+                  <p className="setting-hint">非 git 仓库会提示先执行 git init。新建工作树默认放在用户数据目录的 worktrees/ 下。</p>
+                </div>
+
+                <div className="setting-item">
+                  <label>新建工作树</label>
+                  <div className="setting-control-row">
+                    <input
+                      type="text"
+                      placeholder="新分支名（如 feature-x）"
+                      value={worktreeNewBranch}
+                      onChange={e => setWorktreeNewBranch(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') void createWorktree(); }}
+                    />
+                    <button className="settings-btn" type="button" onClick={createWorktree} disabled={worktreeBusy || !worktreeRepoRoot.trim() || !worktreeNewBranch.trim()} style={{ flexShrink: 0 }}>
+                      ➕ 创建
+                    </button>
+                  </div>
+                  <p className="setting-hint">执行 git worktree add &lt;路径&gt; -b &lt;分支&gt;，会在该工作树中新建同名分支。</p>
+                </div>
+
+                <ToggleItem
+                  label="删除时强制（丢弃未提交改动）"
+                  checked={worktreeForce}
+                  onChange={setWorktreeForce}
+                />
+                <p className="setting-hint" style={{ padding: '0 16px', fontSize: 12, color: 'var(--syn-text-muted)' }}>
+                  ⚠️ 默认关闭。关闭时若工作树有未提交改动，删除会被 git 拒绝以保护数据；开启后将带 --force 强制删除并丢弃改动。
+                </p>
+
+                <div className="plugin-section" style={{ marginTop: 16 }}>
+                  <div className="plugin-section-heading">
+                    <h4>工作树列表 ({worktrees.length})</h4>
+                  </div>
+                  <div className="plugin-list">
+                    {worktrees.length === 0 ? (
+                      <div className="setting-hint" style={{ padding: '8px 0' }}>
+                        {worktreeLoaded ? '没有找到工作树（或仅有主工作树）。' : '选择仓库后点击「列出」查看工作树。'}
+                      </div>
+                    ) : (
+                      worktrees.map((wt, index) => {
+                        // git worktree list --porcelain 的第一条恒为主工作树（已实测确认）。
+                        const isMain = index === 0;
+                        return (
+                          <div className="plugin-item" key={wt.path}>
+                            <span className="plugin-icon">{wt.bare ? '📦' : isMain ? '🏠' : '🌿'}</span>
+                            <div className="plugin-info">
+                              <span className="plugin-name">{wt.branch ?? (wt.detached ? '(detached HEAD)' : wt.bare ? '(bare)' : '(无分支)')}</span>
+                              <div className="plugin-meta">
+                                {wt.head && <span className="plugin-status muted">{wt.head.slice(0, 8)}</span>}
+                                {isMain && <span className="plugin-status ok">主工作树</span>}
+                                {wt.locked && <span className="plugin-status warn">已锁定</span>}
+                                <span className="plugin-source">{wt.path}</span>
+                              </div>
+                            </div>
+                            {!isMain && !wt.bare && (
+                              <button
+                                className="settings-btn danger plugin-action"
+                                type="button"
+                                disabled={worktreeBusy}
+                                onClick={() => void removeWorktree(wt.path)}
+                              >
+                                🗑 删除
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
               </>
             )}
           </div>
