@@ -75,6 +75,17 @@ export function AgentPanel() {
   const [input, setInput] = useState('');
   const [activeAgentTab, setActiveAgentTab] = useState<'chat' | 'plan' | 'context'>('chat');
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const modelPickerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const handleDocMouseDown = (e: MouseEvent) => {
+      if (modelPickerRef.current && !modelPickerRef.current.contains(e.target as Node)) {
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleDocMouseDown);
+    return () => document.removeEventListener('mousedown', handleDocMouseDown);
+  }, [modelMenuOpen]);
   const [modelSearch, setModelSearch] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRef[]>([]);
   const [previewAttachment, setPreviewAttachment] = useState<AttachmentRef | null>(null);
@@ -834,7 +845,7 @@ export function AgentPanel() {
               ))}
             </button>
           )}
-          <div className="agent-model-picker">
+          <div className="agent-model-picker" ref={modelPickerRef}>
             <span
               className="model-label clickable"
               style={{

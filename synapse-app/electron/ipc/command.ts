@@ -12,7 +12,8 @@ export function registerCommandHandlers(): void {
         return new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
             const isWin = process.platform === 'win32';
             const shell = isWin ? 'cmd.exe' : '/bin/sh';
-            const shellArgs = isWin ? ['/c', cmd] : ['-c', cmd];
+            // Windows: 先切到 UTF-8 码页 (65001)，否则 cmd 默认 GBK/CP936 输出会被 toString('utf8') 解码成乱码
+            const shellArgs = isWin ? ['/c', `chcp 65001>nul & ${cmd}`] : ['-c', cmd];
 
             let stdout = '';
             let stderr = '';
