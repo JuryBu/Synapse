@@ -31,7 +31,7 @@ import { openTab } from '@/store/slices/editorTabs';
 import type { RootState } from '@/store';
 import { rollbackFileDiff } from '@/services/fileRollback';
 import { describeCapabilities } from '@/services/modelCapabilities';
-import { getRecord, deleteRecord } from '@/services/recordStore';
+import { getRecord, clampRecord } from '@/services/recordStore';
 
 const MAX_IMAGE_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
@@ -336,24 +336,16 @@ export function AgentPanel() {
     agentLoopRef.current?.stop();
   }, []);
 
-  // Plan_4_M1 风险 2：编辑/重试/回溯会截断后续消息。若已生成的 record 覆盖到了
-  // 被截掉的轮次（record.lastUpdatedRound > 截断后剩余的用户轮次），其稳定前缀就
-  // 包含「已不存在的历史」，且水位线会高于实际消息数导致后续增量永久错位。
-  // 粗粒度兜底：这种情况直接删 record，让下个压缩点全量重建。record 是加速层，
-  // 删了至多多花一次生成，绝不阻塞主对话；失败也只 warn。
-  // （精细方案——把 lastUpdatedRound clamp 到新轮次并标记 contentMd 失效——见 Task_4 TODO。）
+  // Plan_4 M2-1：编辑/重试/回溯会截断后续消息。把 record 水位线 clamp 到保留范围（替代此前的整条删）：
+  // 覆盖区在保留范围内则不动；否则 clamp totalRounds/totalSteps/lastUpdatedRound，保住 M 之前已生成的摘要、
+  // 且保证后续增量压缩批次起点正确；clamp 后归零才删。record 是加速层，失败吞异常不阻塞主对话。
   const invalidateRecordForTruncation = useCallback((remainingMessages: any[]) => {
     const conversationId = conversation.id;
     if (!conversationId) return;
-    const remainingRounds = remainingMessages.filter((m: any) => m.role === 'user').length;
-    void (async () => {
-      try {
-        const record = await getRecord(conversationId);
-        if (record && record.lastUpdatedRound > remainingRounds) {
-          await deleteRecord(conversationId);
-        }
-      } catch { /* record 是加速层，失效兜底失败不影响主对话 */ }
-    })();
+    const keptRounds = remainingMessages.filter((m: any) => m.role === 'user').length;
+    // step 口径对齐 agentLoop：record.totalSteps 来自不含 tool 的 requestHistory
+    const keptSteps = remainingMessages.filter((m: any) => m.role !== 'tool').length;
+    void clampRecord(conversationId, keptRounds, keptSteps);
   }, [conversation.id]);
 
   // Edit user message → truncate after it → re-send

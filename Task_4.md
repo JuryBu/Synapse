@@ -86,3 +86,13 @@
   - ✅ **修复 memory_query 拆词检索**：`ipc/memory.ts` + `platform/index.ts` 两端改 query 拆词、每 term 对字段 LIKE/includes、term 间 OR 宽召回。真机 evaluate 复现验证：多关键词查 0→2 命中、单词 2 命中、不相关词仍 0 命中。
   - 🎉 **M1 上下文 harness 完成**：conversation(原文) + record(压缩摘要,端到端验证) + memory(AI 主动记忆,write/query 验证) 三层全齐 + 真机验证。Step 0-4 ✅。Step 5(run_command 加固) 为可选小项。
   - 遗留(无害)：memories 表有 2 条测试记忆（验证时 AI 写的，运行时数据不进 git）。
+- 2026-06-14 用户定方向（M1 完成后，继续推进 M2+M3，给了设计）：
+  - **M2 回溯（最重要）**：回溯到消息 M = 按 record 找到 M 所在批次 → 保留「M 前 N 条之前」的 record 内容作为新 record 上下文 + 这 N 条原始消息（从原始对话文件取）= 回溯后状态。复用 record 水位线机制。
+  - **M2 对话分支（worktree-A）**：同回溯思路（从某点复制对话+record+文件快照成新分支对话）。
+  - **M2 git worktree（worktree-B）**：正常实现（Synapse 管代码项目时给任务开 git worktree）。
+  - **M3 Multi-AI**：按 CC 式真子代理做，**保留原可自定义模式 MultiAI**（= CC workflow 形态 + 之前 agentOrchestrator 的自定义模式设计，两者结合）。
+  - 推进顺序：先 M2（回溯重点）→ M3。工作方式：用户在线手动盯 + 每 stage commit&push；需要时 ultracode（用户多次授权、不强制）。
+- 2026-06-14 M2 探索方案（子代理）：拆 M2-1 回溯 clamp / M2-2(可选)回溯重生成 / M2-3 对话分支 / M2-4 git worktree MVP / M2-5(大,待定)agent 在 worktree 执行 / M2-6 复制消息+mode per-conv。核心难点：record contentMd 无轮次结构、纯 clamp 数字回退不了正文 → 采方案②(只 clamp 水位,稳省)。
+- 2026-06-14 ✅ **M2-1 回溯 record 水位 clamp 完成**：`recordStore.clampRecord`（覆盖区内不动 / 否则 clamp totalRounds+totalSteps+lastUpdatedRound / 归零才删，contentMd 不动）；`AgentPanel.invalidateRecordForTruncation` 由「整条删」改 clampRecord，step 口径对齐 agentLoop（不含 tool）。编译 build+electron:build 过。
+  - 小本本：① handleEdit/handleRetry 的 record 操作仍 void 不 await + setTimeout(run,100)，竞态极少（本地 IPC<100ms）可后续改 await；② M2-1 真机验证（回溯后 record 水位 clamp）攒到 M2-3 后一起做（调小阈值场景）。
+  - ⏳ 待主人决策（M2-4/M2-5）：git worktree 在学习平台的用途/优先级 +「agent 任务在 worktree 执行」是否纳入（大工程，牵动所有 fs 工具）。

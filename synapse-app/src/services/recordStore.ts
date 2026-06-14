@@ -186,3 +186,41 @@ export async function deleteRecord(conversationId: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * 回溯/编辑/重试截断后，把 record 水位线 clamp 到保留范围（Plan_4 M2-1，方案②：只 clamp 水位，不动 contentMd）。
+ * - keptRounds：截断后剩余的用户轮次（只算 role==='user'）。
+ * - keptSteps：截断后剩余的消息条数（**不含 tool 角色**，对齐 agentLoop requestHistory 口径——
+ *   agentLoop 构造发往 API 的 messages 时过滤了 tool，record.totalSteps 即来自该口径）。
+ * 行为：record 覆盖区已在保留范围内（totalSteps<=keptSteps）→ 不动；否则把 totalRounds/totalSteps/
+ * lastUpdatedRound clamp 到保留范围，保证后续增量压缩批次起点正确；clamp 后水位归零 → 删除 record。
+ * 注意：contentMd 保持不变（它是 LLM 揉的整段、无轮次结构，纯数字 clamp 无法回退正文；但回溯后剩余消息
+ * 通常很少、不触发压缩即不喂 record，正文超前问题基本不出现；正文级回退见可选增强 M2-2）。失败吞异常返回 null。
+ */
+export async function clampRecord(
+  conversationId: string,
+  keptRounds: number,
+  keptSteps: number,
+): Promise<SynapseRecord | null> {
+  if (!conversationId) return null;
+  try {
+    const record = await getRecord(conversationId);
+    if (!record) return null;
+    if (record.totalSteps <= keptSteps) return record; // 覆盖区在保留范围内，无需动
+    const clampedRounds = Math.min(record.lastUpdatedRound, Math.max(0, keptRounds));
+    const clampedSteps = Math.min(record.totalSteps, Math.max(0, keptSteps));
+    if (clampedRounds <= 0 || clampedSteps <= 0) {
+      await deleteRecord(conversationId);
+      return null;
+    }
+    return await upsertRecord({
+      conversationId,
+      totalRounds: Math.min(record.totalRounds, Math.max(0, keptRounds)),
+      totalSteps: clampedSteps,
+      lastUpdatedRound: clampedRounds,
+    });
+  } catch (err) {
+    console.warn('[recordStore] clampRecord failed:', err);
+    return null;
+  }
+}
