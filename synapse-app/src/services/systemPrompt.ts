@@ -45,7 +45,7 @@ const PLAN_IDENTITY = `<identity>
 </identity>`;
 
 export const MAX_CONTEXT_TOKENS = 128000;
-export const COMPRESSION_THRESHOLD = 0.8; // 80% triggers compression
+export const COMPRESSION_THRESHOLD = 0.9; // 90% of model context window triggers compression
 
 export class SystemPromptBuilder {
   build(context: PromptContext = {}): string {
@@ -137,8 +137,10 @@ export function countConversationTokens(messages: Array<{ role: string; content:
 export function compressContext(
   messages: Array<{ role: string; content: string }>,
   maxTokens: number = MAX_CONTEXT_TOKENS,
+  realTokenCount?: number,
 ): { compressed: Array<{ role: string; content: string }>; wasCompressed: boolean } {
-  const currentTokens = countConversationTokens(messages);
+  // 优先使用 API 返回的真实 token 数；没有时回退到字符估算
+  const currentTokens = realTokenCount && realTokenCount > 0 ? realTokenCount : countConversationTokens(messages);
   const threshold = maxTokens * COMPRESSION_THRESHOLD;
 
   if (currentTokens <= threshold || messages.length < 6) {

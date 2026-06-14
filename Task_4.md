@@ -49,3 +49,6 @@
 
 ## 📝 Loop 进展日志（每轮/每阶段追加，便于跨重启续接）
 - 2026-06-14：Plan_4 / Task_4 建立。git 已固化清理并 push（c6b191e），真机验证整体可用。等待用户开 loop 后开始推进。
+- 2026-06-14 loop#1：Stage A 推进——✅终端中文乱码已修(`command.ts` chcp 65001, commit 47eea96)、✅模型选择器 click-outside 已修(`AgentPanel.tsx` ref+mousedown)、✅LibreOffice 路径验证通过(`soffice.exe` 在 `C:\Program Files\LibreOffice\program`，findLibreOffice 已支持)、✅默认 API(54861)运行时已配；✅编译通过(build 1.87s + electron:build)。M1 上下文 harness 探索完成，设计落盘 `Plan/Plan_4/Plan_4_M1_上下文harness设计.md`（6 步：Step0 token 接真实值 → Step1 record 层 → Step2 重构 agentLoop 消息组装 → Step3 UI 压缩点 → Step4 内置 memory_store → Step5 run_command 加固）。
+- ⏳ 待复验：终端中文真机验证（electron+vite 链路；上次 launch 遇 vite dev 掉线 chrome-error，需重启 vite 再验）。
+- ⚠️ 2026-06-14 期间一度遇「安全分类器临时不可用」，写/命令类工具被拦，已用 read-only 推进。下次 loop 从 **M1 Step 0**（systemPrompt.ts `compressContext` 调用接真实 contextWindow + 阈值 0.9 + agentLoop.ts:129）开始实现。

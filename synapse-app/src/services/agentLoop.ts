@@ -14,7 +14,7 @@ import {
 } from '../store/slices/conversation';
 import { setConnectionStatus } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
-import { promptBuilder, compressContext } from './systemPrompt';
+import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS } from './systemPrompt';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 
 export interface ToolDefinition {
@@ -126,8 +126,17 @@ export class AgentLoop {
       ? messages
       : [...messages, { role: 'user', content: userContentForApi }];
 
+    // 用当前模型真实 contextWindow + API 真实 token 数驱动压缩（回退写死上限/字符估算）
+    const agentSettingsState = (rootState as any).agentSettings;
+    const currentModelOption = agentSettingsState?.availableModels?.find((m: any) => m.id === agentSettingsState?.currentModel);
+    const modelContextWindow = currentModelOption?.capabilities?.contextWindow
+      || currentModelOption?.contextWindow
+      || MAX_CONTEXT_TOKENS;
+    const realTokenCount = (rootState as any).conversation?.tokenUsage?.totalTokens;
     const { compressed, wasCompressed } = compressContext(
       requestHistory.map(m => ({ role: m.role, content: chatContentToText(m.content) })),
+      modelContextWindow,
+      realTokenCount,
     );
 
     const apiHistory: ChatMessage[] = wasCompressed
