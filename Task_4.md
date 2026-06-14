@@ -70,3 +70,7 @@
   - 现状：record 层就绪 + AgentPanel `invalidateRecordForTruncation`（editMessage/retry/rollback 截断失效）；`recordGenerator.generateRecord` 尚无调用方（待 Step 2 接 agentLoop 压缩点）。
   - ⚠️ 协调提醒：本批期间 Task_4/AgentPanel 被外部改过（疑似用户并行或 Workflow 修复 agent）。**下次开工前先 `git status` + 看 `agentLoop.ts` 是否被并行改**，若用户在并行做 record 层需先协调，避免冲突。
   - 下一步 **M1 Step 2（核心，主线亲自）**：agentLoop 压缩点调 `generateRecord(本批切片+prior水位)`→`upsertRecord` 落盘→把 `record.contentMd` 拼进 apiMessages 稳定前缀（system+record+最近N条，hit cache）；失败回退字符截断。+ 终端中文真机复验。
+- 2026-06-14 loop#3：✅ **M1 Step 2 完成**——record 接入 agentLoop 喂 API（压缩时 generateRecord→upsertRecord→record.contentMd 作 system 前缀；失败回退字符截断），commit `2e2fd4b`，编译通过。真机确认应用加载/渲染正常（Step 2 未破坏对话）。
+  - ❌ **终端中文 chcp 65001 方案被真机证伪**：`help` 英文正常无乱码，但 `echo 你好世界中文测试` 输出仍乱码（◆◆□）。根因：chcp 65001 让 cmd 把 Node 按 GBK 传入的命令行参数当 UTF-8 解析，反而搞乱输入。**正确方向（下次实现+真机验证）**：去掉 chcp、`['/c', cmd]` 原样 + stdout/stderr 累积 Buffer 后 `new TextDecoder('gbk').decode()`（输入走 Node 默认 GBK、输出也 GBK 解码，两头一致）；`help` 退出码 1 一并查（`electron/ipc/command.ts`）。
+  - ⏳ record 压缩触发的真机验证待专项（短对话不触发压缩；需构造超长对话或临时调小 contextWindow/阈值）。
+  - 下一步：修终端编码(GBK 方案)+真机复验 → M1 Step3(UI 压缩点) / Step4(内置 memory_store)。
