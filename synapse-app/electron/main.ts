@@ -3,6 +3,7 @@ import * as path from 'path';
 import { initDatabase, closeDatabase } from './database';
 import { registerConfigHandlers } from './ipc/config';
 import { registerConversationHandlers } from './ipc/conversation';
+import { registerMemoryHandlers } from './ipc/memory';
 import { registerWorkspaceHandlers } from './ipc/workspace';
 import { registerFileHandlers } from './ipc/file';
 import { registerCommandHandlers } from './ipc/command';
@@ -97,6 +98,7 @@ app.whenReady().then(() => {
     initDatabase();
     registerConfigHandlers();
     registerConversationHandlers();
+    registerMemoryHandlers();
     registerWorkspaceHandlers();
     registerFileHandlers();
     registerWallpaperHandlers();

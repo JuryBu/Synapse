@@ -98,4 +98,13 @@ contextBridge.exposeInMainWorld('synapse', {
     saveRecord: (data: any) => ipcRenderer.invoke('record:upsert', data),
     deleteRecord: (conversationId: string) => ipcRenderer.invoke('record:delete', conversationId),
   },
+
+  // Memory（M1 上下文 harness：AI 主动记忆，内置 memory_write/memory_query 工具的后端）
+  memory: {
+    write: (data: any) => ipcRenderer.invoke('memory:write', data),
+    query: (opts?: any) => ipcRenderer.invoke('memory:query', opts),
+    get: (id: string) => ipcRenderer.invoke('memory:get', id),
+    list: (opts?: any) => ipcRenderer.invoke('memory:list', opts),
+    delete: (id: string) => ipcRenderer.invoke('memory:delete', id),
+  },
 });

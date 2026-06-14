@@ -351,6 +351,97 @@ toolRegistry.register({
   return `🎯 练习题生成请求\n主题: ${args.topic}\n数量: ${count}\n难度: ${args.difficulty || 'medium'}\n\n[AI 将基于课程上下文直接生成练习题，无需额外工具调用]`;
 }, 'learning', 'auto');
 
+// --- Memory Tools（M1 上下文 harness：Synapse 内置 AI 主动记忆）---
+// ⚠️ 这是 Synapse 内置记忆，存本地 SQLite（Web 模式存 localStorage），独立于用户环境里
+//    另一套外置 MCP `mcp__memory-store__*` 工具——两者数据互不相通，AI 应使用本工具沉淀
+//    与本应用相关的长期记忆（技术方案、踩坑、用户偏好等）。
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'memory_write',
+    description:
+      '写入一条长期记忆到 Synapse 内置记忆库（存本地 SQLite，Web 模式存 localStorage；'
+      + '独立于外置 MCP memory-store，数据不互通）。'
+      + '用于跨对话沉淀有价值的信息：技术方案、踩坑经验、用户偏好、项目背景等。'
+      + '记忆会在后续对话中可被 memory_query 检索召回。'
+      + 'searchSummary 要写好关键词/近义词/技术栈名，它比正文更影响检索命中率。',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '记忆标题（简短一句话概括，是检索主权重字段之一）' },
+        content: { type: 'string', description: '记忆正文（完整内容，可用 markdown）' },
+        tags: { type: 'string', description: '标签，多个用英文逗号分隔（可选），如 "react,vite,踩坑"' },
+        category: {
+          type: 'string',
+          description: '分类（可选，默认 general）',
+          enum: ['problem-solution', 'technical-note', 'conversation', 'general'],
+        },
+        searchSummary: { type: 'string', description: '检索摘要（可选）：罗列关键词、近义词、技术栈名，提升被检索到的概率' },
+        pinned: { type: 'string', description: '是否置顶高优记忆（可选），传 "true" 置顶，默认否' },
+      },
+      required: ['title', 'content'],
+    },
+  },
+}, async (args) => {
+  const { writeMemory } = await import('./memoryStore');
+  const tags = typeof args.tags === 'string'
+    ? args.tags.split(',').map((t: string) => t.trim()).filter(Boolean)
+    : (Array.isArray(args.tags) ? args.tags : []);
+  const pinned = args.pinned === true || String(args.pinned).toLowerCase() === 'true';
+  const saved = await writeMemory({
+    title: args.title,
+    content: args.content,
+    tags,
+    category: args.category,
+    searchSummary: args.searchSummary,
+    pinned,
+  });
+  if (!saved) return '⚠️ 记忆写入失败（记忆是辅助层，不影响当前对话继续进行）。';
+  const tagStr = saved.tags.length ? ` [${saved.tags.join(', ')}]` : '';
+  return `✅ 已记入 Synapse 记忆库 (id=${saved.id}, 分类=${saved.category}${saved.pinned ? ', 置顶' : ''})${tagStr}\n标题: ${saved.title}`;
+}, 'custom', 'auto');
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'memory_query',
+    description:
+      '从 Synapse 内置记忆库检索长期记忆（存本地 SQLite，Web 模式存 localStorage；'
+      + '独立于外置 MCP memory-store，数据不互通）。'
+      + '按关键词命中标题/正文/检索摘要/标签返回最相关的若干条，置顶记忆优先、近更新优先。'
+      + '开始新任务或需要回忆既往背景/方案/偏好时应主动调用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '检索关键词（可空，留空则返回最近更新的记忆）' },
+        category: {
+          type: 'string',
+          description: '按分类过滤（可选）',
+          enum: ['problem-solution', 'technical-note', 'conversation', 'general'],
+        },
+        limit: { type: 'number', description: '返回条数上限（可选，默认 10）' },
+      },
+      required: [],
+    },
+  },
+}, async (args) => {
+  const { queryMemory } = await import('./memoryStore');
+  const limit = Number(args.limit) > 0 ? Number(args.limit) : 10;
+  const results = await queryMemory(args.query, { category: args.category, limit });
+  if (!results.length) {
+    return args.query
+      ? `未在 Synapse 记忆库中找到与 "${args.query}" 相关的记忆。`
+      : 'Synapse 记忆库暂无记忆。';
+  }
+  const lines = results.map((m, i) => {
+    const tagStr = m.tags.length ? ` [${m.tags.join(', ')}]` : '';
+    const pin = m.pinned ? '📌 ' : '';
+    return `${i + 1}. ${pin}${m.title} (${m.category})${tagStr}\n   ${m.content.replace(/\s+/g, ' ').slice(0, 300)}`;
+  });
+  return `🧠 Synapse 记忆库命中 ${results.length} 条:\n\n${lines.join('\n\n')}`;
+}, 'custom', 'auto');
+
 // --- Web Tools ---
 
 toolRegistry.register({

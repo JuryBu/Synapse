@@ -99,6 +99,14 @@ export interface SynapseAPI {
     saveRecord?: (data: any) => Promise<boolean>;
     deleteRecord?: (conversationId: string) => Promise<boolean>;
   };
+  // Memory（M1 上下文 harness：AI 主动记忆，内置 memory_write/memory_query 工具的后端）
+  memory?: {
+    write: (data: any) => Promise<any | null>;
+    query: (opts?: any) => Promise<any[]>;
+    get: (id: string) => Promise<any | null>;
+    list: (opts?: any) => Promise<any[]>;
+    delete: (id: string) => Promise<boolean>;
+  };
   command: {
     exec: (cmd: string, cwd?: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
   };
@@ -320,6 +328,41 @@ function getWebMock(): SynapseAPI {
         return true;
       },
     },
+    memory: {
+      write: async (data: any) => {
+        if (!data?.id) return null;
+        const items = readWebMemories();
+        const idx = items.findIndex((item: any) => item.id === data.id);
+        const now = Math.floor(Date.now() / 1000);
+        const next = {
+          id: data.id,
+          title: data.title ?? '',
+          content: data.content ?? '',
+          tags: normalizeWebTags(data.tags),
+          category: (typeof data.category === 'string' && data.category.trim()) ? data.category.trim() : 'general',
+          searchSummary: data.searchSummary ?? '',
+          pinned: Boolean(data.pinned),
+          conversationId: data.conversationId || undefined,
+          // 更新时保留原 createdAt；秒级 Unix 时间戳，与 Electron SQLite 路径统一单位。
+          createdAt: idx >= 0 ? (items[idx].createdAt ?? data.createdAt ?? now) : (data.createdAt ?? now),
+          updatedAt: data.updatedAt ?? now,
+        };
+        if (idx >= 0) items[idx] = next; else items.unshift(next);
+        writeWebMemories(items);
+        return next;
+      },
+      query: async (opts?: any) => filterWebMemories(readWebMemories(), opts),
+      get: async (id: string) => readWebMemories().find((item: any) => item.id === id) ?? null,
+      list: async (opts?: any) => filterWebMemories(readWebMemories(), {
+        category: opts?.category,
+        pinnedOnly: opts?.pinnedOnly,
+        limit: Number(opts?.limit) > 0 ? Number(opts.limit) : 100,
+      }),
+      delete: async (id: string) => {
+        writeWebMemories(readWebMemories().filter((item: any) => item.id !== id));
+        return true;
+      },
+    },
     command: {
       exec: async (cmd) => ({ stdout: `[Web Mock] 命令不可用: ${cmd}`, stderr: '', exitCode: 1 }),
     },
@@ -364,6 +407,62 @@ function readWebRecord(conversationId: string): any | null {
 
 function writeWebRecord(conversationId: string, record: any): void {
   localStorage.setItem(webRecordKey(conversationId), JSON.stringify(record));
+}
+
+// ===== Memory（M1 上下文 harness：AI 主动记忆，按 synapse:memory:items 整存数组）=====
+
+const WEB_MEMORY_KEY = 'synapse:memory:items';
+
+function readWebMemories(): any[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WEB_MEMORY_KEY) || '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeWebMemories(items: any[]): void {
+  localStorage.setItem(WEB_MEMORY_KEY, JSON.stringify(items));
+}
+
+/**
+ * Web 端记忆过滤：对齐 Electron memory:query —— 关键词命中 title/content/searchSummary/tags，
+ * 叠加 category / pinnedOnly 过滤，按 pinned 优先、updatedAt 倒序，受 limit 约束。
+ *
+ * ⚠️ tags 命中口径与 Electron（electron/ipc/memory.ts buildMemoryFilters）有已知小差异：
+ *    此处先把 tags 解析成数组、用 \n join 再做 includes（不含 JSON 结构字符）；
+ *    Electron 端是对 tags_json 原始 JSON 串做 LIKE（含 [ ] " , 等）。常规标签查询两者一致，
+ *    仅 query 含 JSON 元字符时 Electron 可能多命中。tags 为次要信号，差异可接受，详见对端注释。
+ */
+function filterWebMemories(items: any[], opts?: any): any[] {
+  const q = String(opts?.query ?? '').trim().toLowerCase();
+  const category = String(opts?.category ?? '').trim();
+  const pinnedOnly = Boolean(opts?.pinnedOnly);
+  const limit = Number(opts?.limit) > 0 ? Math.min(Number(opts.limit), 200) : 50;
+  return items
+    .map(item => ({
+      ...item,
+      tags: normalizeWebTags(item.tags),
+      pinned: Boolean(item.pinned),
+      category: item.category || 'general',
+    }))
+    .filter(item => {
+      if (category && item.category !== category) return false;
+      if (pinnedOnly && !item.pinned) return false;
+      if (q) {
+        const text = [item.title, item.content, item.searchSummary, ...(item.tags ?? [])]
+          .join('\n')
+          .toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+    })
+    .slice(0, limit);
 }
 
 function normalizeWebTags(tags: unknown): string[] {

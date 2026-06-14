@@ -79,6 +79,22 @@ export function initDatabase(): Database.Database {
       FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
     );
 
+    -- Memory 表（M1 上下文 harness：AI 主动记忆，模型通过内置工具 memory_write/memory_query 维护）
+    -- 跨对话长期记忆条目，与按对话主键的 records 表正交；不随对话删除级联（记忆可跨对话存活）。
+    -- conversation_id 仅记录来源，故意不设外键，避免对话删除时连带清空记忆。
+    CREATE TABLE IF NOT EXISTS memories (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL DEFAULT '',
+      tags_json TEXT,
+      category TEXT NOT NULL DEFAULT 'general',
+      search_summary TEXT,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      conversation_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
     -- Synopsis 缓存表
     CREATE TABLE IF NOT EXISTS synopsis_cache (
       id TEXT PRIMARY KEY,
@@ -109,6 +125,9 @@ export function initDatabase(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_conversations_workspace ON conversations(workspace_id);
     CREATE INDEX IF NOT EXISTS idx_synopsis_file ON synopsis_cache(file_path);
     CREATE INDEX IF NOT EXISTS idx_records_updated ON records(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories(pinned);
+    CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
   `);
 
     ensureColumn(db, 'conversations', 'schema_version', 'INTEGER DEFAULT 1');

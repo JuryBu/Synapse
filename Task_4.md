@@ -80,3 +80,6 @@
   - ✅ **record 端到端真机验证成功**（子代理 web-fetcher + 本地 API gpt-5.5）：临时阈值 200，第 2 轮对话触发压缩；UI 出现「⌁ 以上 2 条已压缩为 record 摘要 ⌁」分隔线；SQLite `records` 表实锤 1 条（conversation_id=autosave-current, total_steps=2, content_md=311 字 AI 生成结构化摘要、准确无臆造）；本地 API 流式回复正常。【生成→落盘 SQLite→前端读回→UI 渲染】整条链路通。临时阈值已改回正式逻辑（git 无净改动）。
   - 遗留(无害)：`~/.synapse/synapse.db` 留了 1 条 autosave-current record + 2 轮验证对话（运行时数据不进 git，下次真用会更新）。
   - ✅ **M1 conversation+record 两层端到端确认可用**。Step0/1/2/3 全部 ✅+真机验证。下一步 **M1 Step4 内置 memory_store**（ultracode）。
+- 2026-06-14 ✅ **M1 Step4 内置 memory_store 完成**（ultracode workflow，5 agents，406k tok）：新建 `memoryStore.ts` + `ipc/memory.ts`；DB `memories` 表（不级联删除、跨对话存活）；platform Web mock；`toolRegistry` 注册 **memory_write/memory_query** AI 工具（auto 审批）；`systemPrompt` planning guidelines 加第 8 条「主动 memory_query/write」指引。秒级时间戳、LIKE 防注入、pinned 优先。主线独立 build(9.8s)+electron:build 通过。
+  - memory 小本本（low，非阻塞）：① `memory get/list/delete` 三层暂无消费者（无 Memory 管理 UI），待接 UI 或删；② 内置 memory_write/query 与外置 MCP 同名，建议未来加 `synapse_` 前缀消歧（当前不冲突，外置 MCP 工具不进 toolRegistry）；③ memory_write 走 auto 审批（有意，记忆低风险）。
+  - ⏳ 下一步：真机验证 AI 能否调 memory 工具（子代理 web-fetcher + 本地 API）→ M1 收尾。
