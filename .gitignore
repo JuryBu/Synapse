@@ -1,0 +1,13 @@
+synapse-app/node_modules/
+synapse-app/dist/
+synapse-app/dist-electron/
+.gemini/
+*.log
+
+# 测试/验证临时产物（Codex 自动化残留，勿提交）
+.playwright-mcp/
+synapse-app/.tmp-*/
+
+# 构建产物与测试材料（含密钥，勿提交）
+synapse-app/release/
+synapse-app/测试用材料/

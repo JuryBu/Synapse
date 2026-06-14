@@ -1,0 +1,17 @@
+**主要问题**
+1. 工作区到编辑器的主链路没打通，用户实际上无法打开真实文件。文件树和 Quick Open 都读的是固定 demo 树，[fileSystem.ts:125](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/services/fileSystem.ts)、[Sidebar.tsx:21](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/components/layout/Sidebar.tsx)、[QuickOpen.tsx:20](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/components/ui/QuickOpen.tsx)；点击文件和快速打开都只 `console.log`，[Sidebar.tsx:38](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/components/layout/Sidebar.tsx)、[AppLayout.tsx:121](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/components/layout/AppLayout.tsx)；而 `openTab` 全仓没有消费点，[editorTabs.ts:33](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/store/slices/editorTabs.ts)。
+
+2. Electron 桌面端交付链路仍是断的。生产环境加载路径写成了 `../dist/index.html`，[main.ts:29](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/electron/main.ts)，编译后会指向 `dist-electron/dist/index.html` 而不是实际的 `dist/index.html`；同时打包配置引用了不存在的图标文件，[package.json:30](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/package.json)。
+
+3. IPC/MCP 协议已经自相矛盾。`mcpManager` 调用了不存在的 `window.synapse.mcp.start/stop`，[mcpManager.ts:76](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/services/mcpManager.ts)、[mcpManager.ts:98](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/services/mcpManager.ts)；而 preload 和平台类型里根本没这两个方法，[preload.ts:27](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/electron/preload.ts)、[index.ts:31](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/platform/index.ts)。主进程也只实现了极少数 handler，[main.ts:55](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/electron/main.ts)。这部分已经能被 `tsc` 直接打爆。
+
+4. API Key 和模型调用的安全边界画错了。密钥进了 Redux，[settings.ts:39](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/store/slices/settings.ts)；Web fallback 还会落到 `localStorage`，[index.ts:104](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/platform/index.ts)；模型请求由渲染进程直接发出，[aiClient.ts:80](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/services/aiClient.ts)；同时 Electron 关闭了 `sandbox`，[main.ts:21](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/electron/main.ts)。
+
+5. 会话历史会丢数据，也会重复归档。同一段新对话没有稳定 `id`，保存历史时每次都可能生成新的 `conv-${Date.now()}`，[ConversationList.tsx:22](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/components/chat/ConversationList.tsx)；顶部“新建对话”按钮直接清空当前对话，不走保存流程，[AgentPanel.tsx:117](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/components/layout/AgentPanel.tsx)。
+
+6. 工具调用链路和 UI 展示都不完整。模型若返回“只有 tool_calls 没有文本”，当前不会先写 assistant/tool_calls 消息，[agentLoop.ts:129](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/services/agentLoop.ts)；即便消息里带了 `toolCalls`，渲染时也没传给 `MessageBubble`，[AgentPanel.tsx:185](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/components/layout/AgentPanel.tsx)。真实工具模式下协议和可观测性都会出问题。
+
+**验证结果**
+`npm run build` 当前失败，首个阻断点是 [MessageBubble.tsx:28](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/src/components/chat/MessageBubble.tsx) 的未使用 `ref`。`npx tsc -p tsconfig.app.json --noEmit --pretty false` 还会报 `mcp.start/stop` 不存在。`npx eslint src electron --ext .ts,.tsx` 返回 67 个问题。
+
+完整报告已保存到 [报告_Synapse深度Review_Codex.md](/C:/Users/Stardust/Desktop/VC工具包/Synapse/synapse-app/报告_Synapse深度Review_Codex.md)。如果你要我继续，我建议下一步直接按这 6 条做一轮 P0 修复。

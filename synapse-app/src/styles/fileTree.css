@@ -1,0 +1,140 @@
+/* ============================================
+   FileTree & Context Menu Styles
+   ============================================ */
+
+.file-tree {
+  position: relative;
+  min-height: 100%;
+  font-size: 13px;
+  user-select: none;
+}
+
+.file-tree-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background var(--syn-transition-fast);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.file-tree-item:hover {
+  background: var(--syn-bg-hover);
+}
+
+.file-tree-item.is-dir .tree-name {
+  font-weight: 500;
+}
+
+.tree-chevron {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--syn-text-muted);
+  width: 14px;
+}
+
+.tree-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.tree-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--syn-text-primary);
+}
+
+.tree-size {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--syn-text-muted);
+  margin-left: 8px;
+}
+
+.tree-children {
+  /* Indent handled by paddingLeft in JS component */
+  display: contents;
+}
+
+/* Context Menu */
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 200px;
+  width: max-content;
+  padding: 4px;
+  border-radius: 8px;
+  animation: contextMenuIn 120ms ease-out;
+}
+
+@keyframes contextMenuIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--syn-text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  text-align: left;
+  white-space: nowrap;
+  transition: background var(--syn-transition-fast);
+}
+
+.context-menu-item:hover {
+  background: var(--syn-bg-hover);
+}
+
+.context-menu-item.danger {
+  color: var(--syn-error);
+}
+
+.context-menu-item.danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.context-menu-divider,
+.context-menu-separator {
+  height: 1px;
+  background: var(--syn-border);
+  margin: 4px 8px;
+}
+
+/* Drag & Drop Zone */
+.drop-zone {
+  border: 2px dashed var(--syn-border);
+  border-radius: 8px;
+  padding: 24px;
+  text-align: center;
+  transition: all var(--syn-transition-fast);
+}
+
+.drop-zone.drag-over {
+  border-color: var(--syn-primary);
+  background: rgba(124, 58, 237, 0.05);
+}
+
+.drop-zone-text {
+  color: var(--syn-text-muted);
+  font-size: 12px;
+}

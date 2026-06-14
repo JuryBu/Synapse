@@ -1,0 +1,178 @@
+import { FolderTree, Brain, Search, Settings, FolderOpen, MessageSquare } from 'lucide-react';
+import { FileTree } from '@/components/sidebar/FileTree';
+import { SettingsPanel } from '@/components/settings/SettingsPanel';
+import { ConversationList } from '@/components/chat/ConversationList';
+import { SynopsisPanel } from '@/components/sidebar/SynopsisPanel';
+import { fileSystem, type FileNode } from '@/services/fileSystem';
+import { useAppSelector, useAppDispatch } from '@/store/hooks';
+import { clearWorkspace, openWorkspace } from '@/store/slices/workspace';
+import { openTab, resetTabsToWelcome } from '@/store/slices/editorTabs';
+import { addNotification } from '@/store/slices/notifications';
+import { resolveUnsavedTabs } from '@/services/unsavedChanges';
+import { resolveEditorType } from '@/services/editorFileTypes';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import type { RootState } from '@/store';
+import { isElectron } from '@platform/index';
+
+interface SidebarProps {
+  activeView: string;
+}
+
+export function Sidebar({ activeView }: SidebarProps) {
+  const dispatch = useAppDispatch();
+  const workspace = useAppSelector((s: RootState) => s.workspace) as any;
+  const tabs = useAppSelector((s: RootState) => s.editorTabs.tabs);
+  const [fileTree, setFileTree] = useState<FileNode | null>(null);
+  const demoWorkspaceLoadedRef = useRef(false);
+  const workspaceClearedRef = useRef(false);
+
+  const refreshTree = useCallback(() => {
+    if (workspaceClearedRef.current) {
+      setFileTree(null);
+      return;
+    }
+    fileSystem.getWorkspaceTree().then(setFileTree);
+  }, []);
+
+  const handleOpenWorkspace = useCallback(async () => {
+    try {
+      const ok = await resolveUnsavedTabs(tabs, '打开工作区');
+      if (!ok) return;
+      if (isElectron && window.synapse?.workspace) {
+        const ws = await window.synapse.workspace.open();
+        if (!ws) return;
+        workspaceClearedRef.current = false;
+        fileSystem.openExternalWorkspace({ ...ws, lastOpened: Date.now() });
+        dispatch(resetTabsToWelcome());
+        dispatch(openWorkspace({ path: ws.path, name: ws.name }));
+        dispatch(addNotification({ type: 'success', title: '打开工作区', message: ws.name }));
+        return;
+      }
+
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      (input as any).webkitdirectory = true;
+      input.onchange = async (e: Event) => {
+        try {
+          const target = e.target as HTMLInputElement | null;
+          const files = Array.from(target?.files || []) as File[];
+          if (files.length === 0) return;
+          const firstRelative = (files[0] as any).webkitRelativePath as string | undefined;
+          const name = firstRelative?.split('/')[0] || '导入工作区';
+          workspaceClearedRef.current = false;
+          const ws = fileSystem.createWorkspaceFromFiles(name, files);
+          dispatch(resetTabsToWelcome());
+          dispatch(openWorkspace({ path: ws.path, name: ws.name }));
+          dispatch(addNotification({ type: 'success', title: '打开工作区', message: `已导入 ${files.length} 个文件` }));
+        } catch (err: any) {
+          dispatch(addNotification({ type: 'error', title: '打开工作区失败', message: err?.message || '无法导入目录' }));
+        }
+      };
+      input.click();
+    } catch (err: any) {
+      dispatch(addNotification({ type: 'error', title: '打开工作区失败', message: err?.message || '无法打开工作区' }));
+    }
+  }, [dispatch, tabs]);
+
+  const handleClearWorkspace = useCallback(async () => {
+    const ok = await resolveUnsavedTabs(tabs, '清空工作区');
+    if (!ok) return;
+    workspaceClearedRef.current = true;
+    fileSystem.clearLoadedWorkspace();
+    demoWorkspaceLoadedRef.current = true;
+    dispatch(clearWorkspace());
+    dispatch(resetTabsToWelcome());
+    setFileTree(null);
+    dispatch(addNotification({
+      type: 'info',
+      title: '已清空工作区',
+      message: '仅卸载当前加载内容，未删除磁盘文件',
+    }));
+  }, [dispatch, tabs]);
+
+  // Load demo workspace on mount
+  useEffect(() => {
+    if (activeView === 'explorer' && !workspace.currentPath && !demoWorkspaceLoadedRef.current) {
+      demoWorkspaceLoadedRef.current = true;
+      fileSystem.getWorkspaceTree().then(tree => {
+        setFileTree(tree);
+        dispatch(openWorkspace({ path: '/workspace', name: '示例工作区' }));
+      });
+    }
+  }, [activeView, workspace.currentPath, dispatch]);
+
+  // Also load tree when workspace changes
+  useEffect(() => {
+    if (workspace.currentPath) {
+      workspaceClearedRef.current = false;
+      refreshTree();
+    }
+  }, [workspace.currentPath, refreshTree]);
+
+  useEffect(() => {
+    const unsub = fileSystem.subscribe(refreshTree);
+    return () => { unsub(); };
+  }, [refreshTree]);
+
+  const handleFileClick = useCallback((node: FileNode) => {
+    // Dispatch openTab to open the file in the editor
+    const ext = (node.extension || '').replace(/^\./, ''); // 统一去掉点号
+    dispatch(openTab({
+      id: `tab-${Date.now()}`,
+      filePath: node.path,
+      fileName: node.name,
+      isDirty: false,
+      isPreview: true,
+      type: resolveEditorType(ext),
+    }));
+  }, [dispatch]);
+
+  const titles: Record<string, { icon: any; label: string }> = {
+    explorer: { icon: FolderTree, label: '课件管理' },
+    synopsis: { icon: Brain, label: '知识概要' },
+    search: { icon: Search, label: '搜索' },
+    history: { icon: MessageSquare, label: '对话历史' },
+    settings: { icon: Settings, label: '设置' },
+  };
+
+  const current = titles[activeView] || titles.explorer;
+  const Icon = current.icon;
+
+  return (
+    <div className="sidebar glass-panel">
+      <div className="sidebar-header">
+        <Icon size={16} />
+        <span className="sidebar-title">{current.label}</span>
+      </div>
+
+      <div className="sidebar-content">
+        {activeView === 'explorer' && fileTree ? (
+          <FileTree
+            root={fileTree}
+            onFileClick={handleFileClick}
+            onRefresh={refreshTree}
+            onOpenWorkspace={handleOpenWorkspace}
+            onClearWorkspace={handleClearWorkspace}
+          />
+        ) : activeView === 'explorer' ? (
+          <div className="sidebar-placeholder">
+            <FolderOpen size={32} strokeWidth={1} style={{ opacity: 0.3 }} />
+            <p>打开工作区以查看课件</p>
+          </div>
+        ) : activeView === 'synopsis' ? (
+          <SynopsisPanel />
+        ) : activeView === 'search' ? (
+          <div className="sidebar-placeholder">
+            <Search size={32} strokeWidth={1} style={{ opacity: 0.3 }} />
+            <p>搜索文件和内容</p>
+          </div>
+        ) : activeView === 'settings' ? (
+          <SettingsPanel />
+        ) : activeView === 'history' ? (
+          <ConversationList />
+        ) : null}
+      </div>
+    </div>
+  );
+}
