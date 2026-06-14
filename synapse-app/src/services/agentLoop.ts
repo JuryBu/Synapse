@@ -15,6 +15,8 @@ import {
 import { setConnectionStatus } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
 import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS } from './systemPrompt';
+import { getRecord, upsertRecord } from './recordStore';
+import { generateRecord } from './recordGenerator';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 
 export interface ToolDefinition {
@@ -139,20 +141,61 @@ export class AgentLoop {
       realTokenCount,
     );
 
-    const apiHistory: ChatMessage[] = wasCompressed
-      ? [
-        compressed[0] as ChatMessage,
-        ...requestHistory.slice(-(compressed.length - 1)),
-      ]
-      : requestHistory;
-
+    // M1 Step2: 压缩时优先用 record（结构化摘要）作稳定前缀以命中 prompt cache；
+    // 无对话 id / record 生成失败时回退到 compressContext 的字符截断。
+    let apiHistory: ChatMessage[];
     if (wasCompressed) {
+      const keepCount = compressed.length - 1; // compressContext 保留的最近原文条数
+      const conversationId = (rootState as any).conversation?.id as string | null;
+      let recordMd: string | null = null;
+      if (conversationId) {
+        try {
+          const existingRecord = await getRecord(conversationId);
+          recordMd = existingRecord?.contentMd ?? null;
+          const batchEnd = Math.max(0, requestHistory.length - keepCount);
+          const batchStart = Math.min(existingRecord?.totalSteps ?? 0, batchEnd);
+          const batchSlice = requestHistory.slice(batchStart, batchEnd);
+          if (batchSlice.length > 0) {
+            const recordResult = await generateRecord({
+              conversationId,
+              messages: batchSlice.map(m => ({
+                role: m.role as 'user' | 'assistant' | 'system' | 'tool',
+                content: chatContentToText(m.content),
+              })),
+              existingRecordMd: existingRecord?.contentMd ?? null,
+              priorRounds: existingRecord?.totalRounds ?? 0,
+              priorSteps: existingRecord?.totalSteps ?? 0,
+              priorTimeSpan: existingRecord?.timeSpan ?? null,
+              workspaceName: workspaceName || undefined,
+            });
+            if (recordResult) {
+              await upsertRecord({
+                conversationId,
+                contentMd: recordResult.contentMd,
+                totalRounds: recordResult.totalRounds,
+                totalSteps: recordResult.totalSteps,
+                phases: recordResult.phases,
+                lastUpdatedRound: recordResult.totalRounds,
+                timeSpan: recordResult.timeSpan,
+              });
+              recordMd = recordResult.contentMd;
+            }
+          }
+        } catch (err) {
+          console.warn('[agentLoop] record 压缩失败，回退字符截断:', err);
+        }
+      }
+      apiHistory = recordMd
+        ? [{ role: 'system', content: `[对话历史摘要]\n\n${recordMd}` } as ChatMessage, ...requestHistory.slice(-keepCount)]
+        : [compressed[0] as ChatMessage, ...requestHistory.slice(-(compressed.length - 1))];
       store.dispatch(addNotification({
         type: 'info',
         title: '上下文压缩',
-        message: '对话历史已压缩以保持性能',
+        message: recordMd ? '历史已压缩为 record 摘要' : '对话历史已压缩以保持性能',
         duration: 3000,
       }));
+    } else {
+      apiHistory = requestHistory;
     }
 
     // Prepend system prompt to compressed messages

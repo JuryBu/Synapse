@@ -66,3 +66,7 @@
 - ⏳ 待复验：终端中文真机验证（electron+vite 链路；上次 launch 遇 vite dev 掉线 chrome-error，需重启 vite 再验）。
 - ⚠️ 2026-06-14 期间一度遇「安全分类器临时不可用」，写/命令类工具被拦，已用 read-only 推进。
 - 2026-06-14 loop#1（续）：✅ **M1 Step 0 完成**——`compressContext` 接真实 token（API `tokenUsage.totalTokens` 优先、回退字符估算）；阈值 0.8→0.9；`agentLoop.ts` 从 `availableModels` 取当前模型 `capabilities.contextWindow` 传入，替代写死 128k；编译通过(1.44s)。下次从 **M1 Step 1（record 层：recordStore + recordGenerator + DB `records` 表）** 开始；⏳ 终端中文真机复验仍待做（需重启 vite + electron）。
+- 2026-06-14 loop#2（ultracode）：✅ **M1 Step 1 完成**——用 Workflow（1实现+3对抗审查+1修复，5 agents）产出 record 层基础设施 + 截断失效接线，commit `3da7673`，修复 3 审查的 7 个 high/med 问题（见 task #6-#12）。主线独立编译验证 build+electron:build+lint 全通过。
+  - 现状：record 层就绪 + AgentPanel `invalidateRecordForTruncation`（editMessage/retry/rollback 截断失效）；`recordGenerator.generateRecord` 尚无调用方（待 Step 2 接 agentLoop 压缩点）。
+  - ⚠️ 协调提醒：本批期间 Task_4/AgentPanel 被外部改过（疑似用户并行或 Workflow 修复 agent）。**下次开工前先 `git status` + 看 `agentLoop.ts` 是否被并行改**，若用户在并行做 record 层需先协调，避免冲突。
+  - 下一步 **M1 Step 2（核心，主线亲自）**：agentLoop 压缩点调 `generateRecord(本批切片+prior水位)`→`upsertRecord` 落盘→把 `record.contentMd` 拼进 apiMessages 稳定前缀（system+record+最近N条，hit cache）；失败回退字符截断。+ 终端中文真机复验。
