@@ -17,7 +17,7 @@ import {
 } from '@/store/slices/agentSettings';
 import { toggleAgentPanel } from '@/store/slices/layout';
 import { MessageBubble } from '@/components/chat/MessageBubble';
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { toolRegistry } from '@/services/toolRegistry';
@@ -88,6 +88,17 @@ export function AgentPanel() {
     return () => document.removeEventListener('mousedown', handleDocMouseDown);
   }, [modelMenuOpen]);
   const [modelSearch, setModelSearch] = useState('');
+  // M1 Step3: 读取当前对话 record 覆盖到的消息条数，用于在消息流标出「压缩点」分隔线（展示仍完整）
+  const conversationId = conversation.id as string | null;
+  const [recordCoverageSteps, setRecordCoverageSteps] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    if (!conversationId) { setRecordCoverageSteps(0); return; }
+    void getRecord(conversationId).then(rec => {
+      if (!cancelled) setRecordCoverageSteps(rec?.totalSteps ?? 0);
+    });
+    return () => { cancelled = true; };
+  }, [conversationId, messages.length]);
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRef[]>([]);
   const [previewAttachment, setPreviewAttachment] = useState<AttachmentRef | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -655,9 +666,17 @@ export function AgentPanel() {
               </div>
             ) : (
               <>
-                {messages.map((msg: any) => (
+                {messages.map((msg: any, idx: number) => (
+                  <Fragment key={msg.id}>
+                    {recordCoverageSteps > 0 && idx === recordCoverageSteps && (
+                      <div
+                        style={{ textAlign: 'center', fontSize: 11, color: 'var(--syn-text-muted)', padding: '6px 12px', margin: '6px 0', borderTop: '1px dashed rgba(255,255,255,0.12)', opacity: 0.75 }}
+                        title="此线以上的历史已压缩为 record 摘要；发送给 AI 时用摘要代替原文，这里仍显示完整对话"
+                      >
+                        ⌁ 以上 {recordCoverageSteps} 条已压缩为 record 摘要，AI 看摘要 + 最近对话 ⌁
+                      </div>
+                    )}
                   <MessageBubble
-                    key={msg.id}
                     id={msg.id}
                     role={msg.role}
                     content={msg.content}
@@ -681,6 +700,7 @@ export function AgentPanel() {
                     onRetry={handleRetry}
                     onDelete={handleDelete}
                   />
+                  </Fragment>
                 ))}
               </>
             )}

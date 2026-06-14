@@ -74,3 +74,7 @@
   - ❌ **终端中文 chcp 65001 方案被真机证伪**：`help` 英文正常无乱码，但 `echo 你好世界中文测试` 输出仍乱码（◆◆□）。根因：chcp 65001 让 cmd 把 Node 按 GBK 传入的命令行参数当 UTF-8 解析，反而搞乱输入。**正确方向（下次实现+真机验证）**：去掉 chcp、`['/c', cmd]` 原样 + stdout/stderr 累积 Buffer 后 `new TextDecoder('gbk').decode()`（输入走 Node 默认 GBK、输出也 GBK 解码，两头一致）；`help` 退出码 1 一并查（`electron/ipc/command.ts`）。
   - ⏳ record 压缩触发的真机验证待专项（短对话不触发压缩；需构造超长对话或临时调小 contextWindow/阈值）。
   - 下一步：修终端编码(GBK 方案)+真机复验 → M1 Step3(UI 压缩点) / Step4(内置 memory_store)。
+- 2026-06-14（用户醒来 → 中断 loop，转**手动盯 + 每 stage commit&push**）：loop 期间 5 commit 已 push（ce080eb），GitHub 同步。
+  - ✅ **终端中文 GBK 方案修复成功**：`command.ts` 去 chcp、`['/c', cmd]` + stdout/stderr 累积 Buffer 后 `TextDecoder('gbk')` 解码。真机 `command.exec('echo 你好世界中文测试')` → stdout 中文正常 + exitCode 0。commit `ce080eb`。
+  - ✅ **M1 Step3 UI 压缩点完成**：`AgentPanel` 读 `record.totalSteps`，消息流第 N 条前插分隔线「以上已压缩为 record 摘要」，展示仍完整。编译通过。
+  - ⏳ 下一步：record 端到端真机验证（临时调小阈值触发压缩，看 record 生成+落盘+UI 分隔线）→ M1 Step4 内置 memory_store。
