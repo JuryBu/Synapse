@@ -94,6 +94,10 @@ export interface SynapseAPI {
     replaceMessages: (conversationId: string, messages: any[]) => Promise<boolean>;
     listMessages: (conversationId: string) => Promise<any[]>;
     search: (query: string, opts?: any) => Promise<any[]>;
+    // Record（M1 上下文 harness 过程日志）
+    getRecord?: (conversationId: string) => Promise<any | null>;
+    saveRecord?: (data: any) => Promise<boolean>;
+    deleteRecord?: (conversationId: string) => Promise<boolean>;
   };
   command: {
     exec: (cmd: string, cwd?: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
@@ -295,6 +299,26 @@ function getWebMock(): SynapseAPI {
         });
         return filterWebConversationSummaries(matched, opts);
       },
+      getRecord: async (conversationId: string) => readWebRecord(conversationId),
+      saveRecord: async (data: any) => {
+        if (!data?.conversationId) return false;
+        writeWebRecord(data.conversationId, {
+          conversationId: data.conversationId,
+          contentMd: data.contentMd ?? '',
+          totalRounds: data.totalRounds ?? 0,
+          totalSteps: data.totalSteps ?? 0,
+          phases: data.phases ?? 0,
+          lastUpdatedRound: data.lastUpdatedRound ?? 0,
+          timeSpan: data.timeSpan ?? '',
+          // 秒级 Unix 时间戳，与 Electron SQLite 路径及全库其它表统一单位。
+          updatedAt: data.updatedAt ?? Math.floor(Date.now() / 1000),
+        });
+        return true;
+      },
+      deleteRecord: async (conversationId: string) => {
+        localStorage.removeItem(webRecordKey(conversationId));
+        return true;
+      },
     },
     command: {
       exec: async (cmd) => ({ stdout: `[Web Mock] 命令不可用: ${cmd}`, stderr: '', exitCode: 1 }),
@@ -320,6 +344,26 @@ function readWebConversationMessages(): Record<string, any[]> {
   } catch {
     return {};
   }
+}
+
+// ===== Record（M1 上下文 harness 过程日志，按 synapse:record:<conversationId> 分键存储）=====
+
+function webRecordKey(conversationId: string): string {
+  return `synapse:record:${conversationId}`;
+}
+
+function readWebRecord(conversationId: string): any | null {
+  if (!conversationId) return null;
+  try {
+    const raw = localStorage.getItem(webRecordKey(conversationId));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeWebRecord(conversationId: string, record: any): void {
+  localStorage.setItem(webRecordKey(conversationId), JSON.stringify(record));
 }
 
 function normalizeWebTags(tags: unknown): string[] {

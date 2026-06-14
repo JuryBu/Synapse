@@ -57,6 +57,21 @@ function buildConversationFilters(opts?: { archived?: 'all' | 'active' | 'archiv
     return { where, values };
 }
 
+function mapRecord(row: any) {
+    if (!row) return null;
+    const phases = fromJson<number>(row.phases_json);
+    return {
+        conversationId: row.conversation_id,
+        contentMd: row.content_md ?? '',
+        totalRounds: row.total_rounds ?? 0,
+        totalSteps: row.total_steps ?? 0,
+        phases: typeof phases === 'number' ? phases : 0,
+        lastUpdatedRound: row.last_updated_round ?? 0,
+        timeSpan: row.time_span ?? '',
+        updatedAt: row.updated_at,
+    };
+}
+
 function mapMessage(row: any) {
     if (!row) return null;
     return {
@@ -331,5 +346,54 @@ export function registerConversationHandlers(): void {
              ORDER BY c.updated_at DESC
              LIMIT ?`,
         ).all(like, like, like, like, ...filters.values, limit) as any[]).map(mapConversation);
+    });
+
+    // ===== Record（M1 上下文 harness 过程日志）=====
+
+    // 读取某对话的 record
+    ipcMain.handle('record:get', (_e, conversationId: string) => {
+        if (!conversationId) return null;
+        return mapRecord(db.prepare('SELECT * FROM records WHERE conversation_id = ?').get(conversationId));
+    });
+
+    // 写入 / 覆盖 record（upsert 整条，调用方负责合并）
+    ipcMain.handle('record:upsert', (_e, data: {
+        conversationId: string; contentMd?: string; totalRounds?: number; totalSteps?: number;
+        phases?: number; lastUpdatedRound?: number; timeSpan?: string; updatedAt?: number;
+    }) => {
+        if (!data?.conversationId) return false;
+        db.prepare(
+            `INSERT INTO records (
+              conversation_id, content_md, total_rounds, total_steps,
+              phases_json, last_updated_round, time_span, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+              content_md = excluded.content_md,
+              total_rounds = excluded.total_rounds,
+              total_steps = excluded.total_steps,
+              phases_json = excluded.phases_json,
+              last_updated_round = excluded.last_updated_round,
+              time_span = excluded.time_span,
+              updated_at = excluded.updated_at`,
+        ).run(
+            data.conversationId,
+            data.contentMd ?? '',
+            data.totalRounds ?? 0,
+            data.totalSteps ?? 0,
+            toJson(data.phases ?? 0),
+            data.lastUpdatedRound ?? 0,
+            data.timeSpan ?? null,
+            // 全库时间戳统一为「秒」(unixepoch)，与 conversations/messages 表一致；
+            // 回退也用秒，避免 idx_records_updated 与其它表跨表比较差 1000 倍。
+            data.updatedAt ?? Math.floor(Date.now() / 1000),
+        );
+        return true;
+    });
+
+    // 删除某对话的 record（对话删除时已由外键级联，这里供显式失效用）
+    ipcMain.handle('record:delete', (_e, conversationId: string) => {
+        if (!conversationId) return false;
+        db.prepare('DELETE FROM records WHERE conversation_id = ?').run(conversationId);
+        return true;
     });
 }

@@ -93,5 +93,9 @@ contextBridge.exposeInMainWorld('synapse', {
       ipcRenderer.invoke('message:replaceConversation', conversationId, messages),
     listMessages: (conversationId: string) => ipcRenderer.invoke('message:list', conversationId),
     search: (query: string, opts?: any) => ipcRenderer.invoke('conversation:search', query, opts),
+    // Record（M1 上下文 harness 过程日志）
+    getRecord: (conversationId: string) => ipcRenderer.invoke('record:get', conversationId),
+    saveRecord: (data: any) => ipcRenderer.invoke('record:upsert', data),
+    deleteRecord: (conversationId: string) => ipcRenderer.invoke('record:delete', conversationId),
   },
 });

@@ -65,6 +65,20 @@ export function initDatabase(): Database.Database {
       FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
     );
 
+    -- Record 表（M1 上下文 harness：对话过程日志，给模型读的结构化压缩前缀）
+    -- 每个对话至多一条，conversation_id 主键，随对话删除级联清理。
+    CREATE TABLE IF NOT EXISTS records (
+      conversation_id TEXT PRIMARY KEY,
+      content_md TEXT NOT NULL DEFAULT '',
+      total_rounds INTEGER NOT NULL DEFAULT 0,
+      total_steps INTEGER NOT NULL DEFAULT 0,
+      phases_json TEXT,
+      last_updated_round INTEGER NOT NULL DEFAULT 0,
+      time_span TEXT,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    );
+
     -- Synopsis 缓存表
     CREATE TABLE IF NOT EXISTS synopsis_cache (
       id TEXT PRIMARY KEY,
@@ -94,6 +108,7 @@ export function initDatabase(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
     CREATE INDEX IF NOT EXISTS idx_conversations_workspace ON conversations(workspace_id);
     CREATE INDEX IF NOT EXISTS idx_synopsis_file ON synopsis_cache(file_path);
+    CREATE INDEX IF NOT EXISTS idx_records_updated ON records(updated_at);
   `);
 
     ensureColumn(db, 'conversations', 'schema_version', 'INTEGER DEFAULT 1');

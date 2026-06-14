@@ -31,6 +31,7 @@ import { openTab } from '@/store/slices/editorTabs';
 import type { RootState } from '@/store';
 import { rollbackFileDiff } from '@/services/fileRollback';
 import { describeCapabilities } from '@/services/modelCapabilities';
+import { getRecord, deleteRecord } from '@/services/recordStore';
 
 const MAX_IMAGE_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
@@ -324,8 +325,31 @@ export function AgentPanel() {
     agentLoopRef.current?.stop();
   }, []);
 
+  // Plan_4_M1 风险 2：编辑/重试/回溯会截断后续消息。若已生成的 record 覆盖到了
+  // 被截掉的轮次（record.lastUpdatedRound > 截断后剩余的用户轮次），其稳定前缀就
+  // 包含「已不存在的历史」，且水位线会高于实际消息数导致后续增量永久错位。
+  // 粗粒度兜底：这种情况直接删 record，让下个压缩点全量重建。record 是加速层，
+  // 删了至多多花一次生成，绝不阻塞主对话；失败也只 warn。
+  // （精细方案——把 lastUpdatedRound clamp 到新轮次并标记 contentMd 失效——见 Task_4 TODO。）
+  const invalidateRecordForTruncation = useCallback((remainingMessages: any[]) => {
+    const conversationId = conversation.id;
+    if (!conversationId) return;
+    const remainingRounds = remainingMessages.filter((m: any) => m.role === 'user').length;
+    void (async () => {
+      try {
+        const record = await getRecord(conversationId);
+        if (record && record.lastUpdatedRound > remainingRounds) {
+          await deleteRecord(conversationId);
+        }
+      } catch { /* record 是加速层，失效兜底失败不影响主对话 */ }
+    })();
+  }, [conversation.id]);
+
   // Edit user message → truncate after it → re-send
   const handleEdit = useCallback((msgId: string, newContent: string) => {
+    // 截断后剩余消息 = 该消息及之前（与 editMessage reducer 的 slice(0, idx+1) 对齐）
+    const editIdx = messages.findIndex((m: any) => m.id === msgId);
+    if (editIdx >= 0) invalidateRecordForTruncation(messages.slice(0, editIdx + 1));
     dispatch(editMessage({ id: msgId, content: newContent }));
     // Re-send edited message
     if (agentLoopRef.current) {
@@ -335,10 +359,13 @@ export function AgentPanel() {
         });
       }, 100);
     }
-  }, [dispatch]);
+  }, [dispatch, messages, invalidateRecordForTruncation]);
 
   // Retry: delete last AI message → re-send last user message
   const handleRetry = useCallback((msgId: string) => {
+    // truncateAt 保留到 msgId，随后 deleteMessage(msgId) 再删掉这条 AI 消息。
+    const retryIdx = messages.findIndex((m: any) => m.id === msgId);
+    if (retryIdx >= 0) invalidateRecordForTruncation(messages.slice(0, retryIdx));
     dispatch(truncateAt(msgId));
     // Find the previous user message to re-send
     const msgIdx = messages.findIndex((m: any) => m.id === msgId);
@@ -354,7 +381,7 @@ export function AgentPanel() {
         }, 100);
       }
     }
-  }, [messages, dispatch]);
+  }, [messages, dispatch, invalidateRecordForTruncation]);
 
   // Delete single message
   const handleDelete = useCallback((msgId: string) => {
@@ -388,9 +415,11 @@ export function AgentPanel() {
         }
       }
 
+      // 回溯保留到该消息（含）；若 record 覆盖到被截掉的轮次则失效重建。
+      if (targetIndex >= 0) invalidateRecordForTruncation(messages.slice(0, targetIndex + 1));
       dispatch(truncateAt(msgId));
     })();
-  }, [conversation.fileSnapshots, dispatch, messages]);
+  }, [conversation.fileSnapshots, dispatch, messages, invalidateRecordForTruncation]);
 
   const openReviewChanges = useCallback(() => {
     dispatch(openTab({
