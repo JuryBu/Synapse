@@ -70,20 +70,18 @@ function buildMemoryFilters(opts?: MemoryQueryOpts) {
     const values: unknown[] = [];
     const q = opts?.query?.trim();
     if (q) {
-        const like = `%${escapeLike(q)}%`;
-        // ⚠️ tags 命中口径与 Web mock（platform/index.ts filterWebMemories）存在已知小差异：
-        //    此处对 tags_json 原始 JSON 串做 LIKE（含 [ ] " , 等结构字符），
-        //    Web 端是先解析数组、用 \n join 后再 includes（不含 JSON 结构字符）。
-        //    对常规字母/数字/中文标签查询两者结果一致；仅当 query 含 JSON 元字符（如 ", [）时
-        //    Electron 可能多命中。tags 是检索次要信号（title/content/searchSummary 为主），
-        //    且换成 json_each 精确匹配会牺牲「标签内子串」能力，故保留此实现并以注释标注。
-        where.push(`(
-            title LIKE ? ESCAPE '\\'
-            OR content LIKE ? ESCAPE '\\'
-            OR search_summary LIKE ? ESCAPE '\\'
-            OR tags_json LIKE ? ESCAPE '\\'
-        )`);
-        values.push(like, like, like, like);
+        // 拆词检索：query 按空白/中英标点拆成多个 term，每个 term 对 4 字段 LIKE，term 间 OR（宽召回）。
+        // 修复「整串子串匹配」导致多关键词查询必败的问题（AI 常把多个词拼成一串查，整串匹配查不到）。
+        // tags 口径与 Web mock 的已知小差异同前：此处对 tags_json 原始 JSON 串做 LIKE，仅 query 含 JSON 元字符时可能多命中，tags 为次要信号，可接受。
+        const terms = q.split(/[\s,，、;；]+/).map(t => t.trim()).filter(Boolean).slice(0, 12);
+        const effectiveTerms = terms.length ? terms : [q];
+        const termClauses: string[] = [];
+        for (const term of effectiveTerms) {
+            const like = `%${escapeLike(term)}%`;
+            termClauses.push(`(title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR search_summary LIKE ? ESCAPE '\\' OR tags_json LIKE ? ESCAPE '\\')`);
+            values.push(like, like, like, like);
+        }
+        where.push(`(${termClauses.join(' OR ')})`);
     }
     if (opts?.category && opts.category.trim()) {
         where.push('category = ?');

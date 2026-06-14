@@ -454,7 +454,10 @@ function filterWebMemories(items: any[], opts?: any): any[] {
         const text = [item.title, item.content, item.searchSummary, ...(item.tags ?? [])]
           .join('\n')
           .toLowerCase();
-        if (!text.includes(q)) return false;
+        // 拆词检索：query 拆成多个 term，任一 term 命中即算命中（OR 宽召回），与 Electron 端口径一致。
+        const terms = q.split(/[\s,，、;；]+/).map(t => t.trim()).filter(Boolean);
+        const effectiveTerms = terms.length ? terms : [q];
+        if (!effectiveTerms.some(term => text.includes(term))) return false;
       }
       return true;
     })
