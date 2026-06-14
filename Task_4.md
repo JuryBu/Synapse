@@ -77,4 +77,6 @@
 - 2026-06-14（用户醒来 → 中断 loop，转**手动盯 + 每 stage commit&push**）：loop 期间 5 commit 已 push（ce080eb），GitHub 同步。
   - ✅ **终端中文 GBK 方案修复成功**：`command.ts` 去 chcp、`['/c', cmd]` + stdout/stderr 累积 Buffer 后 `TextDecoder('gbk')` 解码。真机 `command.exec('echo 你好世界中文测试')` → stdout 中文正常 + exitCode 0。commit `ce080eb`。
   - ✅ **M1 Step3 UI 压缩点完成**：`AgentPanel` 读 `record.totalSteps`，消息流第 N 条前插分隔线「以上已压缩为 record 摘要」，展示仍完整。编译通过。
-  - ⏳ 下一步：record 端到端真机验证（临时调小阈值触发压缩，看 record 生成+落盘+UI 分隔线）→ M1 Step4 内置 memory_store。
+  - ✅ **record 端到端真机验证成功**（子代理 web-fetcher + 本地 API gpt-5.5）：临时阈值 200，第 2 轮对话触发压缩；UI 出现「⌁ 以上 2 条已压缩为 record 摘要 ⌁」分隔线；SQLite `records` 表实锤 1 条（conversation_id=autosave-current, total_steps=2, content_md=311 字 AI 生成结构化摘要、准确无臆造）；本地 API 流式回复正常。【生成→落盘 SQLite→前端读回→UI 渲染】整条链路通。临时阈值已改回正式逻辑（git 无净改动）。
+  - 遗留(无害)：`~/.synapse/synapse.db` 留了 1 条 autosave-current record + 2 轮验证对话（运行时数据不进 git，下次真用会更新）。
+  - ✅ **M1 conversation+record 两层端到端确认可用**。Step0/1/2/3 全部 ✅+真机验证。下一步 **M1 Step4 内置 memory_store**（ultracode）。
