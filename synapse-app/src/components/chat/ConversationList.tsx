@@ -2,7 +2,7 @@
  * ConversationList — 对话历史侧边栏组件
  * 显示历史对话、新建对话、切换/删除对话、搜索过滤和批量管理。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import type { ConversationSummary } from '@/store/slices/conversationHistory';
@@ -10,12 +10,15 @@ import { removeConversation, setConversations, setSelectedId, updateConversation
 import { clearConversation, setConversation } from '@/store/slices/conversation';
 import { addNotification } from '@/store/slices/notifications';
 import {
+  AUTOSAVE_ID,
+  clearAutosaveSnapshot,
   deleteConversationSnapshot,
   deleteConversationSnapshots,
   exportConversationSnapshot,
   exportConversationSnapshots,
   listConversationSummaries,
   loadConversationSnapshot,
+  migrateSnapshotAttachments,
   renameConversation,
   saveConversationSnapshot,
   updateConversationMetadata,
@@ -71,6 +74,9 @@ export function ConversationList() {
   const conversations = useAppSelector((s) => s.conversationHistory.conversations);
   const selectedId = useAppSelector((s) => s.conversationHistory.selectedId);
   const currentConversation = useAppSelector((s) => s.conversation);
+  // 持有最新 conversation 供异步懒迁移 onMigrated 回调安全校验，避免 useCallback 闭包旧值误导。
+  const currentConversationRef = useRef(currentConversation);
+  currentConversationRef.current = currentConversation;
   const [searchQuery, setSearchQuery] = useState('');
   const [archiveFilter, setArchiveFilter] = useState<ArchiveFilter>('active');
   const [tagFilter, setTagFilter] = useState('');
@@ -135,6 +141,13 @@ export function ConversationList() {
 
   const saveCurrentToHistory = useCallback(async () => {
     try {
+      // ★ Codex 高风险修复（fork 欠计 → 删一份另一份图失效）：附件 put 只在上传那一刻发生一次(refCount=1)，
+      //   落库（persistPlatformSnapshot/replaceMessages）只存 sha JSON，从不 addRef。当当前对话是 autosave 时，
+      //   saveConversationSnapshot 会把这批消息复制到一个【新对话 id】(fork)，此后 autosave 行与新对话行同时
+      //   引用同一 sha，但 refCount 仍=1（欠计）→ 删任一份后 release 即归零 GC，另一份图变缺失。
+      //   修法（与 AgentPanel 新建路径口径对齐）：fork 成新 id 后 clearAutosaveSnapshot()
+      //   （只删 autosave 镜像行、不 release），消除「autosave + 新对话」双持有，使持有数回落到 1（仅新对话行）—— refCount 守恒。
+      const wasAutosave = !currentConversation.id || currentConversation.id === AUTOSAVE_ID;
       const summary = await saveConversationSnapshot({
         id: currentConversation.id,
         title: currentConversation.title,
@@ -145,7 +158,13 @@ export function ConversationList() {
         pendingDiffs: currentConversation.pendingDiffs,
         timestamp: Date.now(),
       });
-      if (summary) dispatch(updateConversation(summary));
+      if (summary) {
+        dispatch(updateConversation(summary));
+        // 确实发生了 autosave→新 id 的 fork（summary.id 不再是 autosave）才清 autosave，避免误删非 fork 场景的本体。
+        if (wasAutosave && summary.id && summary.id !== AUTOSAVE_ID) {
+          await clearAutosaveSnapshot();
+        }
+      }
       return summary?.id ?? null;
     } catch {
       dispatch(addNotification({ type: 'warning', title: '自动保存失败', message: '当前对话保存失败，但仍会继续打开历史' }));
@@ -178,6 +197,24 @@ export function ConversationList() {
         pendingDiffs: snapshot.pendingDiffs,
       }));
       dispatch(setSelectedId(id));
+      // ★ M2-R6 懒迁移：打开历史对话时若含旧内联 base64，后台抽离成 sha256 引用并回写 DB（用到才迁、不阻塞）。
+      // 迁移确有变更时把引用态写回 store（杜绝残留 base64 反复落库）；回写前校验仍是同一对话且消息未变。
+      const switchedLen = snapshot.messages.length;
+      void migrateSnapshotAttachments(snapshot, (migratedId, migratedMessages) => {
+        const cur = currentConversationRef.current;
+        if (!cur || cur.isStreaming) return;
+        if ((cur.id as string | null) === migratedId && cur.messages.length === switchedLen) {
+          dispatch(setConversation({
+            id: migratedId,
+            title: cur.title,
+            messages: migratedMessages,
+            model: cur.model,
+            assistantRuns: cur.assistantRuns,
+            fileSnapshots: cur.fileSnapshots,
+            pendingDiffs: cur.pendingDiffs,
+          }));
+        }
+      }).catch(() => undefined);
       await refreshConversations();
     } catch {
       dispatch(addNotification({ type: 'error', title: '加载失败', message: '无法加载对话历史' }));

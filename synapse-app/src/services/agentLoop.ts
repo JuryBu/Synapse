@@ -19,6 +19,7 @@ import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type Synap
 import { generateBatch } from './recordGenerator';
 import { AUTOSAVE_ID, saveAutosaveSnapshot } from './conversationPersistence';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
+import { restoreApiMessagesAttachments, chatContentToTextWithPlaceholder } from './attachmentRefs';
 
 export interface ToolDefinition {
   type: 'function';
@@ -72,13 +73,21 @@ function chatContentToText(content: ChatMessage['content']): string {
  *
  * 估算口径（保守粗估，宁多勿少，方向与触发判定一致）：
  *   - image_url：base64 data URI 按其编码长度折算 token（≈ 字符数 * 0.25，与 estimateTokens 英文系数一致）；
- *                外链 url 走视觉 token 固定估值（detail=low 约 85，high/auto 约 1100，对齐 OpenAI 视觉计费量级）。
- *   - file：优先按 file_data（base64）长度折算；仅有 file_id 时给固定占位估值（实际体积不可见，给保守下限）。
+ *                ★ M2-R6：附件分离后历史图 part 落库/判定时是【sha256 引用态】（url 非 data:），此刻还没还原成
+ *                  base64（还原推迟到发送前 restoreApiMessagesAttachments），但发送时会膨胀回完整 base64 进请求体。
+ *                  故引用态按 part.size（原始字节，put 返回写入）折算：base64 字符数≈字节*4/3，token≈base64字符*0.25
+ *                  ⇒ ≈ 字节/3。用 Math.ceil(size/3) 估，与「还原成 base64 后按长度估」同量级，避免带图对话压缩偏晚。
+ *                外链 http url（无 size、非 data:）走视觉 token 固定估值（detail=low 约 85，high/auto 约 1100）。
+ *   - file：优先按 file_data/data（base64）长度折算；其次按 size（同 image 口径 字节/3）；都无则固定占位下限。
  * 文本 part 不在此计（由 chatContentToText → countConversationTokens 统一计）。
  */
 const IMAGE_TOKENS_LOW = 85;       // detail=low 视觉 token（OpenAI 量级）
 const IMAGE_TOKENS_HIGH = 1100;   // detail=high/auto 视觉 token 上界近似
 const FILE_ID_PLACEHOLDER_TOKENS = 256; // 仅有 file_id（体积不可见）时的保守占位估值
+/** size(原始字节) → 发送时 base64 进请求体的近似 token：base64 字符≈字节*4/3，token≈字符*0.25 ⇒ ≈字节/3。 */
+function estimateBytesAsBase64Tokens(size: number): number {
+  return Math.ceil(size / 3);
+}
 function estimateNonTextPartsTokens(content: ChatMessage['content']): number {
   if (typeof content === 'string') return 0;
   let total = 0;
@@ -89,13 +98,19 @@ function estimateNonTextPartsTokens(content: ChatMessage['content']): number {
       if (url.startsWith('data:')) {
         // base64 内联图：按 data URI 编码长度折算（base64 字符直接进请求体）
         total += Math.ceil(url.length * 0.25);
+      } else if (typeof part.size === 'number' && part.size > 0) {
+        // M2-R6 引用态：发送前会还原成 base64，按引用元数据 size 估其发送占用。
+        total += estimateBytesAsBase64Tokens(part.size);
       } else {
         const detail = part.image_url?.detail;
         total += detail === 'low' ? IMAGE_TOKENS_LOW : IMAGE_TOKENS_HIGH;
       }
     } else if (part.type === 'file') {
-      const data: string = part.file?.file_data || '';
-      total += data ? Math.ceil(data.length * 0.25) : FILE_ID_PLACEHOLDER_TOKENS;
+      const data: string = part.file?.file_data || part.file?.data || '';
+      const size: number = typeof part.file?.size === 'number' ? part.file.size : 0;
+      if (data) total += Math.ceil(data.length * 0.25);
+      else if (size > 0) total += estimateBytesAsBase64Tokens(size);
+      else total += FILE_ID_PLACEHOLDER_TOKENS;
     }
   }
   return total;
@@ -459,7 +474,8 @@ export class AgentLoop {
               conversationId,
               messages: batchSlice.map(m => ({
                 role: m.role as 'user' | 'assistant' | 'system' | 'tool',
-                content: chatContentToText(m.content),
+                // ★ M2-R6：record 源用占位版（图片/附件 → 「[图片 name]」），绝不含 base64，且比直接丢弃更可读。
+                content: chatContentToTextWithPlaceholder(m.content),
               })),
               priorSkeleton,
               roundStart,
@@ -537,10 +553,17 @@ export class AgentLoop {
     }
 
     // Prepend system prompt to compressed messages
-    const apiMessages: ChatMessage[] = [
+    let apiMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...apiHistory,
     ];
+
+    // ★ M2-R6 发送前还原：历史 / 当前消息里的 image_url / file part 在 store / DB 中是 sha256 引用态（无 base64），
+    // 这里按 sha256 调 platform.attachment.get 还原成真 dataUrl 再发给模型（模型需要真图）。
+    // 只还原【实际要发送的这部分】（压缩后 apiHistory 里保留的最近原文）——开销最小，被摘要替代的历史图不白还原。
+    // 还原后的真 base64 仅活在本次发送的 apiMessages（局部变量），绝不回写 store / DB。
+    // 实体缺失则降级为文字占位（见 restoreApiMessagesAttachments），不阻断发送。失败吞掉走原 apiMessages。
+    apiMessages = await restoreApiMessagesAttachments(apiMessages).catch(() => apiMessages);
 
     // Auto-generate title from first message
     if (!opts?.skipUserMessage && (store.getState() as RootState).conversation.messages.length <= 1) {

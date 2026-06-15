@@ -8,6 +8,7 @@ import { registerWorkspaceHandlers } from './ipc/workspace';
 import { registerFileHandlers } from './ipc/file';
 import { registerCommandHandlers } from './ipc/command';
 import { registerWorktreeHandlers } from './ipc/worktree';
+import { registerAttachmentHandlers } from './ipc/attachment';
 import { registerMCPHandlers, shutdownAllMCP } from './ipc/mcp';
 import { registerWallpaperHandlers, registerWallpaperProtocol } from './ipc/wallpaper';
 
@@ -105,6 +106,7 @@ app.whenReady().then(() => {
     registerWallpaperHandlers();
     registerCommandHandlers();
     registerWorktreeHandlers();
+    registerAttachmentHandlers();
     registerMCPHandlers();
     console.log('[main] All IPC handlers registered');
   } catch (err) {

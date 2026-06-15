@@ -95,6 +95,19 @@ export function initDatabase(): Database.Database {
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
 
+    -- 附件账本表（M2-R6 附件分离存储：内容寻址 + refCount GC）
+    -- 对话本体/messages 只存 sha256 引用，实体二进制落盘 attachments/<sha256[:2]>/<sha256>.<ext>。
+    -- 同一二进制天然去重：sha256 命中即复用、ref_count+1；移除附件 ref_count-1，归零删实体+删行(GC)。
+    -- 故意不设外键：附件实体与对话生命周期正交，靠 ref_count 计数回收，不随对话级联删。
+    CREATE TABLE IF NOT EXISTS attachments (
+      sha256 TEXT PRIMARY KEY,
+      mime TEXT,
+      kind TEXT,
+      size INTEGER,
+      ref_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
     -- Synopsis 缓存表
     CREATE TABLE IF NOT EXISTS synopsis_cache (
       id TEXT PRIMARY KEY,

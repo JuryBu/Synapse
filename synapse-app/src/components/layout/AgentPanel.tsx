@@ -25,7 +25,9 @@ import { addNotification } from '@/store/slices/notifications';
 import { clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, updateDiffStatus, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 import { countConversationTokens, MAX_CONTEXT_TOKENS } from '@/services/systemPrompt';
 import { conversationExporter } from '@/services/conversationExporter';
-import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, AUTOSAVE_ID } from '@/services/conversationPersistence';
+import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, migrateSnapshotAttachments, AUTOSAVE_ID } from '@/services/conversationPersistence';
+import { platform } from '@/platform';
+import { releaseMessageAttachments, resolveAttachmentDataUrl, sanitizeMessagesForPersistence } from '@/services/attachmentRefs';
 import { setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
 import { openTab } from '@/store/slices/editorTabs';
 import type { RootState } from '@/store';
@@ -69,6 +71,9 @@ export function AgentPanel() {
   const model = useAppSelector((s: RootState) => (s as any).agentSettings.currentModel);
   const conversation = useAppSelector((s: RootState) => (s as any).conversation);
   const messages = conversation.messages;
+  // 持有最新 conversation 供异步回调（如懒迁移 onMigrated）安全校验当前对话身份/消息数，不被 effect 闭包旧值误导。
+  const conversationRef = useRef(conversation);
+  conversationRef.current = conversation;
   const isStreaming = useAppSelector((s: RootState) => (s as any).conversation.isStreaming);
   const settings = useAppSelector((s: RootState) => (s as any).settings);
   const agentSettings = useAppSelector((s: RootState) => (s as any).agentSettings);
@@ -133,6 +138,9 @@ export function AgentPanel() {
   }, [recordBatchStepEnds, messages]);
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRef[]>([]);
   const [previewAttachment, setPreviewAttachment] = useState<AttachmentRef | null>(null);
+  // M2-R6 渲染还原：历史消息的 image 附件落库后只有 sha256（无 previewUrl base64），
+  // 按 sha256 懒加载还原成 dataUrl 供 MessageBubble 渲染。Map<sha256, dataUrl>。
+  const [resolvedPreviews, setResolvedPreviews] = useState<Map<string, string>>(new Map());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const agentLoopRef = useRef<AgentLoop | null>(null);
@@ -258,8 +266,9 @@ export function AgentPanel() {
         timestamp: Date.now(),
       }).catch(() => {
         try {
+          // M2-R6：兜底 localStorage 写入同样过 sanitize，杜绝 base64 经退化路径漏进存储。
           localStorage.setItem('synapse_autosave', JSON.stringify({
-            messages,
+            messages: sanitizeMessagesForPersistence(messages),
             model,
             timestamp: Date.now(),
           }));
@@ -295,6 +304,32 @@ export function AgentPanel() {
             pendingDiffs: data?.pendingDiffs,
           }));
           dispatch(addNotification({ type: 'info', title: '已恢复', message: '已恢复上次对话', duration: 2000 }));
+          // ★ M2-R6 懒迁移：后台把旧内联 base64 抽离成 sha256 引用并回写 DB（用到才迁、不阻塞渲染）。
+          // 首屏仍用内联 base64 渲染（能显示）；迁移确有变更时通过 onMigrated 把引用态写回 store，
+          // 杜绝 store 残留 base64 被后续 autosave 反复落库。回写前严格校验对话身份未变且消息未追加，避免覆盖新消息。
+          if (data) {
+            const restoredId = data.id || 'autosave-current';
+            const restoredLen = restoredMessages.length;
+            void migrateSnapshotAttachments(data, (migratedId, migratedMessages) => {
+              if (cancelled) return;
+              const cur = conversationRef.current;
+              if (!cur || cur.isStreaming) return;
+              const curId = (cur.id as string | null) || 'autosave-current';
+              // 仅当仍是同一对话、且消息数量未变（未追加/未截断新消息）时安全替换为引用态。
+              if (curId === (migratedId === AUTOSAVE_ID ? restoredId : migratedId) && curId === restoredId
+                  && cur.messages.length === restoredLen) {
+                dispatch(setConversation({
+                  id: restoredId,
+                  title: cur.title,
+                  messages: migratedMessages,
+                  assistantRuns: cur.assistantRuns,
+                  fileSnapshots: cur.fileSnapshots,
+                  pendingDiffs: cur.pendingDiffs,
+                  model: cur.model,
+                }));
+              }
+            }).catch(() => undefined);
+          }
         }
       } catch { /* corrupted — skip */ }
     })();
@@ -306,11 +341,17 @@ export function AgentPanel() {
     if (text) parts.push({ type: 'text', text });
     for (const attachment of attachments) {
       if (attachment.status !== 'ready') continue;
-      if (attachment.kind === 'image' && attachment.payloadUrl) {
+      // M2-R6：image part 以 sha256 引用 + 元数据(size/mime/name) 落库/发送；
+      // url 仅填内存态预览(previewUrl)，发送前 agentLoop 按 sha256 还原成真 base64，落库前被 sanitize 清掉。
+      if (attachment.kind === 'image' && attachment.sha256) {
         parts.push({
           type: 'image_url',
-          image_url: { url: attachment.payloadUrl, detail: 'auto' },
+          image_url: { url: attachment.previewUrl || '', detail: 'auto' },
           attachmentId: attachment.id,
+          sha256: attachment.sha256,
+          size: attachment.size,
+          mime: attachment.mimeType,
+          name: attachment.name,
         });
       }
     }
@@ -380,11 +421,22 @@ export function AgentPanel() {
     void clampToBatch(conversationId, keptRounds, keptSteps);
   }, [conversation.id]);
 
+  // M2-R6 refCount GC：对被移除/被丢弃引用的消息，fire-and-forget release 其附件 sha256（归零删实体）。
+  // 漏 release 只多占盘（不致命）；多 release 才危险，故只在「明确移除」处调用。
+  const gcMessages = useCallback((removed: any[]) => {
+    if (removed.length === 0) return;
+    void releaseMessageAttachments(removed).catch(() => undefined);
+  }, []);
+
   // Edit user message → truncate after it → re-send
   const handleEdit = useCallback((msgId: string, newContent: string) => {
     // 截断后剩余消息 = 该消息及之前（与 editMessage reducer 的 slice(0, idx+1) 对齐）
     const editIdx = messages.findIndex((m: any) => m.id === msgId);
-    if (editIdx >= 0) invalidateRecordForTruncation(messages.slice(0, editIdx + 1));
+    if (editIdx >= 0) {
+      invalidateRecordForTruncation(messages.slice(0, editIdx + 1));
+      // 被截断的后续消息整体移除 → GC；被编辑消息本身 editMessage 会把 contentParts 重置为纯文本（丢弃图引用）→ 也 GC。
+      gcMessages([...messages.slice(editIdx + 1), messages[editIdx]]);
+    }
     dispatch(editMessage({ id: msgId, content: newContent }));
     // Re-send edited message
     if (agentLoopRef.current) {
@@ -394,13 +446,17 @@ export function AgentPanel() {
         });
       }, 100);
     }
-  }, [dispatch, messages, invalidateRecordForTruncation]);
+  }, [dispatch, messages, invalidateRecordForTruncation, gcMessages]);
 
   // Retry: delete last AI message → re-send last user message
   const handleRetry = useCallback((msgId: string) => {
     // truncateAt 保留到 msgId，随后 deleteMessage(msgId) 再删掉这条 AI 消息。
     const retryIdx = messages.findIndex((m: any) => m.id === msgId);
-    if (retryIdx >= 0) invalidateRecordForTruncation(messages.slice(0, retryIdx));
+    if (retryIdx >= 0) {
+      invalidateRecordForTruncation(messages.slice(0, retryIdx));
+      // 被移除 = msgId 这条 AI 消息及其之后的所有消息（重试会重发上一条 user，故这些全丢）→ GC。
+      gcMessages(messages.slice(retryIdx));
+    }
     dispatch(truncateAt(msgId));
     // Find the previous user message to re-send
     const msgIdx = messages.findIndex((m: any) => m.id === msgId);
@@ -416,12 +472,15 @@ export function AgentPanel() {
         }, 100);
       }
     }
-  }, [messages, dispatch, invalidateRecordForTruncation]);
+  }, [messages, dispatch, invalidateRecordForTruncation, gcMessages]);
 
   // Delete single message
   const handleDelete = useCallback((msgId: string) => {
+    // M2-R6 GC：删单条消息前 release 其附件 sha256。
+    const target = messages.find((m: any) => m.id === msgId);
+    if (target) gcMessages([target]);
     dispatch(deleteMessage(msgId));
-  }, [dispatch]);
+  }, [dispatch, messages, gcMessages]);
 
   const handleUndoToMessage = useCallback((msgId: string) => {
     void (async () => {
@@ -451,10 +510,14 @@ export function AgentPanel() {
       }
 
       // 回溯保留到该消息（含）；若 record 覆盖到被截掉的轮次则失效重建。
-      if (targetIndex >= 0) invalidateRecordForTruncation(messages.slice(0, targetIndex + 1));
+      if (targetIndex >= 0) {
+        invalidateRecordForTruncation(messages.slice(0, targetIndex + 1));
+        // 被截掉的后续消息（targetIndex 之后）整体移除 → GC 其附件。
+        gcMessages(messages.slice(targetIndex + 1));
+      }
       dispatch(truncateAt(msgId));
     })();
-  }, [conversation.fileSnapshots, dispatch, messages, invalidateRecordForTruncation]);
+  }, [conversation.fileSnapshots, dispatch, messages, invalidateRecordForTruncation, gcMessages]);
 
   const openReviewChanges = useCallback(() => {
     dispatch(openTab({
@@ -547,12 +610,26 @@ export function AgentPanel() {
           continue;
         }
         try {
+          // M2-R6 上传分离：读出 dataUrl 后立即 platform.attachment.put 抽离成 sha256 内容寻址实体。
+          // dataUrl 仅留作内存态即时预览(previewUrl)，落库/发送只认 sha256（payloadUrl 不再内联 base64）。
           const dataUrl = await readAsDataUrl(file);
-          nextAttachments.push({
-            ...base,
-            previewUrl: dataUrl,
-            payloadUrl: dataUrl,
+          const ref = await platform.attachment.put({
+            data: dataUrl,
+            mime: file.type || undefined,
+            name: file.name,
+            kind: 'image',
           });
+          if ('error' in ref) {
+            nextAttachments.push({ ...base, status: 'error', error: ref.message || '附件存储失败' });
+          } else {
+            nextAttachments.push({
+              ...base,
+              sha256: ref.sha256,
+              size: ref.size || file.size,
+              mimeType: ref.mime || base.mimeType,
+              previewUrl: dataUrl, // 内存态即时预览；落库前 sanitize 清掉
+            });
+          }
         } catch (err: any) {
           nextAttachments.push({
             ...base,
@@ -576,9 +653,59 @@ export function AgentPanel() {
   }, [dispatch]);
 
   const removePendingAttachment = useCallback((id: string) => {
-    setPendingAttachments(prev => prev.filter(att => att.id !== id));
+    setPendingAttachments(prev => {
+      // M2-R6 GC（Codex 中风险③修复）：草稿图选中时已 platform.attachment.put（refCount=1），
+      // 移除草稿/放弃发送时必须 release，否则留孤儿实体 + 账本行。已发送的图不走这里（发送转为消息引用）。
+      const removed = prev.find(att => att.id === id);
+      if (removed?.sha256) void platform.attachment.delete(removed.sha256).catch(() => undefined);
+      return prev.filter(att => att.id !== id);
+    });
     setPreviewAttachment(prev => prev?.id === id ? null : prev);
   }, []);
+
+  // M2-R6 渲染还原：扫描历史消息里「有 sha256 但无内联预览(previewUrl/payloadUrl)」的 image 附件，
+  // 按 sha256 懒加载 dataUrl 填进 resolvedPreviews，触发重渲染显示历史图。仅在确有缺口时拉取（带模块级缓存）。
+  useEffect(() => {
+    let cancelled = false;
+    const wanted = new Set<string>();
+    for (const msg of messages as any[]) {
+      for (const att of (msg.attachments ?? [])) {
+        if (att.kind === 'image' && att.sha256 && !att.previewUrl && !att.payloadUrl && !resolvedPreviews.has(att.sha256)) {
+          wanted.add(att.sha256);
+        }
+      }
+    }
+    if (wanted.size === 0) return;
+    void Promise.all([...wanted].map(async sha => {
+      const dataUrl = await resolveAttachmentDataUrl(sha);
+      return [sha, dataUrl] as const;
+    })).then(pairs => {
+      if (cancelled) return;
+      const hits = pairs.filter((p): p is readonly [string, string] => !!p[1]);
+      if (hits.length === 0) return;
+      setResolvedPreviews(prev => {
+        const next = new Map(prev);
+        for (const [sha, url] of hits) next.set(sha, url);
+        return next;
+      });
+    });
+    return () => { cancelled = true; };
+  }, [messages, resolvedPreviews]);
+
+  // 把一条消息的 attachments 注入还原后的 previewUrl（内存预览优先；缺失则用 resolvedPreviews 里 sha256 还原的 dataUrl）。
+  const resolveAttachmentsForRender = useCallback((atts: AttachmentRef[] | undefined): AttachmentRef[] | undefined => {
+    if (!atts || atts.length === 0) return atts;
+    let touched = false;
+    const next = atts.map(att => {
+      if (att.previewUrl || att.payloadUrl) return att;
+      if (att.kind === 'image' && att.sha256) {
+        const restored = resolvedPreviews.get(att.sha256);
+        if (restored) { touched = true; return { ...att, previewUrl: restored }; }
+      }
+      return att;
+    });
+    return touched ? next : atts;
+  }, [resolvedPreviews]);
 
   return (
     <div className="agent-panel glass-panel">
@@ -604,6 +731,10 @@ export function AgentPanel() {
                   if (summary) dispatch(updateConversation(summary));
                 });
               }
+              // M2-R6：此处【不】GC 附件。messages.length>0 时已 saveConversationSnapshot 把这批消息
+              // （含 sha256 引用）保存到一个新对话 id，附件实体仍被新对话引用（refCount 不变、归属转移）；
+              // clearAutosaveSnapshot 走 platform.conversation.delete(AUTOSAVE_ID)（不 release，autosave 只是镜像）。
+              // 故 refCount 守恒——若在此 release 会误删仍被新对话引用的实体。
               dispatch(clearConversation());
               dispatch(setSelectedId(null));
               void clearAutosaveSnapshot();
@@ -714,7 +845,7 @@ export function AgentPanel() {
                     showGeneratingPlaceholder={(msg as any).showGeneratingPlaceholder}
                     durationMs={(msg as any).durationMs}
                     thinking={(msg as any).thinking}
-                    attachments={(msg as any).attachments}
+                    attachments={resolveAttachmentsForRender((msg as any).attachments)}
                     toolCalls={(msg as any).toolCalls}
                     diffs={(msg as any).diffs}
                     onReviewChanges={openReviewChanges}

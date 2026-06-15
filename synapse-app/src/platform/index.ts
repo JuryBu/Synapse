@@ -65,6 +65,48 @@ export interface WorktreeStatusResult {
 /** Web 模式下 worktree 不可用时统一返回的提示。 */
 const WORKTREE_WEB_ONLY = 'git worktree 管理仅在 Electron 桌面模式下可用';
 
+// ===== 附件分离存储 (M2-R6) =====
+// sha256 引用层 = 统一抽象边界：桌面/网页 schema、引用格式、上层逻辑同一套；
+// blob 后端各自实现（桌面=文件系统 IPC / 网页=IndexedDB）。两端接口签名完全一致。
+
+/** put 入参：data 为 dataUrl 或纯 base64（对其原始二进制算 sha256）。 */
+export interface AttachmentPutInput {
+  data: string;
+  mime?: string;
+  name?: string;
+  kind?: string;
+}
+
+/** put 成功返回的引用元数据（消息引用层据此写 messages，第2段接入）。 */
+export interface AttachmentRef {
+  sha256: string;
+  size: number;
+  mime: string;
+  kind: string;
+  name: string;
+}
+
+/** get 返回：还原后的 base64 dataUrl + 元数据。找不到返回 null。 */
+export interface AttachmentGetResult {
+  sha256: string;
+  mime: string;
+  size: number;
+  dataUrl: string;
+}
+
+/** refCount 变更类操作（delete/release）的返回。 */
+export interface AttachmentRefCountResult {
+  sha256: string;
+  refCount: number;
+  deleted: boolean;
+}
+
+/** 统一失败返回（与 worktree/wallpaper 口径一致）。 */
+export interface AttachmentError {
+  error: true;
+  message: string;
+}
+
 export interface SynapseAPI {
   platform: {
     info: () => Promise<PlatformInfo>;
@@ -157,6 +199,16 @@ export interface SynapseAPI {
     create: (opts: { repoRoot: string; branch: string; path?: string; name?: string }) => Promise<WorktreeCreateResult>;
     remove: (opts: { repoRoot: string; path: string; force?: boolean }) => Promise<WorktreeRemoveResult>;
     status: (opts: { repoRoot: string; path: string }) => Promise<WorktreeStatusResult>;
+  };
+  // 附件分离存储 (M2-R6)。sha256 内容寻址；桌面走 IPC(文件系统)，网页走 IndexedDB。
+  // 两端签名完全一致——sha256 引用层是抽象边界，上层代码不感知后端差异。
+  attachment: {
+    put: (opts: AttachmentPutInput) => Promise<AttachmentRef | AttachmentError>;
+    get: (sha256: string) => Promise<AttachmentGetResult | null>;
+    has: (sha256: string) => Promise<boolean>;
+    delete: (sha256: string) => Promise<AttachmentRefCountResult | AttachmentError>;
+    addRef: (sha256: string) => Promise<{ sha256: string; refCount: number } | AttachmentError>;
+    release: (sha256: string) => Promise<AttachmentRefCountResult | AttachmentError>;
   };
 }
 
@@ -437,6 +489,17 @@ function getWebMock(): SynapseAPI {
       remove: async () => ({ error: true, message: WORKTREE_WEB_ONLY }),
       status: async () => ({ error: true, message: WORKTREE_WEB_ONLY }),
     },
+    // 附件分离存储 Web 实现：IndexedDB 作 blob 后端，sha256 引用层与桌面完全一致。
+    // ★ sha256 用 crypto.subtle.digest('SHA-256') 对原始二进制算，与 Electron node crypto 同口径——
+    //   同一二进制两端算出同一 sha256（抽象边界），保证桌面/网页引用可互通。
+    attachment: {
+      put: webAttachmentPut,
+      get: webAttachmentGet,
+      has: webAttachmentHas,
+      delete: webAttachmentRelease,
+      addRef: webAttachmentAddRef,
+      release: webAttachmentRelease,
+    },
   };
 }
 
@@ -564,6 +627,312 @@ function filterWebConversationSummaries(summaries: any[], opts?: any): any[] {
       return true;
     })
     .slice(0, limit);
+}
+
+// ===== 附件分离存储 Web 实现（IndexedDB blob 后端） =====
+//
+// sha256 引用层是抽象边界：本段函数与 Electron ipc/attachment.ts 上层语义完全对齐
+// （put 去重 / get 还原 dataUrl / has / refCount-1 归零 GC），仅 blob 落地用 IndexedDB。
+//
+// 库结构：DB「synapse-attachments」内两个 object store：
+//   - 'blobs'  : key=sha256, value=Uint8Array（实体原始二进制，与桌面落盘字节一致）
+//   - 'meta'   : key=sha256, value={ mime, kind, size, refCount, createdAt }（账本，对齐 attachments 表）
+
+const ATTACHMENT_DB_NAME = 'synapse-attachments';
+const ATTACHMENT_DB_VERSION = 1;
+const ATTACHMENT_BLOB_STORE = 'blobs';
+const ATTACHMENT_META_STORE = 'meta';
+const MAX_WEB_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+interface WebAttachmentMeta {
+  mime: string;
+  kind: string;
+  size: number;
+  refCount: number;
+  createdAt: number;
+}
+
+let attachmentDbPromise: Promise<IDBDatabase> | null = null;
+
+/** 打开（并缓存）IndexedDB 连接；首次/升级时建两个 store。 */
+function openAttachmentDb(): Promise<IDBDatabase> {
+  if (attachmentDbPromise) return attachmentDbPromise;
+  attachmentDbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('当前环境不支持 IndexedDB，附件存储不可用'));
+      return;
+    }
+    const req = indexedDB.open(ATTACHMENT_DB_NAME, ATTACHMENT_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(ATTACHMENT_BLOB_STORE)) {
+        db.createObjectStore(ATTACHMENT_BLOB_STORE);
+      }
+      if (!db.objectStoreNames.contains(ATTACHMENT_META_STORE)) {
+        db.createObjectStore(ATTACHMENT_META_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error ?? new Error('IndexedDB 打开失败'));
+  });
+  // 打开失败时清掉缓存，下次可重试。
+  attachmentDbPromise.catch(() => { attachmentDbPromise = null; });
+  return attachmentDbPromise;
+}
+
+/** 把 IDBRequest 包成 Promise。 */
+function idbRequest<T>(req: IDBRequest<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error ?? new Error('IndexedDB 请求失败'));
+  });
+}
+
+/** 读单 store 单 key（只读事务）。 */
+async function idbGet<T>(storeName: string, key: string): Promise<T | undefined> {
+  const db = await openAttachmentDb();
+  const tx = db.transaction(storeName, 'readonly');
+  const result = await idbRequest<T>(tx.objectStore(storeName).get(key) as IDBRequest<T>);
+  return result === null ? undefined : result;
+}
+
+/**
+ * sha256(原始二进制) → 64 位小写 hex，用 Web Crypto。
+ * 与 Electron node crypto.createHash('sha256') 对同一字节序列结果一致（抽象边界保证）。
+ */
+async function webSha256(bytes: Uint8Array): Promise<string | null> {
+  if (typeof crypto === 'undefined' || !crypto.subtle) return null;
+  // 拷进一个确定的 ArrayBuffer 再传 digest：
+  //   1) 规避 byteOffset/共享 buffer 导致的哈希错算（只哈希本视图覆盖的字节）；
+  //   2) 满足 TS（ES2023 lib 下 Uint8Array.buffer 推断为 ArrayBufferLike，digest 要求 ArrayBuffer）。
+  const buf = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buf).set(bytes);
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * 解析 dataUrl / 纯 base64 → { bytes, mimeFromDataUrl? }。与 Electron decodePayload 同口径。
+ */
+function webDecodePayload(input: unknown): { bytes: Uint8Array; mimeFromDataUrl?: string } | null {
+  if (typeof input !== 'string' || !input) return null;
+  let base64 = input.trim();
+  let mimeFromDataUrl: string | undefined;
+
+  const m = /^data:([^;,]*)(;base64)?,(.*)$/s.exec(base64);
+  if (m) {
+    const declaredMime = m[1]?.trim();
+    const isBase64 = !!m[2];
+    const payload = m[3] ?? '';
+    if (declaredMime) mimeFromDataUrl = declaredMime;
+    if (!isBase64) {
+      try {
+        return { bytes: new TextEncoder().encode(decodeURIComponent(payload)), mimeFromDataUrl };
+      } catch {
+        return null;
+      }
+    }
+    base64 = payload;
+  }
+
+  base64 = base64.replace(/\s/g, '');
+  if (!base64) return null;
+  try {
+    // 注：解码（atob + 逐字节）是【写入路径】，仅在用户主动上传/懒迁移时触发（一次性、低频），
+    // 不像 get 那样每次渲染历史图都跑——故保持同步。真正的高频 UI 阻塞点是 get 的 base64 编码，
+    // 已改 FileReader 异步（见 bytesToDataUrl）。atob 遇字符集外字符直接抛错 → 拒收，与 Electron
+    // 解码前的字符集严格校验对等（同一坏输入两端都拒收，绝不分叉）。
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    if (bytes.length === 0) return null;
+    return { bytes, mimeFromDataUrl };
+  } catch {
+    return null;
+  }
+}
+
+/** Uint8Array → base64（同步分块，避免大数组爆栈）。仅在 FileReader 不可用时兜底。 */
+function bytesToBase64Sync(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Uint8Array → `data:<mime>;base64,...`（异步，不阻塞 UI 线程）。
+ * ★ 性能修复：旧路径用 String.fromCharCode(...chunk) 展开 + 字符串累加 + btoa，全在渲染主线程同步执行，
+ *   50MB 附件 get 还原成 ~67MB base64 会明显卡 UI（每次渲染历史图都触发）。
+ *   改用 FileReader.readAsDataURL（浏览器原生 C++ 实现、异步回调），把 base64 编码挪出 JS 主线程，
+ *   且产出仍是标准 dataUrl —— get 返回契约不变，发 API（需 base64）与 Electron 端对等都保持。
+ *   FileReader 不可用（极端环境）时降级回同步实现，保证功能不丢。
+ */
+function bytesToDataUrl(bytes: Uint8Array, mime: string): Promise<string> {
+  if (typeof FileReader === 'undefined' || typeof Blob === 'undefined') {
+    return Promise.resolve(`data:${mime};base64,${bytesToBase64Sync(bytes)}`);
+  }
+  return new Promise<string>((resolve, reject) => {
+    try {
+      // 拷进独立 ArrayBuffer，规避 byteOffset/共享 buffer 把多余字节带进 Blob。
+      const buf = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buf).set(bytes);
+      const blob = new Blob([buf], { type: mime || 'application/octet-stream' });
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result === 'string') resolve(result);
+        else reject(new Error('FileReader 结果非字符串'));
+      };
+      reader.onerror = () => reject(reader.error ?? new Error('FileReader 读取失败'));
+      reader.readAsDataURL(blob);
+    } catch (err) {
+      // 同步降级，避免编码彻底失败。
+      try {
+        resolve(`data:${mime};base64,${bytesToBase64Sync(bytes)}`);
+      } catch {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
+  });
+}
+
+async function webAttachmentPut(opts: AttachmentPutInput): Promise<AttachmentRef | AttachmentError> {
+  const decoded = webDecodePayload(opts?.data);
+  if (!decoded) return { error: true, message: '附件载荷为空或无法解析（需 dataUrl 或 base64）' };
+  const { bytes } = decoded;
+  if (bytes.length > MAX_WEB_ATTACHMENT_BYTES) {
+    return { error: true, message: `附件超过 ${Math.floor(MAX_WEB_ATTACHMENT_BYTES / 1024 / 1024)}MB 限制` };
+  }
+
+  const sha256 = await webSha256(bytes);
+  if (!sha256) return { error: true, message: '当前环境不支持 Web Crypto（需安全上下文），无法计算 sha256' };
+
+  const mime = (typeof opts?.mime === 'string' && opts.mime.trim())
+    ? opts.mime.trim()
+    : (decoded.mimeFromDataUrl || 'application/octet-stream');
+  const kind = (typeof opts?.kind === 'string' && opts.kind.trim()) ? opts.kind.trim() : 'file';
+  const name = (typeof opts?.name === 'string') ? opts.name : '';
+  const size = bytes.length;
+
+  try {
+    const db = await openAttachmentDb();
+    // ★ 修复 TOCTOU 竞态：把「读 existing → 决定 +1 或新建」收进同一个 readwrite 事务内完成。
+    //   IndexedDB 同事务内 get 拿到的是本事务的一致快照，读-改-写在一个事务里串行原子，
+    //   与 Electron 单语句 `INSERT ... ON CONFLICT DO UPDATE ref_count+1` 的原子 upsert 对齐。
+    //   旧写法分两个事务（先 readonly get、再 readwrite put）：同一 sha256 并发 put 时两路都可能
+    //   读到 existing=null → 各写一次 refCount:1，最终停在 1 而非 2，引用计数被低估 → 提前 GC。
+    const persisted = await new Promise<WebAttachmentMeta>((resolve, reject) => {
+      const tx = db.transaction([ATTACHMENT_BLOB_STORE, ATTACHMENT_META_STORE], 'readwrite');
+      const metaStore = tx.objectStore(ATTACHMENT_META_STORE);
+      let result: WebAttachmentMeta;
+      const getReq = metaStore.get(sha256) as IDBRequest<WebAttachmentMeta | undefined>;
+      getReq.onsuccess = () => {
+        const existing = getReq.result ?? undefined;
+        if (existing) {
+          // 去重命中：仅 refCount+1（blob 已在，不重复写）。
+          result = { ...existing, refCount: existing.refCount + 1 };
+          metaStore.put(result, sha256);
+        } else {
+          result = { mime, kind, size, refCount: 1, createdAt: Math.floor(Date.now() / 1000) };
+          tx.objectStore(ATTACHMENT_BLOB_STORE).put(bytes, sha256);
+          metaStore.put(result, sha256);
+        }
+      };
+      getReq.onerror = () => reject(getReq.error ?? new Error('IndexedDB 读取失败'));
+      tx.oncomplete = () => resolve(result);
+      tx.onerror = () => reject(tx.error ?? new Error('IndexedDB 写入失败'));
+      tx.onabort = () => reject(tx.error ?? new Error('IndexedDB 事务中止'));
+    });
+    return { sha256, size: persisted.size || size, mime: persisted.mime || mime, kind: persisted.kind || kind, name };
+  } catch (err: any) {
+    return { error: true, message: `附件写入失败: ${err?.message ?? err}` };
+  }
+}
+
+async function webAttachmentGet(sha256: string): Promise<AttachmentGetResult | null> {
+  if (typeof sha256 !== 'string' || !SHA256_HEX_RE.test(sha256.toLowerCase())) return null;
+  const key = sha256.toLowerCase();
+  try {
+    const meta = await idbGet<WebAttachmentMeta>(ATTACHMENT_META_STORE, key);
+    const blob = await idbGet<Uint8Array>(ATTACHMENT_BLOB_STORE, key);
+    if (!blob) return null;
+    const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(blob as ArrayBuffer);
+    const mime = meta?.mime || 'application/octet-stream';
+    return {
+      sha256: key,
+      mime,
+      size: meta?.size ?? bytes.length,
+      // 异步 FileReader 编码，base64 转换不阻塞 UI 线程（见 bytesToDataUrl 注释）。
+      dataUrl: await bytesToDataUrl(bytes, mime),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function webAttachmentHas(sha256: string): Promise<boolean> {
+  if (typeof sha256 !== 'string' || !SHA256_HEX_RE.test(sha256.toLowerCase())) return false;
+  const key = sha256.toLowerCase();
+  try {
+    const meta = await idbGet<WebAttachmentMeta>(ATTACHMENT_META_STORE, key);
+    if (!meta) return false;
+    const blob = await idbGet<Uint8Array>(ATTACHMENT_BLOB_STORE, key);
+    return blob != null;
+  } catch {
+    return false;
+  }
+}
+
+async function webAttachmentAddRef(sha256: string): Promise<{ sha256: string; refCount: number } | AttachmentError> {
+  if (typeof sha256 !== 'string' || !SHA256_HEX_RE.test(sha256.toLowerCase())) {
+    return { error: true, message: '非法 sha256' };
+  }
+  const key = sha256.toLowerCase();
+  try {
+    const meta = await idbGet<WebAttachmentMeta>(ATTACHMENT_META_STORE, key);
+    if (!meta) return { error: true, message: '附件不存在，无法 addRef（请先 put）' };
+    const next: WebAttachmentMeta = { ...meta, refCount: meta.refCount + 1 };
+    const db = await openAttachmentDb();
+    await idbRequest(db.transaction(ATTACHMENT_META_STORE, 'readwrite').objectStore(ATTACHMENT_META_STORE).put(next, key));
+    return { sha256: key, refCount: next.refCount };
+  } catch (err: any) {
+    return { error: true, message: `addRef 失败: ${err?.message ?? err}` };
+  }
+}
+
+/** refCount-1，归零删 blob + meta（GC）。delete/release 共用。 */
+async function webAttachmentRelease(sha256: string): Promise<AttachmentRefCountResult | AttachmentError> {
+  if (typeof sha256 !== 'string' || !SHA256_HEX_RE.test(sha256.toLowerCase())) {
+    return { error: true, message: '非法 sha256' };
+  }
+  const key = sha256.toLowerCase();
+  try {
+    const meta = await idbGet<WebAttachmentMeta>(ATTACHMENT_META_STORE, key);
+    if (!meta) return { sha256: key, refCount: 0, deleted: true };
+    const nextRef = meta.refCount - 1;
+    const db = await openAttachmentDb();
+    if (nextRef > 0) {
+      const next: WebAttachmentMeta = { ...meta, refCount: nextRef };
+      await idbRequest(db.transaction(ATTACHMENT_META_STORE, 'readwrite').objectStore(ATTACHMENT_META_STORE).put(next, key));
+      return { sha256: key, refCount: nextRef, deleted: false };
+    }
+    // 归零：一个事务里同时删 blob + meta。
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([ATTACHMENT_BLOB_STORE, ATTACHMENT_META_STORE], 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error('IndexedDB 删除失败'));
+      tx.onabort = () => reject(tx.error ?? new Error('IndexedDB 事务中止'));
+      tx.objectStore(ATTACHMENT_BLOB_STORE).delete(key);
+      tx.objectStore(ATTACHMENT_META_STORE).delete(key);
+    });
+    return { sha256: key, refCount: 0, deleted: true };
+  } catch (err: any) {
+    return { error: true, message: `release 失败: ${err?.message ?? err}` };
+  }
 }
 
 // 导出单例

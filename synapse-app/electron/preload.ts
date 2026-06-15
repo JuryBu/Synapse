@@ -73,6 +73,17 @@ contextBridge.exposeInMainWorld('synapse', {
     status: (opts: { repoRoot: string; path: string }) => ipcRenderer.invoke('worktree:status', opts),
   },
 
+  // 附件分离存储 (M2-R6) — 内容寻址 blob 层。桌面走 IPC，落 userData/attachments/。
+  attachment: {
+    put: (opts: { data: string; mime?: string; name?: string; kind?: string }) =>
+      ipcRenderer.invoke('attachment:put', opts),
+    get: (sha256: string) => ipcRenderer.invoke('attachment:get', sha256),
+    has: (sha256: string) => ipcRenderer.invoke('attachment:has', sha256),
+    delete: (sha256: string) => ipcRenderer.invoke('attachment:delete', sha256),
+    addRef: (sha256: string) => ipcRenderer.invoke('attachment:addRef', sha256),
+    release: (sha256: string) => ipcRenderer.invoke('attachment:release', sha256),
+  },
+
   // 终端 (Stage 13 实现)
   terminal: {
     create: (opts: any) => ipcRenderer.invoke('terminal:create', opts),

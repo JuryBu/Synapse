@@ -1,9 +1,13 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 
+// M2-R6 附件引用层：image_url / file part 内联 base64 不再落库/发送，统一以 sha256 内容寻址引用。
+//   - sha256：put 返回的内容地址，落库/发送的唯一权威；url/data 是【内存态即时预览】(blobURL/dataUrl)，落库前必清。
+//   - size/mime/name：引用元数据，R4 token 估算在「未还原成 base64」时按 size 折算视觉占用，不必先 get 还原。
+//   - url 仍保留：发 API 前 agentLoop 按 sha256 get 还原成真 dataUrl 填回 url（模型需要真图）。
 export type MessageContentPart =
   | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' }; attachmentId?: string }
-  | { type: 'file'; file: { filename: string; mimeType?: string; data?: string; url?: string }; attachmentId?: string };
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' }; attachmentId?: string; sha256?: string; size?: number; mime?: string; name?: string }
+  | { type: 'file'; file: { filename: string; mimeType?: string; data?: string; url?: string; sha256?: string; size?: number }; attachmentId?: string };
 
 export interface AttachmentRef {
   id: string;
@@ -12,8 +16,11 @@ export interface AttachmentRef {
   mimeType?: string;
   size?: number;
   kind: 'image' | 'document' | 'text' | 'archive' | 'other';
+  // previewUrl / payloadUrl 为【内存态】即时预览（blobURL 或 dataUrl），落库前会被 sanitize 清掉，DB 绝不含 base64。
   previewUrl?: string;
   payloadUrl?: string;
+  // M2-R6：附件实体的 sha256 内容地址（落库/发送的唯一权威引用；上传时 platform.attachment.put 返回）。
+  sha256?: string;
   status: 'pending' | 'ready' | 'error' | 'sent';
   error?: string;
 }
@@ -510,6 +517,9 @@ export const conversationSlice = createSlice({
       if (idx >= 0) {
         state.messages[idx].content = action.payload.content;
         state.messages[idx].contentParts = textToContentParts(action.payload.content);
+        // M2-R6：编辑后消息变纯文本，原附件引用一并丢弃（contentParts 已重置，attachments 也清空），
+        // 与 AgentPanel.handleEdit 对被编辑消息的 release 守恒；否则 store 残留指向已 GC 实体的 sha256。
+        state.messages[idx].attachments = undefined;
         // 截断后续消息
         state.messages = state.messages.slice(0, idx + 1);
       }

@@ -1,5 +1,11 @@
 import { platform } from '@/platform';
 import type { AssistantRun, FileDiffSummary, FileSnapshot, Message } from '@/store/slices/conversation';
+import {
+  sanitizeMessagesForPersistence,
+  releaseMessageAttachments,
+  migrateMessagesAttachments,
+  rollbackMigratedShas,
+} from './attachmentRefs';
 
 export const CONVERSATION_SCHEMA_VERSION = 1;
 export const AUTOSAVE_ID = 'autosave-current';
@@ -55,9 +61,12 @@ export function createConversationId(): string {
 export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Promise<void> {
   const id = snapshot.id || AUTOSAVE_ID;
   const timestamp = snapshot.timestamp ?? Date.now();
+  // M2-R6：落库前剥掉任何残留 base64（持 sha256 引用即清内联 data:），localStorage / 平台两条路都净化。
+  const sanitizedMessages = sanitizeMessagesForPersistence(snapshot.messages);
   const normalized = {
     ...snapshot,
     id,
+    messages: sanitizedMessages,
     schemaVersion: CONVERSATION_SCHEMA_VERSION,
     timestamp,
   };
@@ -80,7 +89,7 @@ export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Prom
     tags: snapshot.tags === undefined ? undefined : normalizeTags(snapshot.tags),
   };
 
-  await persistPlatformSnapshot(id, metadata, snapshot.messages);
+  await persistPlatformSnapshot(id, metadata, sanitizedMessages);
 }
 
 export async function clearAutosaveSnapshot(): Promise<void> {
@@ -124,8 +133,10 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
     tags: snapshot.tags === undefined ? undefined : normalizeTags(snapshot.tags),
   };
 
-  await persistPlatformSnapshot(id, metadata, snapshot.messages);
-  writeLegacyConversation(id, snapshot.messages);
+  // M2-R6：正式保存同样落库去 base64。
+  const sanitizedMessages = sanitizeMessagesForPersistence(snapshot.messages);
+  await persistPlatformSnapshot(id, metadata, sanitizedMessages);
+  writeLegacyConversation(id, sanitizedMessages);
 
   return {
     id,
@@ -180,6 +191,9 @@ export async function renameConversation(id: string, title: string): Promise<voi
 }
 
 export async function deleteConversationSnapshot(id: string): Promise<void> {
+  // M2-R6 refCount GC：删对话前先把它引用的附件 sha256 收齐，删后逐个 release（归零删实体）。
+  // 删消息记录会丢失引用信息，故必须在 delete 之前读取。失败吞掉，不阻塞删除主流程。
+  await releaseConversationAttachments(id);
   await platform.conversation.delete(id).catch(() => false);
   deleteLegacyConversation(id);
 }
@@ -187,6 +201,9 @@ export async function deleteConversationSnapshot(id: string): Promise<void> {
 export async function deleteConversationSnapshots(ids: string[]): Promise<void> {
   const uniqueIds = [...new Set(ids)].filter(Boolean);
   if (!uniqueIds.length) return;
+
+  // M2-R6 refCount GC：批量删同样先收集再 release。
+  await Promise.all(uniqueIds.map(id => releaseConversationAttachments(id)));
 
   if (platform.conversation.batchDelete) {
     await platform.conversation.batchDelete(uniqueIds).catch(async () => {
@@ -197,6 +214,113 @@ export async function deleteConversationSnapshots(ids: string[]): Promise<void> 
   }
 
   uniqueIds.forEach(deleteLegacyConversation);
+}
+
+/** 删对话前：读出其消息、收集附件 sha256 并 release（refCount-1，归零 GC）。失败静默。 */
+async function releaseConversationAttachments(id: string): Promise<void> {
+  try {
+    const snapshot = await loadPlatformSnapshot(id) ?? loadLegacyConversationSnapshot(id);
+    if (snapshot?.messages?.length) {
+      await releaseMessageAttachments(snapshot.messages);
+    }
+  } catch {
+    // GC 是加速/清理层，绝不阻塞删除主流程。
+  }
+}
+
+/**
+ * M2-R6 懒迁移入口：把一个 snapshot 里旧内联 base64 抽离成 sha256 引用，若有变更则回写 DB（按 id 持久化）。
+ * 「用到才迁、不阻塞渲染」——调用方（AgentPanel / ConversationList）在 load 之后 fire-and-forget 调用，
+ * 迁移成功后下次加载即引用态。
+ *
+ * onMigrated 回调（可选）：迁移确有变更时，把【迁移后的引用态 messages + 对话 id】交回调用方，
+ * 由调用方决定是否安全地用其更新 store（需自行校验 store 当前对话未被切换/未追加新消息，再 dispatch）。
+ * 不提供回调则仅回写 DB（store 保持旧 base64 态，下次加载即引用态）。
+ *
+ * 返回迁移后的 messages（changed=false 时即原 messages）。
+ */
+/**
+ * 按 conversationId 的在途迁移锁（模块级 Map<id, Promise>）。
+ * ★ Codex 中风险修复（并发迁移竞态）：AgentPanel 挂载迁 AUTOSAVE、ConversationList 切换迁目标对话，
+ *   多入口/多窗口/重载下若对同一 DB 行（仍内联 base64）在首个迁移回写完成前重入，两路各 put 一遍 →
+ *   refCount 翻倍，writeback 幂等只在【完成后】生效，竞态窗口内防不住。
+ *   同 id 复用同一 in-flight 迁移 Promise，串行化首个迁移；后到的复用结果，不再重复 put。
+ */
+const inflightMigrations = new Map<string, Promise<Message[]>>();
+
+export function migrateSnapshotAttachments(
+  snapshot: ConversationSnapshot,
+  onMigrated?: (id: string, messages: Message[]) => void,
+): Promise<Message[]> {
+  if (!snapshot?.messages?.length) return Promise.resolve(snapshot?.messages ?? []);
+  const id = snapshot.id || AUTOSAVE_ID;
+  const existing = inflightMigrations.get(id);
+  if (existing) return existing;
+  const task = runSnapshotMigration(id, snapshot, onMigrated)
+    .finally(() => { inflightMigrations.delete(id); });
+  inflightMigrations.set(id, task);
+  return task;
+}
+
+async function runSnapshotMigration(
+  id: string,
+  snapshot: ConversationSnapshot,
+  onMigrated?: (id: string, messages: Message[]) => void,
+): Promise<Message[]> {
+  const { messages, changed, newShas } = await migrateMessagesAttachments(snapshot.messages);
+  if (!changed) return snapshot.messages;
+  const refMessages = sanitizeMessagesForPersistence(messages);
+  // 回写：仅替换消息体（已是引用态，sanitize 再兜一道），保持元数据不变。
+  // ★ Codex 中风险②修复：必须把【所有读取来源】都回写成引用态，否则下次 load 仍读到旧 base64 →
+  //   重复 put 抬高 ref_count 且永不清。来源含：平台 DB（loadPlatformSnapshot）、legacy map（loadLegacyConversationSnapshot）、
+  //   AUTOSAVE_KEY localStorage 镜像。三者全覆盖才真正闭环（迁移幂等）。
+  // ★ Codex 中风险修复（回写失败 → 重复 put）：迁移在回写前已 put 成功(refCount+1)。若回写抛错，
+  //   DB 仍是旧内联态，下次 load 再次 hasInlineBase64 → 再 put → refCount 单调上涨、GC 永远追不平。
+  //   故回写抛错时把本轮新增引用 newShas 逐个 release 回滚，并【不通知 onMigrated】（store 保持旧 base64 态，
+  //   下次重迁会重新 put），使「put 与持有关系」严格守恒。
+  try {
+    const existing = await platform.conversation.get(id).catch(() => null);
+    if (existing) {
+      // 平台 DB 有行：replaceMessages 覆盖即闭环（下次 loadPlatformSnapshot 优先返回引用态）。
+      await platform.conversation.replaceMessages(id, refMessages.map(message => ({
+        ...message,
+        conversationId: id,
+      })));
+      // 顺带清理同 id 的 legacy 残留（若存在），避免它日后又被当旧数据读出。
+      if (id in readLegacyConversationMap()) writeLegacyConversation(id, refMessages);
+    } else if (id in readLegacyConversationMap()) {
+      // 纯 legacy 对话（平台 DB 无行、仅 synapse_conversations map 有）：必须回写 legacy map，
+      // 否则每次打开都重新 put、ref_count 暴涨且 base64 永留。覆盖为引用态后下次不再迁移。
+      writeLegacyConversation(id, refMessages);
+    } else {
+      // 平台 DB 与 legacy 均无该 id 的行：无处可回写，下次 load 仍会读到旧 base64 重迁 →
+      // 与「回写失败」同源，回滚本轮引用避免 refCount 漂移。
+      await rollbackMigratedShas(newShas);
+      return snapshot.messages;
+    }
+    // 同步 localStorage 自动保存镜像（若当前就是 autosave）。
+    if (id === AUTOSAVE_ID) {
+      try {
+        const saved = localStorage.getItem(AUTOSAVE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          parsed.messages = refMessages;
+          localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(parsed));
+        }
+      } catch { /* localStorage 不可用则跳过 */ }
+    }
+  } catch {
+    // 回写失败：回滚本轮新增引用，保持 DB 旧内联态（下次再迁），不通知 onMigrated。
+    await rollbackMigratedShas(newShas);
+    return snapshot.messages;
+  }
+  // 回写成功后通知调用方（让其把 store 也修正成引用态，杜绝 store 残留 base64 反复被 autosave 写回）。
+  try {
+    onMigrated?.(id, messages);
+  } catch {
+    // 回调异常不影响迁移结果。
+  }
+  return messages;
 }
 
 export async function updateConversationMetadata(
@@ -290,6 +414,9 @@ async function persistPlatformSnapshot(
 ): Promise<void> {
   const existing = await platform.conversation.get(id).catch(() => null);
   let createdNew = false;
+  // M2-R6 终极防线：所有平台落库都从这里走，内部再 sanitize 一道（幂等），
+  // 即便上游漏调 sanitizeMessagesForPersistence 也保证 DB 绝不含 base64。
+  const safeMessages = sanitizeMessagesForPersistence(messages);
   try {
     if (existing) {
       await platform.conversation.update(id, metadata);
@@ -298,7 +425,7 @@ async function persistPlatformSnapshot(
       createdNew = true;
     }
 
-    await platform.conversation.replaceMessages(id, messages.map(message => ({
+    await platform.conversation.replaceMessages(id, safeMessages.map(message => ({
       ...message,
       conversationId: id,
     })));
