@@ -147,7 +147,12 @@
   - UI：MessageBubble GitBranch 按钮+右键菜单；AgentPanel handleBranch(autosave源先fork真实id作parent、切换新对话、toast)。
   - 对抗审查 branch正确性5项全过+copyRecord/refCount守恒；修2medium：①addRef失败不再静默吞(tryAddRefOnce 区分reject/Web{error}+重试+addRefFailedShas+warning提示)②autosave save失败中止分支(提示先发消息)。
   - 核实：build EXIT0(2.70s)+electron:build过；fix remaining 空。
-  - 🔴 M2-3 真机验证发现【阻断 bug】(子代理 a261ed1c)：分支按钮在/源对话保护到位，但点击分支报 `UNIQUE constraint failed: messages.id`——分支复制消息复用了源 message.id 撞全局主键，分支功能完全跑不通。根因：handleBranch promotion fork(clearAutosave 在 fork 之后→autosave-current 行的 message id 还占着) + branchConversation subset `{...m}` 保留原 message.id。修复方向:复制消息成独立新对话时重新生成 message.id(record 用 step/round、附件用 sha256，均不依赖 message.id，安全)；promotion 场景注意保留 assistantRuns 关联。**编译+对抗审查均过但真机才暴露——再次印证真机验证必要。** 修复 workflow 进行中。
+  - ✅ M2-3 阻断 bug 已修复 + 2 轮真机复验通过：
+    - bug(子代理 a261ed1c 抓出)：分支复制复用源 message.id 撞 UNIQUE 主键 `messages.id`，分支跑不通。
+    - 修复(workflow whq21wau1)：branchConversation subset message.id 改 crypto.randomUUID+同批 Set 去重(治自撞+全库撞) / promotion 调 clearAutosave 顺序(先清后写)保原 id 保 assistantRuns 关联 / subset 剥离 runId/runEvents/diffs/rollbackSnapshotId 运行差异态(清洁分支防渲染源 diff 崩/误改工作区) / autosave 分支 record 继承被 FK CASCADE 删空 → copyRecordFrom 内存快照(级联删前抓取)+双模式对等。对抗审查 5 high-med 全修。
+    - 复验(子代理 acb921de)全过：真机点分支不撞主键、新对话只含回溯点及前、新消息 UUID 与源零重叠、源对话完整保留、清洁无 diff 残留、parentId/branchedFromMessageId DB 记录正确。编译过(build 2.16s)。
+    - **教训：编译+对抗审查过但真机第一步就撞主键——对抗审查静态读码测不出 DB UNIQUE 运行约束；DB 写入类 stage 一律真机为准、且早做。** [[工作教训：不轻易归因外部/上游，下结论前用真实数据真机验证]]
+  - 📌 M2-3 残留(归 M2-6，非阻断)：分支后 setConversation 未回填 parentId/branchedFromMessageId 到 store(DB 正确，但 store/loadConversation 路径都未接这两字段→store 显示 null)；M2-6 做对话级元数据 per-conv 时统一接(setConversation+loadConversation+snapshot 都带 parentId/mode 等对话级字段)。
   - 📌 遗留(子代理 notes)：autosave fork 时 record 从 AUTOSAVE_ID 迁到新真实 id 仍是历史遗留点(分支场景用 recordSrcId 绕过)，与 R6「正式保存 record 迁移 edge」同源，可合并单列。
   - 其后：**M2-S 稳定性**(retry后台化/重连/fallback/图片预检，见下) → M2-5 worktree agent 执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
 - 2026-06-16 📌 **M2-S 稳定性加固（用户补充：实际使用稳定性 retry 自动后台化/重连/fallback 需注意）**——横切关注，规划成专门 stage：
