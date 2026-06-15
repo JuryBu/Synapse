@@ -129,13 +129,16 @@
   - 核实：build EXIT0(2.67s)+electron:build tsc无error。
   - 📌 R5 low 小本本：callOnce timeout/abort 回调无条件 client.abort()(已 settle 时 no-op 无害)；run() 非可重入(已加入口闸,UI isStreaming 串行化双保险)。
   - ⏳ R5 真机验证(压缩中 stop 中断+重入被挡)attach record 体系完整链路。
-  - 下一步：**R6 附件分离存储**（方案 2026-06-16 反重力调研后定稿，见 Plan_4_M2 §六；反重力调研记忆已存）：
-    - [ ] platform.attachment 抽象(put/get/delete/has，sha256 内容寻址)：桌面 fs `attachments/<sha256[:2]>/<sha256>.<ext>` + 网页 IndexedDB
-    - [ ] attachments 账本表(sha256 PK,mime,kind,size,refCount,createdAt) + ipc CRUD + database 建表
-    - [ ] 消息引用层：contentParts.image_url/message.attachments[] 存 sha256 引用(去 base64)；发 API/渲染时 get 还原
-    - [ ] record 源/autosave 不带 base64(只引用)，根治膨胀
-    - [ ] refCount GC(删/编辑移除附件归零删实体)
-    - [ ] 懒迁移(读到旧内联 base64→抽离+换引用)
-    - [ ] 双模式编译 + 真机验证(上传→sha256去重→渲染→迁移)
+- 2026-06-16 ✅ **M2-R6 附件分离存储落地**（ultracode：基础设施段+接入段+对抗审查8high-med+修复；commit 9be862f；方案见 Plan_4_M2 §六，反重力调研由子代理 a6b9c414 完成、记忆已存）：
+    - [x] platform.attachment 抽象(put/get/has/delete/addRef/release，sha256 内容寻址)：桌面 fs `attachments/<sha256[:2]>/<sha256>.<ext>` 两级分桶 + 网页 IndexedDB(crypto.subtle sha256 两端一致)
+    - [x] attachments 账本表(sha256 PK,mime,kind,size,ref_count,created_at) + electron/ipc/attachment.ts CRUD(原子写临时→rename,64hex防穿越,50MB上限) + database 建表
+    - [x] 消息引用层(新建 attachmentRefs.ts 集中)：contentParts/attachments 存 sha256 引用(去 base64)；发 API 按 sha256 get 还原真图、渲染还原
+    - [x] record 源图片转「[图片 name]」占位、autosave/落库去 base64(sanitizeMessagesForPersistence + persist 终极防线)
+    - [x] refCount GC(删对话/消息/编辑移除附件 release 归零删实体)
+    - [x] 懒迁移(读到旧内联 base64→put 抽离+换引用，surplus release 守恒防泄漏)
+    - [x] 双模式编译过(build 2.65s + electron:build tsc 无 error)
+    - 🔴 对抗审查修 2 high(懒迁移 double-put 泄漏→surplus release / 对话 fork refCount 欠计→addRef)+2 medium(Web put TOCTOU 收单事务 / base64 容错两端对齐)
+    - ✅ R6 真机验证通过(子代理 a0ac8c75)：put 去重(同图同 sha256+refCount 累加不重复写)/get 逐字节还原/delete 归零 GC/**UI 上传后 DB 零 base64(hasBase64InDbRow=false,核心目的达成)**/发 API 抓包确认真 base64 还原+剥纯净 part/懒迁移抽离不丢图+跨端 sha256 一致(crossEndShaMatch=true)
+    - 📌 上游图片小本本(非 R6)：本地 API 54861 上游模型对 base64 图片输入报「image data not a valid image」(1x1/16x16 标准 PNG 都拒)，抓包已证真 base64 发出、R6 还原侧无问题，待主人单独查本地代理(Codex/GPT 通道)的图片输入能力/封装要求
     - ⏳ 推后：网页真·一套 SQLite 引擎统一(sql.js WASM + IndexedDB 持久化)，用户想要但工作量大
   - 其后：M2-3 对话分支 → M2-5 worktree agent 执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
