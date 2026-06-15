@@ -129,4 +129,13 @@
   - 核实：build EXIT0(2.67s)+electron:build tsc无error。
   - 📌 R5 low 小本本：callOnce timeout/abort 回调无条件 client.abort()(已 settle 时 no-op 无害)；run() 非可重入(已加入口闸,UI isStreaming 串行化双保险)。
   - ⏳ R5 真机验证(压缩中 stop 中断+重入被挡)attach record 体系完整链路。
-  - 下一步：**R6**(附件分离存储+存量迁移) → M2-3对话分支 → M2-5 worktree agent执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
+  - 下一步：**R6 附件分离存储**（方案 2026-06-16 反重力调研后定稿，见 Plan_4_M2 §六；反重力调研记忆已存）：
+    - [ ] platform.attachment 抽象(put/get/delete/has，sha256 内容寻址)：桌面 fs `attachments/<sha256[:2]>/<sha256>.<ext>` + 网页 IndexedDB
+    - [ ] attachments 账本表(sha256 PK,mime,kind,size,refCount,createdAt) + ipc CRUD + database 建表
+    - [ ] 消息引用层：contentParts.image_url/message.attachments[] 存 sha256 引用(去 base64)；发 API/渲染时 get 还原
+    - [ ] record 源/autosave 不带 base64(只引用)，根治膨胀
+    - [ ] refCount GC(删/编辑移除附件归零删实体)
+    - [ ] 懒迁移(读到旧内联 base64→抽离+换引用)
+    - [ ] 双模式编译 + 真机验证(上传→sha256去重→渲染→迁移)
+    - ⏳ 推后：网页真·一套 SQLite 引擎统一(sql.js WASM + IndexedDB 持久化)，用户想要但工作量大
+  - 其后：M2-3 对话分支 → M2-5 worktree agent 执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。

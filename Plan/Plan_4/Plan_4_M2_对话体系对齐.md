@@ -113,3 +113,29 @@ recordStore 新 API：`appendBatch`（追加+同步水位，幂等：本批 step
 - appendBatch 原子性（后端原子 IPC 或幂等校验防 fallback 重入丢批）。
 - 注入只认 batches；旧 content_md 列保留不动作回滚保险。
 - 渐进式读现阶段先按上述融合分级；mcp-memory-store 的块级 nextReadHint 续读可作 record_read 的参考。
+
+## 六、附件分离存储最终方案（2026-06-16 反重力调研后定稿）
+
+> 编号说明：对应原 §五分 stage 的 M2-R7，实际执行为 **M2-R6**（R1 已合并原 R1+R2+R4，后续顺延：R3 渐进读 / R4 90% / R5 fallback / R6 附件分离）。
+
+### 背景：现状膨胀
+附件(图片/文件) base64 **双重内联**：`contentParts.image_url.url` + `message.attachments[].payloadUrl/previewUrl` 都存 base64，进 messages 表 + 压进 record 源 + autosave。一张图存多份、DB 巨大、变卡。
+
+### 反重力(Antigravity)调研结论（子代理 a6b9c414，记忆已存）
+- 对话本体(`conversations/<id>.pb`，加密) 与 媒体实体(`brain/<convId>/` 明文文件) **物理分离**；正文用**绝对路径**引用媒体。
+- **命名用时间戳 → 无内容去重**（同图实测存 3 份）= 反重力的不足。
+- → Synapse 仿效「本体/实体分离 + 正文只放引用」，但用 **sha256 内容寻址** 反超去重。
+
+### Synapse 附件分离设计（定稿）
+1. **对话本体/DB 只存引用**：消息里图片从 base64 改 `{ id, sha256, name, mime, kind, size }`；不进 record 源、不进 autosave。
+2. **附件实体内容寻址存储**：`attachments/<sha256[:2]>/<sha256>.<ext>`（两级分桶防单目录爆炸）；写前算 sha256，命中已存在直接复用 → **天然去重**。
+3. **统一引用层**：`contentParts.image_url` + `message.attachments[]` 都引用同一 sha256，不再各存 base64。
+4. **附件账本表** `attachments(sha256 PK, mime, kind, size, refCount, createdAt)`；删/编辑移除附件 refCount-1，归零 GC 删实体。
+5. **读时还原**：发 API / 渲染时按 sha256 取回 base64/blob URL（platform.attachment.get）。
+6. **懒迁移**：读到旧内联 base64 → 抽离到附件存储 + 换 sha256 引用（用到才迁、无启动卡顿，与 record/DB 懒迁移一脉相承）。
+
+### 网页+桌面统一（落地形态）
+- **sha256 引用层 = 统一抽象边界**：DB schema、引用格式、上层逻辑(上传/读取/还原/渲染/迁移)两端**完全同一套代码**。
+- **blob 后端两端实现**（压在引用层下、对上层透明）：桌面 = 本地文件系统 `attachments/` 目录；网页 = IndexedDB。
+- `platform.attachment` 抽象：`put(blob)→sha256` / `get(sha256)→blob` / `delete(sha256)` / `has(sha256)`。
+- ⏳ **网页端「真·一套 SQLite 引擎完全统一」（sql.js WASM + IndexedDB 持久化）= 用户想要但工作量大，往后推**；现阶段先用「引用层统一 + blob 后端各自实现」。
