@@ -140,13 +140,37 @@ export function compressContext(
   messages: Array<{ role: string; content: string }>,
   maxTokens: number = MAX_CONTEXT_TOKENS,
   realTokenCount?: number,
-): { compressed: Array<{ role: string; content: string }>; wasCompressed: boolean } {
+): {
+  compressed: Array<{ role: string; content: string }>;
+  wasCompressed: boolean;
+  /**
+   * M2-R4 问题4：少条超长危险态标志。
+   * true 表示「token 已超阈值，但消息条数 < 6 无法做切片压缩」——切片压缩（keepCount=4）此时无可压缩余量，
+   * 直接全量发送有撑爆窗口风险。调用方（agentLoop）应据此对超长单条做内容截断保护后再发送。
+   */
+  overLimitWithoutCompression?: boolean;
+} {
   // 优先使用 API 返回的真实 token 数；没有时回退到字符估算
   const currentTokens = realTokenCount && realTokenCount > 0 ? realTokenCount : countConversationTokens(messages);
   const threshold = maxTokens * COMPRESSION_THRESHOLD;
 
-  if (currentTokens <= threshold || messages.length < 6) {
+  // 未超阈值：无条件不压缩。
+  if (currentTokens <= threshold) {
     return { compressed: messages, wasCompressed: false };
+  }
+
+  // M2-R4 问题4 修复：原实现 `currentTokens <= threshold || messages.length < 6` 把「条数<6」也当作
+  // 无条件不压缩，导致「少条但单条极长」（如粘贴超长课件/代码）即便已超阈值仍全量发送、撑爆窗口。
+  // 现拆分：条数<6 只跳过【切片压缩】（keepCount=4 时无可压缩余量），但暴露 overLimitWithoutCompression 危险态，
+  // 由调用方对超长单条做截断保护。此处仅告警，不在 compressed 内截断——因为不压缩分支调用方实际发送的是
+  // 原始 requestHistory（含图片/附件 part），截断需在调用方层面对发送体做（见 agentLoop.ts 不压缩守卫）。
+  if (messages.length < 6) {
+    console.warn(
+      `[compressContext] token(${currentTokens}) 已超阈值(${Math.floor(threshold)})，` +
+      `但消息条数(${messages.length})<6 无法切片压缩（少条超长）。已标记 overLimitWithoutCompression，` +
+      `调用方应对超长单条做截断保护以防撑爆窗口。`,
+    );
+    return { compressed: messages, wasCompressed: false, overLimitWithoutCompression: true };
   }
 
   // Keep last 4 messages (recent context), compress earlier ones

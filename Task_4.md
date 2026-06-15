@@ -114,5 +114,11 @@
   - 清死代码：generateRecord/buildUpdatePrompt/buildCreatePrompt/GenerateRecordInput/GenerateRecordResult 全删(grep全src 0命中)，generateBatch及依赖完好。
   - 主线核实：build EXIT0(2.44s)+electron:build tsc无error；死代码0残留；2个medium(≤3批不看预算/骨架占用不计入预算)已被修复agent修。
   - 📌 R3 low 小本本：fast模式不注入record_read指引(fast不注入record故无害)；空骨架批信息密度低；getBatch失败文案可加引导；预算未精算分隔符/包裹头开销(40%本就保守可接受)。
-  - ⏳ R3 真机验证(渐进读分级注入+record_read展开)进行中(子代理)。
-  - 下一步：**R4**(90% B方案:组装请求体本地tokenize判contextWindow*0.9) → R5(fallback崩溃恢复)/R6(附件分离+存量迁移) → M2-3对话分支 → M2-5 worktree agent执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
+  - ✅ R3 真机验证通过(子代理 web-fetcher+本地API)：凑4批,注入分级正确(批0头全文+批1中间骨架标注+批2/3尾全文,骨架剥离只留要点),record_read 被 AI 真实调用并返回该批 contentMd 全文(按需展开闭环成立),本地API正常,临时改动全还原(git diff 空)。
+- 2026-06-16 ✅ **M2-R4 90% 触发判定 B方案落地**（主线实现+ultracode对抗审查+修复）：
+  - 触发判定从「上一轮 API 滞后 token」改为「本轮实际组装请求体本地 tokenize」(agentLoop run ~340-362)：assembledTokens=estimateTokens(systemPrompt)+toolsTokens(对齐发送处:mode!=fast&&toolsEnabled&&tools.length)+countConversationTokens(全部历史)+estimateNonTextPartsTokens(多模态/附件)；与上一轮 promptTokens 取 max 兜底；判 ≥ 真实 contextWindow*COMPRESSION_THRESHOLD(0.9)。
+  - 对抗审查(wzgpjxzds)13issue/4medium 全修：①兜底用 promptTokens 非 totalTokens(量纲对齐纯输入)②estimateNonTextPartsTokens 计入图片/附件 token(防多模态低估)③compressContext 拆 overLimitWithoutCompression 危险态+truncateOverLongHistory 截断「少条超长」(防撑爆)④注释修正。
+  - 核实：build EXIT0(1.67s)+electron:build tsc无error。
+  - 📌 R4 low 小本本：estimateTokens 粗估对英文/JSON 系统性低估(首轮无API兜底偏弱,0.9阈值留余量)；per-message+4开销 system/tools 未计(量级可忽略)；判定仅 run 入口一次、不含本 run 内 tool round 增量(单次长 agentic run 循环中段可能超窗,首版可接受)。
+  - ⏳ R4 真机验证(90%触发时机+多模态+少条超长截断)attach 到 record 体系完整链路一起验。
+  - 下一步：**R5**(fallback崩溃恢复:同步+可中止+回压缩前一刻)/R6(附件分离+存量迁移) → M2-3对话分支 → M2-5 worktree agent执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。

@@ -14,7 +14,7 @@ import {
 } from '../store/slices/conversation';
 import { setConnectionStatus } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
-import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS, estimateTokens } from './systemPrompt';
+import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
 import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type SynapseRecord } from './recordStore';
 import { generateBatch } from './recordGenerator';
 import { AUTOSAVE_ID } from './conversationPersistence';
@@ -63,6 +63,116 @@ function chatContentToText(content: ChatMessage['content']): string {
     .filter((part: any) => part?.type === 'text')
     .map((part: any) => part.text)
     .join('');
+}
+
+/**
+ * M2-R4 修复（问题2 多模态低估）：chatContentToText 只取文本 part，
+ * 但图片/附件 part 会随请求体实际发送并占用大量 token。
+ * 这里对【非文本 part】做体积近似，计入压缩触发判定，避免「带图/附件对话」组装量系统性偏小、压缩偏晚。
+ *
+ * 估算口径（保守粗估，宁多勿少，方向与触发判定一致）：
+ *   - image_url：base64 data URI 按其编码长度折算 token（≈ 字符数 * 0.25，与 estimateTokens 英文系数一致）；
+ *                外链 url 走视觉 token 固定估值（detail=low 约 85，high/auto 约 1100，对齐 OpenAI 视觉计费量级）。
+ *   - file：优先按 file_data（base64）长度折算；仅有 file_id 时给固定占位估值（实际体积不可见，给保守下限）。
+ * 文本 part 不在此计（由 chatContentToText → countConversationTokens 统一计）。
+ */
+const IMAGE_TOKENS_LOW = 85;       // detail=low 视觉 token（OpenAI 量级）
+const IMAGE_TOKENS_HIGH = 1100;   // detail=high/auto 视觉 token 上界近似
+const FILE_ID_PLACEHOLDER_TOKENS = 256; // 仅有 file_id（体积不可见）时的保守占位估值
+function estimateNonTextPartsTokens(content: ChatMessage['content']): number {
+  if (typeof content === 'string') return 0;
+  let total = 0;
+  for (const part of content as any[]) {
+    if (!part || part.type === 'text') continue;
+    if (part.type === 'image_url') {
+      const url: string = part.image_url?.url || '';
+      if (url.startsWith('data:')) {
+        // base64 内联图：按 data URI 编码长度折算（base64 字符直接进请求体）
+        total += Math.ceil(url.length * 0.25);
+      } else {
+        const detail = part.image_url?.detail;
+        total += detail === 'low' ? IMAGE_TOKENS_LOW : IMAGE_TOKENS_HIGH;
+      }
+    } else if (part.type === 'file') {
+      const data: string = part.file?.file_data || '';
+      total += data ? Math.ceil(data.length * 0.25) : FILE_ID_PLACEHOLDER_TOKENS;
+    }
+  }
+  return total;
+}
+
+/** 截断标记：超长单条被截断时插入，提示模型该消息内容已被裁剪。 */
+const TRUNCATION_NOTICE = '\n\n[…内容过长，已截断以避免超出上下文窗口…]';
+
+/**
+ * M2-R4 问题4 修复：「少条超长」危险态（compressContext 返回 overLimitWithoutCompression=true）下，
+ * 切片压缩无可压缩余量，直接全量发送会撑爆窗口。这里对发送体里【最长的文本 part】按比例截断，
+ * 把组装总量压回 threshold 以下（尽力而为），避免请求被服务端拒绝或截断。
+ *
+ * 注意：只截断 text part，保留图片/附件 part 结构（它们体积无法靠裁字符缩小，且模型仍需感知其存在）；
+ * 返回新的消息数组（不就地修改 requestHistory，避免污染 store / record 切片口径）。
+ *
+ * @param messages   待发送历史（apiHistory，含 string 或 ChatContentPart[] content）
+ * @param fixedTokens systemPrompt + tools + 非文本 part 的固定占用（不可截断部分）
+ * @param threshold  目标上限（token）；截断后总量尽量 ≤ 该值
+ */
+function truncateOverLongHistory(
+  messages: ChatMessage[],
+  fixedTokens: number,
+  threshold: number,
+): ChatMessage[] {
+  // 当前文本侧总量
+  const textTokensOf = (m: ChatMessage) => estimateTokens(chatContentToText(m.content));
+  let textTotal = messages.reduce((s, m) => s + textTokensOf(m), 0);
+  let budget = threshold - fixedTokens;
+  if (budget < 0) budget = 0;
+  // 文本侧可用预算（给文本 part 的总额度）
+  if (textTotal <= budget) return messages; // 固定占用已把超额吃掉，文本无需截断
+
+  // 找最长文本消息，按比例把它截到「让文本总量回到预算」所需的目标长度。
+  // 一次只截最长的一条通常够用（少条超长场景往往是单条巨型粘贴）；循环兜底处理多条都很长的情况。
+  const result = messages.map(m => ({ ...m })) as ChatMessage[];
+  let truncatedAny = false;
+  for (let guard = 0; guard < result.length && textTotal > budget; guard++) {
+    // 选当前文本最长的一条
+    let idx = -1;
+    let maxTok = -1;
+    for (let i = 0; i < result.length; i++) {
+      const t = textTokensOf(result[i]);
+      if (t > maxTok) { maxTok = t; idx = i; }
+    }
+    if (idx < 0 || maxTok <= 0) break;
+
+    const overflow = textTotal - budget;            // 还需削减的 token
+    const target = Math.max(0, maxTok - overflow);  // 该条文本截断后的目标 token
+    // 目标 token → 目标字符数（按英文系数 0.25 反推，保守偏短，宁可多截一点不撑爆）
+    const targetChars = Math.max(0, Math.floor(target / 0.25));
+
+    const text = chatContentToText(result[idx].content);
+    if (text.length <= targetChars) break; // 已无法再削（避免死循环）
+    const kept = text.slice(0, targetChars) + TRUNCATION_NOTICE;
+
+    // 写回：原为纯文本 → 直接替换；原为 parts → 只重建文本 part（合并为一个），保留非文本 part
+    const orig = result[idx].content;
+    if (typeof orig === 'string') {
+      result[idx] = { ...result[idx], content: kept };
+    } else {
+      const nonText = (orig as any[]).filter(p => p?.type !== 'text');
+      result[idx] = {
+        ...result[idx],
+        content: [{ type: 'text', text: kept } as any, ...nonText],
+      };
+    }
+    truncatedAny = true;
+    textTotal = result.reduce((s, m) => s + textTokensOf(m), 0);
+  }
+
+  if (truncatedAny) {
+    console.warn(
+      `[agentLoop] 少条超长历史已截断：固定占用 ${fixedTokens} tokens，目标阈值 ${Math.floor(threshold)} tokens。`,
+    );
+  }
+  return result;
 }
 
 /** record 注入分级策略常量（M2-R3 渐进式读） */
@@ -227,11 +337,29 @@ export class AgentLoop {
     const modelContextWindow = currentModelOption?.capabilities?.contextWindow
       || currentModelOption?.contextWindow
       || MAX_CONTEXT_TOKENS;
-    const realTokenCount = (rootState as any).conversation?.tokenUsage?.totalTokens;
-    const { compressed, wasCompressed } = compressContext(
-      requestHistory.map(m => ({ role: m.role, content: chatContentToText(m.content) })),
+    // M2-R4（90% 触发 B方案）：压缩触发判定基于「本轮实际将发送的组装请求体」本地 tokenize，
+    // 而非上一轮 API 滞后 token。组装 = systemPrompt + tools schema + 全部历史原文（文本 + 图片/附件体积近似）。
+    // tools 计入条件对齐实际发送处（line ~422：mode!=='fast' && toolsEnabled && tools.length>0）。
+    // 多模态修复（问题2）：历史里非文本 part（图片/附件）会随请求体发送，文本侧 countConversationTokens
+    // 计不到，这里用 estimateNonTextPartsTokens 单独累加计入 assembledTokens，避免带图/附件对话组装量偏小、压缩偏晚。
+    const requestHistoryText = requestHistory.map(m => ({ role: m.role, content: chatContentToText(m.content) }));
+    const systemTokens = estimateTokens(systemPrompt);
+    const toolsTokens = (toolsEnabled && currentMode !== 'fast' && this.tools.length > 0)
+      ? estimateTokens(JSON.stringify(this.tools))
+      : 0;
+    const nonTextTokens = requestHistory.reduce((sum, m) => sum + estimateNonTextPartsTokens(m.content), 0);
+    const assembledTokens = systemTokens + toolsTokens + countConversationTokens(requestHistoryText) + nonTextTokens;
+    // 兜底口径修复（问题1/3）：用上一轮 API 实测 promptTokens（纯输入侧）而非 totalTokens 取 max。
+    // totalTokens = prompt_tokens + completion_tokens（含上一轮模型输出），与本轮纯输入侧 assembledTokens 量纲不同，
+    // 取 max 会被上一轮 completion 长度污染、系统性高估。promptTokens 才与 assembledTokens 同口径（=实际发送的输入）。
+    // 该兜底仅对「本地粗估异常偏小（如 tokenizer 系数偏差、上轮已压缩但本轮全量组装漏算）」场景生效：
+    // 正常情况 assembledTokens（本轮全量未压缩）通常更大占主导，兜底不介入。
+    const apiRealTokens = (rootState as any).conversation?.tokenUsage?.promptTokens || 0;
+    const triggerTokens = Math.max(assembledTokens, apiRealTokens);
+    const { compressed, wasCompressed, overLimitWithoutCompression } = compressContext(
+      requestHistoryText,
       modelContextWindow,
-      realTokenCount,
+      triggerTokens,
     );
 
     // M2-R1: 压缩时优先用 record（多批次结构化摘要）作稳定前缀以命中 prompt cache；
@@ -311,6 +439,18 @@ export class AgentLoop {
         title: '上下文压缩',
         message: recordMd ? '历史已压缩为 record 摘要' : '对话历史已压缩以保持性能',
         duration: 3000,
+      }));
+    } else if (overLimitWithoutCompression) {
+      // M2-R4 问题4：少条超长危险态——无法切片压缩，对发送体最长文本 part 做截断保护，防撑爆窗口。
+      // fixedTokens = systemPrompt + tools + 非文本 part（图片/附件，不可靠裁字符缩小）的固定占用。
+      const fixedTokens = systemTokens + toolsTokens + nonTextTokens;
+      const threshold = modelContextWindow * COMPRESSION_THRESHOLD;
+      apiHistory = truncateOverLongHistory(requestHistory, fixedTokens, threshold);
+      store.dispatch(addNotification({
+        type: 'warning',
+        title: '上下文超长',
+        message: '单条消息过长且无法压缩，已截断部分内容以避免超出上下文窗口',
+        duration: 4000,
       }));
     } else {
       apiHistory = requestHistory;
