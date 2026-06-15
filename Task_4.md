@@ -139,6 +139,12 @@
     - [x] 双模式编译过(build 2.65s + electron:build tsc 无 error)
     - 🔴 对抗审查修 2 high(懒迁移 double-put 泄漏→surplus release / 对话 fork refCount 欠计→addRef)+2 medium(Web put TOCTOU 收单事务 / base64 容错两端对齐)
     - ✅ R6 真机验证通过(子代理 a0ac8c75)：put 去重(同图同 sha256+refCount 累加不重复写)/get 逐字节还原/delete 归零 GC/**UI 上传后 DB 零 base64(hasBase64InDbRow=false,核心目的达成)**/发 API 抓包确认真 base64 还原+剥纯净 part/懒迁移抽离不丢图+跨端 sha256 一致(crossEndShaMatch=true)
-    - 📌 上游图片小本本(非 R6)：本地 API 54861 上游模型对 base64 图片输入报「image data not a valid image」(1x1/16x16 标准 PNG 都拒)，抓包已证真 base64 发出、R6 还原侧无问题，待主人单独查本地代理(Codex/GPT 通道)的图片输入能力/封装要求
+    - ✅ 图片复验澄清(子代理 ad033dd8 真实图实测，2026-06-16)：**R6 实现无 bug**——真实图(Bing 截图 125KB JPEG)模型完全正常识别(HTTP 200 精准描述)，get 还原 dataUrl 与原图 === 字节级无损，mime 全程正确(image/jpeg)。之前 400 真相：第一次发真图那轮把历史残留假图(1x1/79B 无效 PNG)连同真图一起发、上游对任一无效图整体 400 拖累；开新对话单发真图立刻 200。**根因=假测试图无效 + 我错误归因上游(判断/测试方法错，非 R6 代码)，用户判断正确。**
     - ⏳ 推后：网页真·一套 SQLite 引擎统一(sql.js WASM + IndexedDB 持久化)，用户想要但工作量大
   - 其后：M2-3 对话分支 → M2-5 worktree agent 执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
+- 2026-06-16 📌 **M2-S 稳定性加固（用户补充：实际使用稳定性 retry 自动后台化/重连/fallback 需注意）**——横切关注，规划成专门 stage：
+  - 现状评估：aiClient 已有 maxRetries=3 请求重试(line 309-355) + streamMode fallback(stream→pseudo→off)；agentLoop 有 fallbackReason/connectionStatus/error 处理(line 594-833)。
+  - gap：① retry 未「后台化」(失败重试阻塞在 run，3 次后直接弹「AI 请求失败」体验差) ② 无断线自动重连(只重试当前请求) ③ 错误未分类(400/401/422 不该 retry vs 5xx/超时/网络该 retry) ④ 无模型级 fallback(主模型失败→备用模型)。
+  - 规划：M2-S = 错误分类 + 后台 retry(退避) + 断线重连 + 模型 fallback + UI 不打断；排在 M2-3 后或按需提前；retry 后台化形态/策略需详设计、可能与用户对齐。
+  - 旁注更正(图片 400 真相，子代理 ad033dd8)：**非上游不支持**——真实图模型正常识别 HTTP 200；之前 400 是历史残留假图(1x1/79B 无效)被连同真图一起发、上游对任一无效图整体 400 拖累。
+  - 📌 产品隐患(归 M2-S)：多轮对话会重发历史所有图，历史混进过一张无效图会每轮被整体 400 拖累——应在发送前对 image part 做有效性预检/跳过无效图(与错误分类/fallback 同类)。
