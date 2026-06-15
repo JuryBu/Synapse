@@ -14,8 +14,8 @@ import {
 } from '../store/slices/conversation';
 import { setConnectionStatus } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
-import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS } from './systemPrompt';
-import { getRecord, appendBatch, getRecordSkeleton, type SynapseRecord } from './recordStore';
+import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS, estimateTokens } from './systemPrompt';
+import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type SynapseRecord } from './recordStore';
 import { generateBatch } from './recordGenerator';
 import { AUTOSAVE_ID } from './conversationPersistence';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
@@ -65,24 +65,96 @@ function chatContentToText(content: ChatMessage['content']): string {
     .join('');
 }
 
+/** record 注入分级策略常量（M2-R3 渐进式读） */
+const RECORD_HEAD_FULL = 1;   // 头部保底全文批数（最老 N 批）
+const RECORD_TAIL_FULL = 2;   // 尾部保底全文批数（最新 N 批）
+/** record 注入总量预算占当前模型 contextWindow 的比例 */
+const RECORD_BUDGET_RATIO = 0.4;
+const BATCH_JOIN = '\n\n---\n\n';
+
+/** 渲染一个被降级为骨架的批次：明确标注可用 record_read 展开全文 */
+function renderSkeletonBatch(batch: RecordBatch): string {
+  const skeleton = (batch.skeleton || '').trim();
+  const header = `[批次${batch.index} 骨架，可用 record_read(batchIndex=${batch.index}) 展开全文]`;
+  return skeleton ? `${header}\n${skeleton}` : header;
+}
+
 /**
- * M2-R1 渐进式读：把多批 record 拼成注入前缀。
- * 末批保留【全文】（最近、最相关），之前的批次降级为【骨架】只读概览，控制注入膨胀。
- * 单批时即末批全文；空 record 返回空串。
+ * M2-R3 渐进式读：把多批 record 分级拼成注入前缀（替代 R1 临时态「头骨架 + 末批全文」全批拼接）。
+ *
+ * 分级规则：
+ *   ① 头 RECORD_HEAD_FULL 批（最老）全文保底——保住开头背景。
+ *   ② 尾 RECORD_TAIL_FULL 批（最新）全文保底——保住最近进展。
+ *   ③ 中间批默认降级为【骨架】，并明确标注「可用 record_read 展开全文」让 AI 知道能按需取回。
+ *   ④ token 预算 = contextWindow * RECORD_BUDGET_RATIO；先扣除头尾全文占用，
+ *      再从最新中间批往前累加全文，预算内的中间批升级为全文、超预算的保持骨架。
+ *   批次少（≤ 头+尾，即 ≤3）时全部全文，无中间批。
+ *
+ * @param contextWindow 当前模型真实上下文窗口（token），用于预算；缺省回退 MAX_CONTEXT_TOKENS。
  */
-function buildRecordPrefix(record: SynapseRecord): string {
+function buildRecordPrefix(record: SynapseRecord, contextWindow?: number): string {
   const batches = record.batches ?? [];
   if (batches.length === 0) return record.contentMd ?? '';
   if (batches.length === 1) return batches[0].contentMd;
-  const last = batches[batches.length - 1];
-  const headSkeletons = batches
-    .slice(0, -1)
-    .map(b => b.skeleton || '')
+
+  const win = contextWindow && contextWindow > 0 ? contextWindow : MAX_CONTEXT_TOKENS;
+  const budget = Math.max(0, Math.floor(win * RECORD_BUDGET_RATIO));
+
+  const n = batches.length;
+  // 标记哪些 index 用全文
+  const fullIdx = new Set<number>();
+  // 预算约束的是【总注入量】而非仅全文量：骨架批的输出文本也占 token，
+  // 先把所有批的骨架占用预扣进 usedTokens（基线），再用剩余预算把批从骨架升级为全文，
+  // 升级增量 = 全文 token - 骨架 token（避免重复计费）。
+  let usedTokens = 0;
+  const skeletonCost = (b: RecordBatch) => estimateTokens(renderSkeletonBatch(b));
+  for (const b of batches) usedTokens += skeletonCost(b);
+
+  /** 把批从骨架升级为全文：累加「全文 - 骨架」增量。force=true 时无视预算（用于尾批保底）。 */
+  const markFull = (b: RecordBatch, force = false): boolean => {
+    if (fullIdx.has(b.index)) return true;
+    const delta = Math.max(0, estimateTokens(b.contentMd) - skeletonCost(b));
+    if (!force && usedTokens + delta > budget) return false;
+    fullIdx.add(b.index);
+    usedTokens += delta;
+    return true;
+  };
+
+  // 批次足够少（头+尾即覆盖全部）→ 默认全部全文；但仍跑预算约束（聚焦点④：预算用真实 contextWindow）。
+  // 保底优先：从最新批往最老批升级全文，预算内的升级、超预算的降级为骨架；
+  // 至少强制保留尾 1 批全文（即便超预算也不能丢最近进展）。
+  if (n <= RECORD_HEAD_FULL + RECORD_TAIL_FULL) {
+    let downgraded = 0;
+    for (let i = n - 1; i >= 0; i--) {
+      const isLastTail = i === n - 1;            // 最新一批：强制全文保底
+      if (!markFull(batches[i], isLastTail)) downgraded++;
+    }
+    if (downgraded > 0) {
+      console.warn(
+        `[agentLoop] buildRecordPrefix: 小批次(${n}≤${RECORD_HEAD_FULL + RECORD_TAIL_FULL})全文超预算(${budget} tokens)，` +
+        `已将 ${downgraded} 个较老批降级为骨架（尾批强制全文保底）。`,
+      );
+    }
+    return batches
+      .map(b => (fullIdx.has(b.index) ? b.contentMd : renderSkeletonBatch(b)))
+      .filter(Boolean)
+      .join(BATCH_JOIN);
+  }
+
+  // 头尾保底：先放头 RECORD_HEAD_FULL 批 + 尾 RECORD_TAIL_FULL 批为全文（强制，保住背景与最近进展）
+  for (let i = 0; i < RECORD_HEAD_FULL; i++) markFull(batches[i], true);
+  for (let i = n - RECORD_TAIL_FULL; i < n; i++) markFull(batches[i], true);
+
+  // 中间批（头尾之间）从最新往最老，剩余预算内逐个升级为全文（升级增量已扣除骨架基线）
+  for (let i = n - RECORD_TAIL_FULL - 1; i >= RECORD_HEAD_FULL; i--) {
+    markFull(batches[i]);
+    // 超预算的中间批保持骨架（不 break：更老的批可能更短仍放得下，继续尝试）
+  }
+
+  return batches
+    .map(b => (fullIdx.has(b.index) ? b.contentMd : renderSkeletonBatch(b)))
     .filter(Boolean)
-    .join('\n\n---\n\n');
-  return headSkeletons
-    ? `${headSkeletons}\n\n---\n\n${last.contentMd}`
-    : last.contentMd;
+    .join(BATCH_JOIN);
 }
 
 export class AgentLoop {
@@ -188,7 +260,7 @@ export class AgentLoop {
           const priorRounds = existingRecord?.totalRounds ?? 0;     // = 末批 roundEnd
           const batchSlice = coveredEligible.slice(priorSteps);     // 本批切片（不含 tool，与上一批不重叠）
 
-          recordMd = existingRecord ? buildRecordPrefix(existingRecord) : null;
+          recordMd = existingRecord ? buildRecordPrefix(existingRecord, modelContextWindow) : null;
 
           if (batchSlice.length > 0) {
             const batchUserCount = batchSlice.filter(m => m.role === 'user').length;
@@ -224,7 +296,7 @@ export class AgentLoop {
                 phases: batchResult.phases,
                 timeSpan: batchResult.timeSpan,
               });
-              if (updated) recordMd = buildRecordPrefix(updated);
+              if (updated) recordMd = buildRecordPrefix(updated, modelContextWindow);
             }
           }
         } catch (err) {

@@ -98,6 +98,7 @@ ${context.userRules}
 6. 如需代码示例，提供可运行的完整代码
 7. 使用 Markdown 格式化回复（标题、列表、代码块、LaTeX 公式）
 8. 长期记忆：开始新任务或需要回忆既往背景/方案/用户偏好时，先调用 memory_query 检索；遇到有长期价值的技术方案、踩坑经验、用户偏好时主动 memory_write 沉淀。这是 Synapse 内置记忆，与外置 MCP 工具无关。
+9. 历史摘要：对话历史摘要（record）里标注为「骨架」的批次只给了标题与要点，需要该批次完整细节时用 record_read(batchIndex) 按需展开全文（batchIndex 取自骨架标注里的「批次N」）。
 </guidelines>`);
     }
 

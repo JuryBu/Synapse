@@ -442,6 +442,47 @@ toolRegistry.register({
   return `🧠 Synapse 记忆库命中 ${results.length} 条:\n\n${lines.join('\n\n')}`;
 }, 'custom', 'auto');
 
+// --- Record Tools（M2-R3 渐进式读：按需展开骨架批次）---
+// record 历史摘要注入时，中段较老的批次被降级为「骨架」（只有标题 + 首行要点）以控制注入膨胀。
+// 当需要某个骨架批次的完整过程日志细节时，调本工具按 batchIndex 取回该批全文。
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'record_read',
+    description:
+      '展开当前对话 record 中被折叠为「骨架」的某个批次的完整过程日志（contentMd 全文）。'
+      + 'record 历史摘要里标注为「[批次N 骨架，可用 record_read 展开全文]」的批次只注入了标题/要点，'
+      + '需要该批次的完整细节（具体决策、工具调用、文件改动等）时调用本工具。'
+      + 'batchIndex 用骨架标注里给出的批次序号；默认读当前对话，一般无需传 conversationId。',
+    parameters: {
+      type: 'object',
+      properties: {
+        batchIndex: { type: 'number', description: '要展开的批次序号（取自骨架标注里的「批次N」）' },
+        conversationId: { type: 'string', description: '对话 ID（可选，缺省读当前对话）' },
+      },
+      required: ['batchIndex'],
+    },
+  },
+}, async (args) => {
+  const batchIndex = Number(args.batchIndex);
+  if (!Number.isFinite(batchIndex)) {
+    return '⚠️ record_read 需要有效的 batchIndex（数字，取自骨架标注里的「批次N」）。';
+  }
+  const { getBatch } = await import('./recordStore');
+  const { store } = await import('@/store');
+  const { AUTOSAVE_ID } = await import('./conversationPersistence');
+  const conversationId =
+    (typeof args.conversationId === 'string' && args.conversationId.trim())
+      ? args.conversationId.trim()
+      : (((store.getState() as any)?.conversation?.id as string | null) || AUTOSAVE_ID);
+  const contentMd = await getBatch(conversationId, batchIndex);
+  if (!contentMd) {
+    return `未找到批次 ${batchIndex} 的全文（该批可能不存在、已被回溯裁剪，或当前对话无 record）。`;
+  }
+  return `📜 批次 ${batchIndex} 完整过程日志:\n\n${contentMd}`;
+}, 'custom', 'auto');
+
 // --- Web Tools ---
 
 toolRegistry.register({

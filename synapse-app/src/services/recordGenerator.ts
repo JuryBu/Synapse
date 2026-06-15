@@ -4,15 +4,11 @@
  *
  * 产出固定模板：用户意图 / 关键决策 / 工具调用与结果摘要 / 产出文件清单。
  *
- * ★ 契约（务必遵守，与 Plan_4_M1「Step 1 record 层：输入被压缩的 messages」一致）：
+ * ★ 契约（务必遵守，多批次架构 generateBatch）：
  *   `input.messages` 永远只是【本批被压缩的切片】，绝不是从第 1 轮起的全量历史。
- *   增量更新时，调用方通过 `priorRounds` / `priorSteps` / `priorTimeSpan` 把
- *   「已被先前 record 覆盖的累计水位线」传进来，本函数只负责：
- *     - 序列化本批切片喂给模型；
- *     - 让模型把 `existingRecordMd` 与本批新增内容合并成全文（命中下一轮 cache 的稳定前缀）；
- *     - 把本批轮次/步骤【累加】到 prior 水位线上返回；
- *     - 把本批时间窗与 `priorTimeSpan` 合并成整段跨度返回。
- *   这样既不会把旧消息重复喂给生成模型（省 token），也不会让水位线倒退。
+ *   不喂整段已有全文让模型合并覆盖全程；改喂 `priorSkeleton` 旧批骨架【只读概览】，
+ *   模型只就本批新原文产出【本批自己】的独立日志 → 已有批次永不重写、批间不重复、cache 稳定前缀保住。
+ *   区间（round/step start/end）由调用方（agentLoop）依据水位自算后透传 appendBatch，本函数不返回累计水位。
  *
  * 关键约束（Plan_4 M1 风险 3）：
  *   生成是「加速 / 增强」能力，绝不能阻塞主对话。
@@ -31,41 +27,6 @@ export interface RecordSourceMessage {
   timestamp?: number;
   /** 工具调用（assistant 发起） */
   toolCalls?: Array<{ name?: string; arguments?: string; result?: string; status?: string }>;
-}
-
-export interface GenerateRecordInput {
-  conversationId: string;
-  /**
-   * ★ 本批要浓缩的消息切片（含 tool 轮次）——只传「本次新增/被压缩段」，不要传全量历史。
-   * 增量场景下与上一批不重叠；轮次/步骤的累计由 prior* 入参承接。
-   */
-  messages: RecordSourceMessage[];
-  /** 已有 record 正文（增量更新时传入），无则全量生成 */
-  existingRecordMd?: string | null;
-  /** 已被先前 record 覆盖的累计用户轮次（增量水位线起点，缺省 0） */
-  priorRounds?: number;
-  /** 已被先前 record 覆盖的累计消息条数（增量水位线起点，缺省 0） */
-  priorSteps?: number;
-  /** 已有 record 的时间跨度字符串（"start ~ end"），用于合并出整段跨度起点，可空 */
-  priorTimeSpan?: string | null;
-  /** 工作区名（写入元数据，可空） */
-  workspaceName?: string;
-}
-
-export interface GenerateRecordResult {
-  /** 生成的完整 record markdown */
-  contentMd: string;
-  /** 覆盖到的总轮次（prior + 本批用户消息数） */
-  totalRounds: number;
-  /** 覆盖到的总步骤（prior + 本批参与消息条数） */
-  totalSteps: number;
-  /**
-   * 模板小节数概览信号（弱语义）：统计模板 4 个固定小节之外的额外 `##` 标题，
-   * 反映模型是否自行扩展了结构；正常应为 0，不要据此做关键决策。
-   */
-  phases: number;
-  /** 整段时间跨度 "YYYY-MM-DD HH:mm ~ YYYY-MM-DD HH:mm"（已与 priorTimeSpan 合并） */
-  timeSpan: string;
 }
 
 /** record 生成模型一次性能力上限（按 OpenAI 兼容端常见上下文留余量，估字符） */
@@ -194,21 +155,6 @@ const TEMPLATE_RULES = `## 输出模板（严格遵守）
 3. 不要臆造未在对话中出现的内容
 4. 全文控制在 1200 字以内`;
 
-function buildCreatePrompt(input: GenerateRecordInput, body: string, totalRounds: number, totalSteps: number): string {
-  return `你是一个技术过程记录助手。请把下面这段对话浓缩成结构化的「对话过程日志」，供后续轮次的 AI 快速回顾已发生的工作。
-
-${TEMPLATE_RULES}
-
-## 元数据（写入日志开头，逐字使用）
-- 工作区: ${input.workspaceName || '（未指定）'}
-- 覆盖轮次: ${totalRounds}
-- 覆盖步骤: ${totalSteps}
-
-## 对话内容
-
-${body}`;
-}
-
 /**
  * M2-R1 批次日志 prompt：本批【独立完整】日志语义。
  * - 旧批骨架（priorSkeleton）只读概览，仅供模型理解上文、避免重复，【绝不要把它合并进输出】。
@@ -241,36 +187,6 @@ ${skeletonSection}${TEMPLATE_RULES}
 - 本批轮次: 第 ${roundStart} ~ ${roundEnd} 轮
 
 ## 本批新增对话内容
-
-${body}`;
-}
-
-function buildUpdatePrompt(
-  input: GenerateRecordInput,
-  body: string,
-  totalRounds: number,
-  totalSteps: number,
-  existing: string,
-): string {
-  return `你是一个技术过程记录助手。下面是某对话「已有的过程日志」和「新增对话内容」。请把新增内容合并进已有日志，输出更新后的完整日志（全文，不是增量）。
-
-${TEMPLATE_RULES}
-
-合并规则：
-1. 保留已有日志中的关键信息，按新增内容扩展对应小节
-2. 用户标记为「[手动补充]」的内容必须原样保留
-3. 输出完整日志，覆盖到第 ${totalRounds} 轮
-
-## 元数据（写入日志开头，逐字使用）
-- 工作区: ${input.workspaceName || '（未指定）'}
-- 覆盖轮次: ${totalRounds}
-- 覆盖步骤: ${totalSteps}
-
-## 已有过程日志
-
-${existing}
-
-## 新增对话内容
 
 ${body}`;
 }
@@ -363,62 +279,8 @@ function countSections(md: string): number {
 }
 
 /**
- * 生成 / 增量更新对话过程日志。
- *
- * @returns 成功返回 GenerateRecordResult；任何失败/输出不合格返回 null（调用方据此降级）。
- */
-export async function generateRecord(input: GenerateRecordInput): Promise<GenerateRecordResult | null> {
-  try {
-    // ★ messages 是本批切片；增量场景下不重叠、不含旧轮次。
-    const messages = Array.isArray(input.messages) ? input.messages : [];
-    if (messages.length === 0) return null;
-
-    const client = resolveClient();
-    if (!client) {
-      console.warn('[recordGenerator] 缺少可用 API Key / 模型，跳过 record 生成');
-      return null;
-    }
-
-    const hasExisting = !!(input.existingRecordMd && input.existingRecordMd.trim());
-    const priorRounds = Math.max(0, input.priorRounds ?? 0);
-    const priorSteps = Math.max(0, input.priorSteps ?? 0);
-
-    // 本批切片本身即为新增，无需再按水位线跳过轮次（契约已保证不重叠）。
-    const body = serializeMessages(messages);
-    if (!body.trim()) return null;
-
-    // 累计水位线 = 已覆盖 prior + 本批；时间跨度与已有跨度合并出整段起止。
-    const totalRounds = priorRounds + messages.filter(m => m.role === 'user').length;
-    const totalSteps = priorSteps + messages.length;
-    const timeSpan = mergeTimeSpan(input.priorTimeSpan, messages);
-
-    const prompt = hasExisting
-      ? buildUpdatePrompt(input, body, totalRounds, totalSteps, input.existingRecordMd!.trim())
-      : buildCreatePrompt(input, body, totalRounds, totalSteps);
-
-    const contentMd = sanitizeOutput(await callOnce(client, [{ role: 'user', content: prompt }]));
-    if (!contentMd) {
-      console.warn('[recordGenerator] 输出不合格（缺模板头/超长/为空），降级');
-      return null;
-    }
-
-    return {
-      contentMd,
-      totalRounds,
-      totalSteps,
-      phases: countSections(contentMd),
-      timeSpan,
-    };
-  } catch (err) {
-    // 关键降级点：绝不向上抛，让主对话回退字符截断压缩
-    console.warn('[recordGenerator] generateRecord failed, falling back:', err);
-    return null;
-  }
-}
-
-/**
  * M2-R1 批次生成入参：只描述【本批切片】，区间由调用方（agentLoop）依据水位自算后透传。
- * 与旧 GenerateRecordInput 的关键区别：不传 existingRecordMd 整段全文，改传 priorSkeleton 只读骨架。
+ * 不传 existingRecordMd 整段全文，改传 priorSkeleton 只读骨架（已有批次永不重写、批间不重复）。
  */
 export interface GenerateBatchInput {
   conversationId: string;
@@ -449,8 +311,8 @@ export interface GenerateBatchResult {
 /**
  * 生成【单个批次】的独立过程日志（M2-R1 多批次架构压缩点专用）。
  *
- * 与 generateRecord 的区别：
- *   - 不喂 existingRecordMd 整段全文让模型合并覆盖全程；改喂 priorSkeleton 旧批骨架【只读概览】，
+ * 多批次架构要点：
+ *   - 不喂整段全文让模型合并覆盖全程；只喂 priorSkeleton 旧批骨架【只读概览】，
  *     模型只就本批新原文产出【本批自己】的日志 → 已有批次永不重写、批间不重复、cache 稳定前缀保住。
  *   - 不返回累计水位；区间（round/step start/end）由 agentLoop 持有后透传 appendBatch。
  *

@@ -400,6 +400,30 @@ export async function getRecordSkeleton(
 }
 
 /**
+ * 取某对话 record 中【单个批次的完整全文 contentMd】（record_read 工具后端 / 渐进式读按需展开）。
+ * 渐进式读把中段批次降级为骨架注入；AI 需要细节时调 record_read(batchIndex) 经本函数取回该批全文。
+ * - batchIndex 按 RecordBatch.index 匹配（从 0 起，连续递增）。
+ * - 找不到对话 / 找不到该批 / 该批全文为空 → 返回 null（不抛）。
+ * record 是加速层，任何底层异常一律吞掉返回 null，绝不能阻塞主对话。
+ */
+export async function getBatch(
+  conversationId: string,
+  batchIndex: number,
+): Promise<string | null> {
+  if (!conversationId || !Number.isFinite(batchIndex)) return null;
+  try {
+    const record = await getRecord(conversationId);
+    if (!record || record.batches.length === 0) return null;
+    const batch = record.batches.find(b => b.index === batchIndex);
+    const content = batch?.contentMd?.trim();
+    return content ? batch!.contentMd : null;
+  } catch (err) {
+    console.warn('[recordStore] getBatch failed:', err);
+    return null;
+  }
+}
+
+/**
  * 删除某对话的 record（对话删除 / rollback 完全失效时调用）。
  * 失败返回 false，不抛。
  */

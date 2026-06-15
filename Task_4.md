@@ -108,4 +108,11 @@
   - ✅ **修问题1：新对话 record 不触发**——conversation.id 新对话=null、autosave 落 'autosave-current'(含 conversations 行 FK满足)但不回写 store.id → record 被跳过。修：agentLoop/AgentPanel record 取 id 回退 AUTOSAVE_ID(导出常量)，新对话 record 落 autosave-current 立即生效。编译过。
   - 📌 record 小本本：① edge：对话正式保存(saveConversationSnapshot: autosave-current→新conv-id)时 record 未迁移，需在保存流程加 copyRecord(autosave-current→新id)，和对话快照迁移一起做；② FK：autosave 已建 'autosave-current' conversations 行故 fallback FK 满足；generateBatch 60s 超时→回退字符截断(本地API慢偶发,可接受/R5优化)；③ 旧 generateRecord/buildUpdatePrompt 死代码待清(全 src 无调用)。
   - ⏳ 问题1 真机复验 + 死代码清理 紧接做。
-  - 下一步：**R3 渐进式读注入**(token预算+头尾融合 + record_read 工具；默认参数：注入预算≈contextWindow 40%/头1批+尾2批) → R4(90% B方案)/R5(fallback)/R6(附件分离+存量迁移) → M2-3 对话分支 → M2-5 worktree agent 执行 → M3 Multi-AI。
+- 2026-06-15 ✅ **M2-R3 渐进式读落地**（ultracode：实现+对抗审查+修复；第3审查 API 断、主线补核实编译/死代码）：
+  - buildRecordPrefix(agentLoop:95) 重写为分级渐进读：头1批+尾2批全文保底、中间批默认骨架(标注「可 record_read(batchIndex=N) 展开」)、token预算=contextWindow*0.4(骨架占用预扣基线+升级增量=全文−骨架)、≤3批也跑预算约束(尾批强制保底+超预算 console.warn)。
+  - record_read 工具(toolRegistry:452)：batchIndex+可选conversationId(回退AUTOSAVE_ID口径与agentLoop一致)→getBatch(recordStore:409,按b.index匹配非下标)返回该批全文；systemPrompt:101 第9条指引。三处对齐闭环。
+  - 清死代码：generateRecord/buildUpdatePrompt/buildCreatePrompt/GenerateRecordInput/GenerateRecordResult 全删(grep全src 0命中)，generateBatch及依赖完好。
+  - 主线核实：build EXIT0(2.44s)+electron:build tsc无error；死代码0残留；2个medium(≤3批不看预算/骨架占用不计入预算)已被修复agent修。
+  - 📌 R3 low 小本本：fast模式不注入record_read指引(fast不注入record故无害)；空骨架批信息密度低；getBatch失败文案可加引导；预算未精算分隔符/包裹头开销(40%本就保守可接受)。
+  - ⏳ R3 真机验证(渐进读分级注入+record_read展开)进行中(子代理)。
+  - 下一步：**R4**(90% B方案:组装请求体本地tokenize判contextWindow*0.9) → R5(fallback崩溃恢复)/R6(附件分离+存量迁移) → M2-3对话分支 → M2-5 worktree agent执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
