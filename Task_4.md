@@ -174,6 +174,13 @@
 ## 🎉 M2 主体全部完成（2026-06-16 夜间自主推进，全部真机验证 + commit&push）
 record 体系 **R1**多批次/**R3**渐进读/**R4** 90%触发/**R5**崩溃恢复/**R6**附件分离 + **M2-1**回溯clamp + **M2-4** worktree管理 + **M2-3**对话分支(bug 2轮真机修复) + **M2-S**稳定性(图片预检+retry进度) + **M2-6**对话级元数据(mode/reasoning per-conv+parentId)。
 
-### ⏸ 待用户对齐（未动，醒来拍方向）
-- **M2-5** worktree agent 在工作树内执行：绑定方式(押"对话级")待确认；agent fs 工具根路径重定向到 worktree。
-- **M3** Multi-AI 重做：CC式真子代理+保留自定义模式+子代理可配模型(默认复用主)+卡片式可视化。大工程，需先和用户对齐架构再动。
+### ✅ 方案已定稿（2026-06-16 讨论，详见 Plan/Plan_4/Plan_4_M3_MultiAI与worktree按需.md），待用户到校开推
+- **M2-5 worktree 改「按需」**（推翻原对话级强绑定=过度设计）：不默认绑；agent 工具按需进 worktree(用户/agent 判断需隔离时)；主/单 agent 默认主工作区，**并行子代理默认各自绑 worktree(防写冲突)可关**。M2-4 基础设施保留，新增 agent worktree 工具 + 条件根路径重定向 + 会话状态。
+- **M3 Multi-AI 重做**（现有 multiAI.ts+agentOrchestrator.ts+SettingsPanel 升级）：
+  - 三层架构：**agentLoop 实例(引擎)** + 两入口(**spawn_subagent 工具**动态派 / **固定工作流模板**@触发编排) + **卡片中间视图**(可视化)。
+  - 子代理：默认复用主模型可单配 / **maxDepth 派发深度**(不填=深度1不许再派,填N=允许N层) / worktree 字段(并行默认各自绑可关) / 工具集除派发受 maxDepth 限外不限。
+  - 固定工作流：设置内编辑模板+保留命名,`@MultiAI:名` 触发,串行/并行/**判断节点**(手动设清晰语义,可中止工作流并反馈无法推进)。
+  - 子代理对话复用 conversations 表(parent=主对话+isSubAgent,复用 M2-3 对话tree)。
+  - 卡片：对话流可点击卡片→中间编辑器区开视图(左列子代理,点进看完整对话流),四色(灰完成/蓝进行/黄retry阻塞/红failed)+实时token/计时刷新。
+  - 分 stage：M2-5(worktree按需,给M3并行隔离打底)→M3-1(agentLoop递归引擎+spawn_subagent+子代理对话存储)→M3-2(workflow运行器串并判断+模板存储编辑@触发)→M3-3(卡片可视化中间视图)。
+- 📌 **重试待办（用户统一测，我不抢跑）**：重试/编辑 × 带图消息交叉点——handleRetry(skipUserMessage 复用 store 消息)重发时附件是否保留，逻辑上 agentLoop 读 store 含附件应没事、但没专测过；用户本人统一测时验(我可应邀先验)。
