@@ -164,3 +164,16 @@
   - 规划：M2-S = 错误分类 + 后台 retry(退避) + 断线重连 + 模型 fallback + UI 不打断；排在 M2-3 后或按需提前；retry 后台化形态/策略需详设计、可能与用户对齐。
   - 旁注更正(图片 400 真相，子代理 ad033dd8)：**非上游不支持**——真实图模型正常识别 HTTP 200；之前 400 是历史残留假图(1x1/79B 无效)被连同真图一起发、上游对任一无效图整体 400 拖累。
   - 📌 产品隐患(归 M2-S)：多轮对话会重发历史所有图，历史混进过一张无效图会每轮被整体 400 拖累——应在发送前对 image part 做有效性预检/跳过无效图(与错误分类/fallback 同类)。
+- 2026-06-16 ✅ **M2-6 对话级元数据 + reasoningEffort 缺陷根治（真机复验通过）**：
+  - mode/reasoningEffort per-conversation(wf3queh94)：conversations reasoning_effort 列+snapshot+切换同步 agentSettings(agentLoop 读口径不改)+新对话默认+分支继承；M2-3 残留 parentId/branchedFromMessageId 进 store(setConversation 四入口回填)。复制消息已有未做。对抗审查 2 medium 修(新建按钮口径统一+切换竞态两道防线)。
+  - 🔴 真机(a4f1933a)抓出 reasoningEffort 缺陷→修(wesxvprnz)：真根因(修复agent实测DB挖出,非我给的表层"漏dispatch")=conversations 缺 reasoning_effort 列(ensureColumn 无DEFAULT真机迁移未生效)→IPC带该列整条throw no such column连mode/messages回滚→读侧永远auto。修:ensureColumn双重自愈补列+create/update缺列降级(列缺不拖垮mode/messages)+fallbackMeta空串回退+saveAutosaveSnapshot切换闸门收紧(isConversationSwitching即return堵加载回写)。对抗审查0 high/med。
+  - ✅ 真机复验(a3f4c390)全过：列自愈补齐+update不报错、A=high/B=low切换各自恢复不被冲、切换后DB不被回写覆盖(核心bug根治)、mode无回归。
+  - 📌 小本本：①mode 切换硬归一fast/planning vs reasoningEffort 透传(mode现两态不出错,扩多态需改透传)②侧栏列表只显8/11条(过滤规则可排查)③autosave-current单例槽位连续新建覆盖前草稿(已有设计待评估)④删除当前对话/清空历史漏重置全局mode/reasoningEffort(low,下个新对话会用残留值落库)。
+  - **教训:不盲信表层定位(含我自己给的)——"加载漏dispatch"是假命题,修复agent实测DB挖到真根因(缺列);DB写入stage真机为准。** [[工作教训：不轻易归因外部/上游，下结论前用真实数据真机验证]]
+
+## 🎉 M2 主体全部完成（2026-06-16 夜间自主推进，全部真机验证 + commit&push）
+record 体系 **R1**多批次/**R3**渐进读/**R4** 90%触发/**R5**崩溃恢复/**R6**附件分离 + **M2-1**回溯clamp + **M2-4** worktree管理 + **M2-3**对话分支(bug 2轮真机修复) + **M2-S**稳定性(图片预检+retry进度) + **M2-6**对话级元数据(mode/reasoning per-conv+parentId)。
+
+### ⏸ 待用户对齐（未动，醒来拍方向）
+- **M2-5** worktree agent 在工作树内执行：绑定方式(押"对话级")待确认；agent fs 工具根路径重定向到 worktree。
+- **M3** Multi-AI 重做：CC式真子代理+保留自定义模式+子代理可配模型(默认复用主)+卡片式可视化。大工程，需先和用户对齐架构再动。
