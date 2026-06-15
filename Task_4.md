@@ -141,7 +141,15 @@
     - ✅ R6 真机验证通过(子代理 a0ac8c75)：put 去重(同图同 sha256+refCount 累加不重复写)/get 逐字节还原/delete 归零 GC/**UI 上传后 DB 零 base64(hasBase64InDbRow=false,核心目的达成)**/发 API 抓包确认真 base64 还原+剥纯净 part/懒迁移抽离不丢图+跨端 sha256 一致(crossEndShaMatch=true)
     - ✅ 图片复验澄清(子代理 ad033dd8 真实图实测，2026-06-16)：**R6 实现无 bug**——真实图(Bing 截图 125KB JPEG)模型完全正常识别(HTTP 200 精准描述)，get 还原 dataUrl 与原图 === 字节级无损，mime 全程正确(image/jpeg)。之前 400 真相：第一次发真图那轮把历史残留假图(1x1/79B 无效 PNG)连同真图一起发、上游对任一无效图整体 400 拖累；开新对话单发真图立刻 200。**根因=假测试图无效 + 我错误归因上游(判断/测试方法错，非 R6 代码)，用户判断正确。**
     - ⏳ 推后：网页真·一套 SQLite 引擎统一(sql.js WASM + IndexedDB 持久化)，用户想要但工作量大
-  - 其后：M2-3 对话分支 → M2-5 worktree agent 执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
+- 2026-06-16 ✅ **M2-3 对话分支落地**（ultracode：实现+对抗审查2medium+修复）：消息处「🌿 从此分支」→ 该消息及之前复制为新对话(新convId)，源对话原样保留。
+  - DB conversations + parent_id + branched_from_message_id(ensureColumn懒迁移,无外键)；ipc/platform/Web 三端读写对等。
+  - recordStore.copyRecord(src,dst,keptSteps,keptRounds)：复用 clampToBatch 连续前缀逻辑裁批次→深拷贝 upsert 新对话；branchConversation(conversationPersistence)：子集=fromMessageId及之前、keptSteps(非tool)/keptRounds(user)严格对齐 clampToBatch 口径、copyRecord 继承、子集 collectMessageShas 逐个 addRef(+1 防源删后图失效)、源对话零改动。
+  - UI：MessageBubble GitBranch 按钮+右键菜单；AgentPanel handleBranch(autosave源先fork真实id作parent、切换新对话、toast)。
+  - 对抗审查 branch正确性5项全过+copyRecord/refCount守恒；修2medium：①addRef失败不再静默吞(tryAddRefOnce 区分reject/Web{error}+重试+addRefFailedShas+warning提示)②autosave save失败中止分支(提示先发消息)。
+  - 核实：build EXIT0(2.70s)+electron:build过；fix remaining 空。
+  - ⏳ M2-3 真机验证(分支不改源/record继承到回溯点/附件refCount/切换)进行中。
+  - 📌 遗留(子代理 notes)：autosave fork 时 record 从 AUTOSAVE_ID 迁到新真实 id 仍是历史遗留点(分支场景用 recordSrcId 绕过)，与 R6「正式保存 record 迁移 edge」同源，可合并单列。
+  - 其后：**M2-S 稳定性**(retry后台化/重连/fallback/图片预检，见下) → M2-5 worktree agent 执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
 - 2026-06-16 📌 **M2-S 稳定性加固（用户补充：实际使用稳定性 retry 自动后台化/重连/fallback 需注意）**——横切关注，规划成专门 stage：
   - 现状评估：aiClient 已有 maxRetries=3 请求重试(line 309-355) + streamMode fallback(stream→pseudo→off)；agentLoop 有 fallbackReason/connectionStatus/error 处理(line 594-833)。
   - gap：① retry 未「后台化」(失败重试阻塞在 run，3 次后直接弹「AI 请求失败」体验差) ② 无断线自动重连(只重试当前请求) ③ 错误未分类(400/401/422 不该 retry vs 5xx/超时/网络该 retry) ④ 无模型级 fallback(主模型失败→备用模型)。

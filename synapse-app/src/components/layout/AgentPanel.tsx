@@ -25,7 +25,7 @@ import { addNotification } from '@/store/slices/notifications';
 import { clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, updateDiffStatus, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 import { countConversationTokens, MAX_CONTEXT_TOKENS } from '@/services/systemPrompt';
 import { conversationExporter } from '@/services/conversationExporter';
-import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, migrateSnapshotAttachments, AUTOSAVE_ID } from '@/services/conversationPersistence';
+import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, migrateSnapshotAttachments, branchConversation, AUTOSAVE_ID } from '@/services/conversationPersistence';
 import { platform } from '@/platform';
 import { releaseMessageAttachments, resolveAttachmentDataUrl, sanitizeMessagesForPersistence } from '@/services/attachmentRefs';
 import { setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
@@ -519,6 +519,96 @@ export function AgentPanel() {
     })();
   }, [conversation.fileSnapshots, dispatch, messages, invalidateRecordForTruncation, gcMessages]);
 
+  // M2-3 对话分支：在某条消息处「从此分支」→ 把该消息及之前另存为【新对话】，源对话原样保留。
+  // 源若仍是 autosave（未落真实 id），先 save 一次 fork 成真实 id 作为稳定 parent，并把当前 store 切到该真实 id，
+  // 再从真实 id 分支——避免 parentId 指向易被清理/复用的 AUTOSAVE_ID。源对话内容/消息不被修改（分支是复制）。
+  const handleBranch = useCallback((msgId: string) => {
+    if (isStreaming) return;
+    void (async () => {
+      try {
+        const snapshotMessages = conversationRef.current.messages;
+        if (!snapshotMessages.length) return;
+
+        // 1. 确定稳定的源 id：autosave 源先 fork 成真实 id（与「新对话」fork 同款，clearAutosave 不 release，refCount 守恒）。
+        //    recordSrcId 记住 record 当前实际所在的 id（promotion 前的 id）——fork 不迁移 record，故 copyRecord 须从这里读。
+        const recordSrcId = (conversationRef.current.id as string | null) || AUTOSAVE_ID;
+        let srcId = recordSrcId;
+        const wasAutosave = !conversationRef.current.id || conversationRef.current.id === AUTOSAVE_ID;
+        if (wasAutosave) {
+          const saved = await saveConversationSnapshot({
+            id: conversationRef.current.id,
+            title: conversationRef.current.title,
+            messages: snapshotMessages,
+            model: conversationRef.current.model,
+            assistantRuns: conversationRef.current.assistantRuns,
+            fileSnapshots: conversationRef.current.fileSnapshots,
+            pendingDiffs: conversationRef.current.pendingDiffs,
+            timestamp: Date.now(),
+          });
+          // 前置条件：autosave 源必须先 promotion 成稳定真实 id 才能作为 parent。
+          // 若落库失败（saved 为 null）或仍是 AUTOSAVE_ID（理论不会，防御），则【中止分支】——
+          // 绝不带着 AUTOSAVE_ID/null 作 parentId 继续 branchConversation（那会让溯源指针悬空/指向会被复用的 id）。
+          if (!saved?.id || saved.id === AUTOSAVE_ID) {
+            dispatch(addNotification({
+              type: 'warning',
+              title: '暂时无法分支',
+              message: '请先发送至少一条消息（让对话落库）再从此分支',
+            }));
+            return;
+          }
+          srcId = saved.id;
+          dispatch(updateConversation(saved));
+          // 把当前 store 身份切到真实源 id（消息不变），并清掉 autosave 镜像（不 release）。
+          dispatch(setConversation({
+            id: srcId,
+            title: conversationRef.current.title,
+            messages: snapshotMessages,
+            model: conversationRef.current.model,
+            assistantRuns: conversationRef.current.assistantRuns,
+            fileSnapshots: conversationRef.current.fileSnapshots,
+            pendingDiffs: conversationRef.current.pendingDiffs,
+          }));
+          dispatch(setSelectedId(srcId));
+          await clearAutosaveSnapshot();
+        }
+
+        // 2. 分支：复制子集到新对话 + copyRecord 继承 + 附件 addRef（源对话不动）。
+        //    parent = 稳定 srcId；record 从 recordSrcId 读（autosave promotion 后两者可能不同）。
+        const result = await branchConversation(srcId, msgId, snapshotMessages, {
+          title: conversationRef.current.title,
+          model: conversationRef.current.model,
+          recordSrcId,
+        });
+        if (!result) {
+          dispatch(addNotification({ type: 'error', title: '分支失败', message: '无法从此消息分支为新对话' }));
+          return;
+        }
+
+        // 3. 历史列表加入新对话条目 + 切换到新对话。
+        dispatch(updateConversation(result.summary));
+        dispatch(setConversation({
+          id: result.newId,
+          title: result.title,
+          messages: result.messages,
+          model: result.model,
+        }));
+        dispatch(setSelectedId(result.newId));
+        // 附件 addRef 守恒检查：若有 sha 重试后仍未 +1，新分支这些图在源对话删除后可能被误删，提示用户。
+        if (result.addRefFailedShas.length > 0) {
+          dispatch(addNotification({
+            type: 'warning',
+            title: '已分支（附件未完整保留）',
+            message: `${result.addRefFailedShas.length} 个图片附件引用未对齐，删除源对话后可能丢失；建议保留源对话或重新分支`,
+          }));
+        } else {
+          dispatch(addNotification({ type: 'success', title: '已分支', message: '已分支为新对话（源对话保留不变）' }));
+        }
+      } catch (err: any) {
+        dispatch(addNotification({ type: 'error', title: '分支失败', message: err?.message || '从此分支时出错' }));
+      }
+    })();
+  }, [dispatch, isStreaming]);
+
   const openReviewChanges = useCallback(() => {
     dispatch(openTab({
       id: 'review-changes',
@@ -854,6 +944,7 @@ export function AgentPanel() {
                     onEdit={handleEdit}
                     onRetry={handleRetry}
                     onDelete={handleDelete}
+                    onBranch={handleBranch}
                   />
                   </Fragment>
                 ))}

@@ -41,6 +41,9 @@ function mapConversation(row: any) {
         archived: Boolean(row.archived),
         tags: normalizeTags(fromJson(row.tags_json)),
         archivedAt: row.archived_at,
+        // M2-3 对话分支溯源：非分支对话两者为 null。
+        parentId: row.parent_id ?? null,
+        branchedFromMessageId: row.branched_from_message_id ?? null,
     };
 }
 
@@ -104,12 +107,15 @@ export function registerConversationHandlers(): void {
         schemaVersion?: number; summary?: unknown; lastMessage?: string;
         assistantRuns?: unknown; fileSnapshots?: unknown; pendingDiffs?: unknown;
         archived?: boolean; tags?: string[];
+        // M2-3 对话分支：fork 时写入溯源；普通新建为 undefined → 落 NULL。
+        parentId?: string | null; branchedFromMessageId?: string | null;
     }) => {
         db.prepare(
             `INSERT INTO conversations (
               id, workspace_id, title, model, mode, schema_version, summary_json,
-              last_message, assistant_runs, file_snapshots, pending_diffs, archived, tags_json, archived_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              last_message, assistant_runs, file_snapshots, pending_diffs, archived, tags_json, archived_at,
+              parent_id, branched_from_message_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
             data.id,
             data.workspaceId || null,
@@ -125,6 +131,8 @@ export function registerConversationHandlers(): void {
             data.archived ? 1 : 0,
             toJson(normalizeTags(data.tags)),
             data.archived ? Math.floor(Date.now() / 1000) : null,
+            data.parentId ?? null,
+            data.branchedFromMessageId ?? null,
         );
         return { id: data.id };
     });
@@ -153,6 +161,8 @@ export function registerConversationHandlers(): void {
         title?: string; model?: string; schemaVersion?: number; summary?: unknown; lastMessage?: string;
         assistantRuns?: unknown; fileSnapshots?: unknown; pendingDiffs?: unknown;
         archived?: boolean; tags?: string[];
+        // M2-3：分支溯源一般在 create 时写定；update 仅在显式回填时生效（undefined 不动）。
+        parentId?: string | null; branchedFromMessageId?: string | null;
     }) => {
         const sets: string[] = ['updated_at = unixepoch()'];
         const vals: unknown[] = [];
@@ -171,6 +181,8 @@ export function registerConversationHandlers(): void {
             vals.push(data.archived ? Math.floor(Date.now() / 1000) : null);
         }
         if (data.tags !== undefined) { sets.push('tags_json = ?'); vals.push(toJson(normalizeTags(data.tags))); }
+        if (data.parentId !== undefined) { sets.push('parent_id = ?'); vals.push(data.parentId ?? null); }
+        if (data.branchedFromMessageId !== undefined) { sets.push('branched_from_message_id = ?'); vals.push(data.branchedFromMessageId ?? null); }
         vals.push(id);
         db.prepare(`UPDATE conversations SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
         return true;

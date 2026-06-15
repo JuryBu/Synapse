@@ -317,6 +317,9 @@ function getWebMock(): SynapseAPI {
             pendingDiffs: data.pendingDiffs ?? [],
             archived: Boolean(data.archived),
             tags: normalizeWebTags(data.tags),
+            // M2-3 对话分支溯源（Web 对等）：fork 时写入，普通新建为 null。
+            parentId: data.parentId ?? null,
+            branchedFromMessageId: data.branchedFromMessageId ?? null,
           });
           writeWebConversationSummaries(summaries);
         }
@@ -333,6 +336,11 @@ function getWebMock(): SynapseAPI {
             ...data,
             tags: data.tags === undefined ? summaries[idx].tags : normalizeWebTags(data.tags),
             archived: data.archived === undefined ? Boolean(summaries[idx].archived) : Boolean(data.archived),
+            // M2-3：分支溯源仅在 create 时写定；update 传 undefined 时不覆盖已有值（对齐 Electron IPC 跳过 undefined 列）。
+            parentId: data.parentId === undefined ? (summaries[idx].parentId ?? null) : (data.parentId ?? null),
+            branchedFromMessageId: data.branchedFromMessageId === undefined
+              ? (summaries[idx].branchedFromMessageId ?? null)
+              : (data.branchedFromMessageId ?? null),
             updatedAt: Date.now(),
           };
           writeWebConversationSummaries(summaries);

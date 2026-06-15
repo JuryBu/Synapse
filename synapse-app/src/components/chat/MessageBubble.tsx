@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, ListChecks, Undo2, ChevronDown, ChevronRight } from 'lucide-react';
+import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, ListChecks, Undo2, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { ToolCallCard } from './ToolCallCard';
 import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
@@ -68,6 +68,8 @@ interface MessageProps {
   onEdit?: (id: string, newContent: string) => void;
   onRetry?: (id: string) => void;
   onDelete?: (id: string) => void;
+  // M2-3 对话分支：从该消息处「从此分支」，把该消息及之前另存为新对话（源对话不变）。
+  onBranch?: (id: string) => void;
 }
 
 // Mermaid renderer component
@@ -151,7 +153,7 @@ function formatBytes(bytes?: number): string {
   return `${bytes} B`;
 }
 
-export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, thinking, attachments, toolCalls, diffs, onReviewChanges, onOpenDiff, onUndoToMessage, onEdit, onRetry, onDelete }: MessageProps) {
+export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, thinking, attachments, toolCalls, diffs, onReviewChanges, onOpenDiff, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
   const [copied, setCopied] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -241,6 +243,11 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
       shortcut: 'R',
       onClick: () => onRetry?.(id),
     }] : []),
+    ...(onBranch ? [{
+      label: '从此分支为新对话',
+      icon: <GitBranch size={14} />,
+      onClick: () => onBranch(id),
+    }] : []),
     { label: '', onClick: () => { }, separator: true },
     {
       label: '删除消息',
@@ -316,6 +323,11 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
             {!isStreaming && onUndoToMessage && (
               <button className="message-action-btn" onClick={() => onUndoToMessage(id)} title="回溯到此消息">
                 <Undo2 size={12} />
+              </button>
+            )}
+            {!isStreaming && onBranch && (
+              <button className="message-action-btn" onClick={() => onBranch(id)} title="从此分支为新对话">
+                <GitBranch size={12} />
               </button>
             )}
           </div>

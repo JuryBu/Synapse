@@ -5,7 +5,9 @@ import {
   releaseMessageAttachments,
   migrateMessagesAttachments,
   rollbackMigratedShas,
+  collectMessageShas,
 } from './attachmentRefs';
+import { copyRecord } from './recordStore';
 
 export const CONVERSATION_SCHEMA_VERSION = 1;
 export const AUTOSAVE_ID = 'autosave-current';
@@ -35,6 +37,9 @@ export interface ConversationSnapshot {
   fileSnapshots?: Record<string, FileSnapshot>;
   pendingDiffs?: FileDiffSummary[];
   timestamp?: number;
+  // M2-3 对话分支溯源：仅 fork 出的新对话携带；普通保存为 undefined（落 NULL）。
+  parentId?: string | null;
+  branchedFromMessageId?: string | null;
 }
 
 export interface ConversationListFilters {
@@ -131,6 +136,9 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
     pendingDiffs: snapshot.pendingDiffs ?? [],
     archived: snapshot.archived,
     tags: snapshot.tags === undefined ? undefined : normalizeTags(snapshot.tags),
+    // M2-3：fork 时携带溯源，普通保存为 undefined（不覆盖已有行的 parent 字段）。
+    parentId: snapshot.parentId,
+    branchedFromMessageId: snapshot.branchedFromMessageId,
   };
 
   // M2-R6：正式保存同样落库去 base64。
@@ -147,6 +155,145 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
     model: snapshot.model || 'unknown',
     archived: Boolean(snapshot.archived),
     tags: normalizeTags(snapshot.tags),
+  };
+}
+
+/** branchConversation 的返回：新对话 summary + 新对话身份信息（供调用方切换/落库）。 */
+export interface BranchResult {
+  summary: ConversationSummary;
+  newId: string;
+  parentId: string;
+  branchedFromMessageId: string;
+  /** 分支携带到新对话的消息子集（含分支点该条），供调用方 setConversation 切入。 */
+  messages: Message[];
+  title: string;
+  model?: string;
+  /**
+   * 附件 addRef 最终仍失败的 sha256 列表（已含 1 次重试后仍未 +1 的）。空数组=全部成功。
+   * 这些 sha 在新分支里【未对齐 refCount】：源对话删除后归零会被误删实体 → 新分支该图永久缺失。
+   * 上层据此提示用户「分支附件可能未完整保留」，便于其重新分支或保留源对话。
+   */
+  addRefFailedShas: string[];
+}
+
+/**
+ * 对单个 sha 做 addRef，统一识别两类失败：
+ *   - Promise reject（Electron IPC 抖动 / DB 锁）→ catch 捕获；
+ *   - 返回 { error:true }（Web 端 meta 不存在等）→ 不 reject，需显式判定。
+ * 成功返回 true；任一类失败返回 false（不抛）。
+ */
+async function tryAddRefOnce(sha: string): Promise<boolean> {
+  try {
+    const res = await platform.attachment.addRef(sha);
+    // Web 端 addRef 对不存在 meta 返回 { error:true }（非 reject），必须显式识别为失败。
+    if (res && typeof res === 'object' && 'error' in res && (res as { error?: unknown }).error) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 对话分支（M2-3）：在源对话 fromMessageId 处「从此分支」，把【该消息及之前的消息子集】另存为一个新对话。
+ *
+ * 语义（复制而非移动，源对话绝不改动）：
+ *   1. 取源 messages 里 fromMessageId 及之前的连续前缀子集（含该条）。
+ *   2. createConversationId 生成新 id；saveConversationSnapshot 落新对话
+ *      （messages=子集，parentId=源 id，branchedFromMessageId=fromMessageId）。
+ *   3. copyRecord(源, 新, keptSteps, keptRounds) 继承到该点的 record 多批次。
+ *      - keptRounds = 子集里 role==='user' 的条数；
+ *      - keptSteps  = 子集里 role!=='tool' 的条数（★ 与 clampToBatch / agentLoop requestHistory「不含 tool」step 口径严格一致）。
+ *   4. 附件 refCount：对子集 collectMessageShas 得到的每个 sha256 调 platform.attachment.addRef（+1）。
+ *      新对话与源对话复用同一附件实体，必须 +1，否则源对话删除/GC 后新分支的图失效（与 R6 fork refCount 欠计同类坑）。
+ *      —— 顺序：先 save（落库即引用态，与源行同时引用同一 sha）再 addRef，使「持有数」对齐「refCount」。
+ *      —— 失败补偿：addRef 失败（reject 或 Web 端 {error:true}）会做 1 次有限重试；仍失败的 sha 收进
+ *         BranchResult.addRefFailedShas 并 console.warn，上层据此提示「分支附件可能未完整保留」。每个 sha 至多 +1，守恒。
+ *
+ * @param srcId 源对话 id（写入新对话 parentId 溯源；分支不修改源）。
+ * @param fromMessageId 分支点消息 id。
+ * @param messages 源对话当前完整消息列表（运行态 store 的 messages）。
+ * @param meta 新对话标题/模型（缺省由消息派生）；recordSrcId 指定 record 实际所在的 id——
+ *   autosave 源刚 fork 成真实 id 时，record 仍在 AUTOSAVE_ID 键下尚未迁移，此时 recordSrcId 应传旧 id，
+ *   否则 copyRecord 从新真实 id 读不到任何 record（缺省回退 srcId）。
+ * @returns BranchResult；分支点不存在 / 源消息为空 / 落库失败 → null。
+ */
+export async function branchConversation(
+  srcId: string,
+  fromMessageId: string,
+  messages: Message[],
+  meta?: { title?: string; model?: string; recordSrcId?: string },
+): Promise<BranchResult | null> {
+  if (!srcId || !fromMessageId || !Array.isArray(messages) || messages.length === 0) return null;
+  const cutIdx = messages.findIndex(m => m.id === fromMessageId);
+  if (cutIdx < 0) return null;
+
+  // 1. 子集 = 分支点及之前（含该条）。深拷贝隔离，绝不触碰源 store 引用。
+  const subset = messages.slice(0, cutIdx + 1).map(m => ({ ...m }));
+  if (subset.length === 0) return null;
+
+  // 2. step/round 口径（★ 必须与 clampToBatch / copyRecord 严格一致）：
+  //    keptSteps 不含 tool 角色；keptRounds 只算 user 角色。
+  const keptRounds = subset.filter(m => m.role === 'user').length;
+  const keptSteps = subset.filter(m => m.role !== 'tool').length;
+
+  const newId = createConversationId();
+  const title = meta?.title || getFallbackTitle(subset);
+
+  // 3. 落新对话（带 parent 溯源）。源对话完全不动。
+  const summary = await saveConversationSnapshot({
+    id: newId,
+    title,
+    model: meta?.model,
+    messages: subset,
+    parentId: srcId,
+    branchedFromMessageId: fromMessageId,
+    timestamp: Date.now(),
+  });
+  if (!summary) return null;
+
+  // 4. 继承 record 到分支点（截连续前缀批次）。record 是加速层，失败不阻塞分支。
+  //    record 实际所在 id 可能 != parent srcId（autosave 刚 fork 时 record 还在旧 AUTOSAVE_ID 键下）。
+  const recordSrcId = meta?.recordSrcId || srcId;
+  await copyRecord(recordSrcId, newId, keptSteps, keptRounds).catch(() => null);
+
+  // 5. 附件 refCount +1：新对话复用源对话同一附件实体，每个 sha256 加一次引用（与 collectMessageShas 口径守恒：
+  //    每条消息内同一 sha 只计一次、跨消息累加）。
+  //    ★ 补偿（本轮修复）：addRef 是引用计数关键写，失败后果是数据级（源删后归零误删实体 → 新分支图永久缺失），
+  //    比纯读降级更严重，故不再静默吞错：
+  //      - 区分 reject 与 Web 端返回的 { error:true }（tryAddRefOnce 内统一识别）；
+  //      - 首次失败做 1 次有限重试（吸收 IPC 抖动 / DB 短暂锁）；
+  //      - 仍失败的 sha 收集进 addRefFailedShas，console.warn 一条可观测日志，并随 BranchResult 回传上层提示。
+  //    注意守恒：每个 sha 至多 +1（成功即不再重试），失败则 0 次，与 collectMessageShas 持有口径严格对齐，绝不重复 addRef。
+  const shas = collectMessageShas(subset);
+  const addRefFailedShas: string[] = [];
+  if (shas.length > 0) {
+    await Promise.all(shas.map(async sha => {
+      if (await tryAddRefOnce(sha)) return;
+      // 1 次有限重试。
+      if (await tryAddRefOnce(sha)) return;
+      addRefFailedShas.push(sha);
+    }));
+  }
+  if (addRefFailedShas.length > 0) {
+    // 可观测日志：用户无感知的数据级风险，至少落一条 warn 便于排查。
+    console.warn(
+      `[branchConversation] ${addRefFailedShas.length} 个附件 addRef 失败（重试后仍未 +1），`
+      + `源对话删除后这些图可能被误删：`,
+      addRefFailedShas,
+    );
+  }
+
+  return {
+    summary,
+    newId,
+    parentId: srcId,
+    branchedFromMessageId: fromMessageId,
+    messages: subset,
+    title,
+    model: meta?.model,
+    addRefFailedShas,
   };
 }
 
@@ -391,6 +538,9 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
       fileSnapshots: conversation.fileSnapshots ?? {},
       pendingDiffs: conversation.pendingDiffs ?? [],
       timestamp: normalizeTimestamp(conversation.updatedAt ?? conversation.timestamp),
+      // M2-3：分支溯源随快照回带（两端 mapConversation/Web get 都已带上这两字段，普通对话为 null）。
+      parentId: conversation.parentId ?? conversation.parent_id ?? null,
+      branchedFromMessageId: conversation.branchedFromMessageId ?? conversation.branched_from_message_id ?? null,
     };
   } catch {
     return null;
@@ -409,6 +559,9 @@ async function persistPlatformSnapshot(
     pendingDiffs: FileDiffSummary[];
     archived?: boolean;
     tags?: string[];
+    // M2-3 对话分支溯源（仅 create 时有意义；update 路径下若为 undefined，IPC 端会跳过不覆盖）。
+    parentId?: string | null;
+    branchedFromMessageId?: string | null;
   },
   messages: Message[],
 ): Promise<void> {

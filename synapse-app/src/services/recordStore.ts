@@ -549,3 +549,65 @@ export async function clampToBatch(
     return null;
   }
 }
+
+/**
+ * 对话分支（M2-3）：把【源对话 record 截到 keptSteps 的连续前缀批次】拷贝到【目标新对话】。
+ *
+ * 用途：用户在源对话第 N 条消息处「从此分支」，新对话继承到该点为止已生成的 record 摘要，
+ * 后续在新对话里的增量压缩可从正确的批次起点续接（与源对话的 record 互不影响）。
+ *
+ * ★ 截断口径与 clampToBatch 完全一致（同款「连续前缀 by stepEnd」逻辑，避免两处口径漂移）：
+ *   - 保留所有 stepEnd <= keptSteps 的整批；丢弃被截断点穿过（stepEnd > keptSteps）的批及其之后所有批。
+ *   - 用 findIndex + slice 取前缀，保证结果恒为连续前缀（脏数据导致 stepEnd 非单调也不会从中间挖空）。
+ *   - keptRounds 仅作 sanity 告警，不参与过滤（与 clampToBatch 一致，以 stepEnd 单一口径为准）。
+ *
+ * ★ 不修改源对话：只读源 record（getRecord），把裁出的批次原样（深拷贝）upsert 到目标对话。
+ *   目标对话本无 record，是首次写入；批次内容/边界零改动直接复用源批（index/stepStart/stepEnd 一并继承，
+ *   保证后续 appendBatch 的幂等水位门 expectedStepStart == 末批 stepEnd 成立）。
+ *
+ * 全程吞异常返回 null（record 是加速层，分支主流程绝不能被它阻塞）。
+ *
+ * @returns 写入目标对话后的最新 record；源无 record / 截后无批次 / 失败 → null。
+ */
+export async function copyRecord(
+  srcConvId: string,
+  dstConvId: string,
+  keptSteps: number,
+  keptRounds: number,
+): Promise<SynapseRecord | null> {
+  if (!srcConvId || !dstConvId || srcConvId === dstConvId) return null;
+  try {
+    const src = await getRecord(srcConvId);
+    if (!src || src.batches.length === 0) return null;
+
+    const safeSteps = Math.max(0, keptSteps);
+
+    // 与 clampToBatch 同款：末批整个在保留范围内 → 整份拷贝；否则取被截断点之前的连续前缀。
+    const last = src.batches[src.batches.length - 1];
+    let kept: RecordBatch[];
+    if (last.stepEnd <= safeSteps) {
+      kept = src.batches;
+    } else {
+      const cutIdx = src.batches.findIndex(b => b.stepEnd > safeSteps);
+      kept = cutIdx < 0 ? src.batches : src.batches.slice(0, cutIdx);
+    }
+
+    // sanity：keptRounds 与保留前缀末批 roundEnd 在正常单调数据下应一致（仅告警，不改裁剪结果）。
+    const safeRounds = Math.max(0, keptRounds);
+    const keptLast = kept[kept.length - 1];
+    if (keptLast && keptLast.roundEnd > safeRounds) {
+      console.warn(
+        `[recordStore] copyRecord round/step 口径偏差：保留前缀末批 roundEnd=${keptLast.roundEnd} > keptRounds=${safeRounds}（以 stepEnd 为准，仅告警）`,
+      );
+    }
+
+    if (kept.length === 0) return null; // 分支点落在首批之前 → 新对话无可继承摘要
+
+    // 深拷贝批次写入目标（避免与源 record 共享对象引用；upsertRecord 内部会重新 normalize + 派生水位）。
+    const cloned: RecordBatch[] = kept.map(b => ({ ...b }));
+    return await upsertRecord({ conversationId: dstConvId, batches: cloned });
+  } catch (err) {
+    console.warn('[recordStore] copyRecord failed:', err);
+    return null;
+  }
+}

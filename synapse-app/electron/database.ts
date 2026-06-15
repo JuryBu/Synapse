@@ -153,6 +153,12 @@ export function initDatabase(): Database.Database {
     ensureColumn(db, 'conversations', 'tags_json', 'TEXT');
     ensureColumn(db, 'conversations', 'archived_at', 'INTEGER');
 
+    // M2-3 对话分支：分支出的新对话记录其来源。parent_id = 源对话 id（树形溯源），
+    // branched_from_message_id = 在源对话哪条消息处「从此分支」。两列对旧行均为 NULL（非分支对话），
+    // ensureColumn 懒迁移加列不破坏旧库；新增不设外键（源对话被删后分支仍可独立存活，仅 parent_id 指向悬空 id）。
+    ensureColumn(db, 'conversations', 'parent_id', 'TEXT');
+    ensureColumn(db, 'conversations', 'branched_from_message_id', 'TEXT');
+
     ensureColumn(db, 'messages', 'model', 'TEXT');
     ensureColumn(db, 'messages', 'content_parts', 'TEXT');
     ensureColumn(db, 'messages', 'attachments', 'TEXT');
