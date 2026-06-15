@@ -13,6 +13,25 @@ import type { SynapseRecord } from './recordStore';
 export const CONVERSATION_SCHEMA_VERSION = 1;
 export const AUTOSAVE_ID = 'autosave-current';
 const AUTOSAVE_KEY = 'synapse_autosave';
+
+// ★ M2-6 切换闸门：切换/新建对话流程是异步多 await（saveCurrentToHistory→loadConversationSnapshot→
+//   setConversation），其间若已 fork autosave 成真实 id 并 clearAutosaveSnapshot()，AgentPanel 的 700ms
+//   autosave debounce 仍可能以「切走前对话的 id=null/AUTOSAVE_ID」迟到触发，把 AUTOSAVE_ID 行重新写回
+//   （复活已 fork 的草稿）→ 下次启动 loadAutosaveSnapshot 误把它当上次对话恢复、mode 归属错乱。
+//   切换/新建期间置闸，saveAutosaveSnapshot 落 AUTOSAVE_ID 行时若闸门开启则直接跳过——把这条竞态的封堵
+//   收进持久化层，调用方只需 begin/endConversationSwitch 包住切换流程，避免散落的跨组件 ref。
+//   用计数器（非布尔）记重入：并发/嵌套的切换+分支各自 begin/end 配对，只有全部结束才真正落闸解除，
+//   避免后完成者的 end 提前给前者解闸而漏掉竞态窗口。
+let conversationSwitchDepth = 0;
+export function beginConversationSwitch(): void {
+  conversationSwitchDepth += 1;
+}
+export function endConversationSwitch(): void {
+  conversationSwitchDepth = Math.max(0, conversationSwitchDepth - 1);
+}
+export function isConversationSwitching(): boolean {
+  return conversationSwitchDepth > 0;
+}
 const LEGACY_CONVERSATIONS_KEY = 'synapse_conversations';
 const LEGACY_CONVERSATION_METADATA_KEY = 'synapse:conversation:metadata';
 
@@ -31,6 +50,10 @@ export interface ConversationSnapshot {
   id?: string | null;
   title?: string;
   model?: string;
+  // M2-6 对话级元数据：每个对话记自己的 agent 模式 / 思考层级（真相在 agentSettings 镜像，落库随对话存）。
+  //   保存时由调用方填入当前 agentSettings.mode / reasoningEffort；undefined 时持久化层不覆盖已有行的旧值。
+  mode?: string;
+  reasoningEffort?: string;
   archived?: boolean;
   tags?: string[];
   messages: Message[];
@@ -85,6 +108,9 @@ function createMessageId(): string {
 
 export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Promise<void> {
   const id = snapshot.id || AUTOSAVE_ID;
+  // ★ M2-6 切换竞态封堵：切换/新建对话流程进行中，丢弃任何对 AUTOSAVE_ID 镜像行的迟到写入，
+  //   避免 clearAutosaveSnapshot 后又被旧 debounce 复活成草稿。真实对话 id 的落库不受影响（非 autosave 镜像）。
+  if (id === AUTOSAVE_ID && isConversationSwitching()) return;
   const timestamp = snapshot.timestamp ?? Date.now();
   // M2-R6：落库前剥掉任何残留 base64（持 sha256 引用即清内联 data:），localStorage / 平台两条路都净化。
   const sanitizedMessages = sanitizeMessagesForPersistence(snapshot.messages);
@@ -105,6 +131,9 @@ export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Prom
   const metadata = {
     title: snapshot.title || '自动保存',
     model: snapshot.model,
+    // M2-6：autosave 也带上当前对话 mode / reasoningEffort，使刷新/重启后恢复对话能拿回设置。
+    mode: snapshot.mode,
+    reasoningEffort: snapshot.reasoningEffort,
     schemaVersion: CONVERSATION_SCHEMA_VERSION,
     lastMessage: getLastMessageText(snapshot.messages),
     assistantRuns: snapshot.assistantRuns ?? {},
@@ -149,6 +178,9 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
   const metadata = {
     title,
     model: snapshot.model,
+    // M2-6：随对话保存当前 mode / reasoningEffort（undefined 时持久化层不覆盖旧值，见 persistPlatformSnapshot）。
+    mode: snapshot.mode,
+    reasoningEffort: snapshot.reasoningEffort,
     schemaVersion: CONVERSATION_SCHEMA_VERSION,
     lastMessage: getLastMessageText(snapshot.messages),
     assistantRuns: snapshot.assistantRuns ?? {},
@@ -246,7 +278,9 @@ export async function branchConversation(
   srcId: string,
   fromMessageId: string,
   messages: Message[],
-  meta?: { title?: string; model?: string; recordSrcId?: string; recordSnapshot?: SynapseRecord | null },
+  // M2-6：mode / reasoningEffort 可选——分支继承源对话当前设置并落到新分支 DB 行，
+  //   使新分支「切走再切回」恢复出的设置与分支那一刻一致（缺省则 create 落默认 planning/auto）。
+  meta?: { title?: string; model?: string; mode?: string; reasoningEffort?: string; recordSrcId?: string; recordSnapshot?: SynapseRecord | null },
 ): Promise<BranchResult | null> {
   if (!srcId || !fromMessageId || !Array.isArray(messages) || messages.length === 0) return null;
   const cutIdx = messages.findIndex(m => m.id === fromMessageId);
@@ -311,6 +345,9 @@ export async function branchConversation(
     id: newId,
     title,
     model: meta?.model,
+    // M2-6：分支继承源对话 mode / reasoningEffort（调用方传入当前设置）。
+    mode: meta?.mode,
+    reasoningEffort: meta?.reasoningEffort,
     messages: subset,
     parentId: srcId,
     branchedFromMessageId: fromMessageId,
@@ -604,6 +641,10 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
       id,
       title: conversation.title,
       model: conversation.model,
+      // M2-6：随快照回带对话级 mode / reasoningEffort（两端 mapConversation/Web get 都带这两字段）。
+      //   旧对话该列为 null/缺省 → 回退默认（mode='planning'、reasoningEffort='auto'），切换时同步进全局 agentSettings。
+      mode: conversation.mode ?? 'planning',
+      reasoningEffort: conversation.reasoningEffort ?? conversation.reasoning_effort ?? 'auto',
       archived: Boolean(conversation.archived),
       tags: normalizeTags(conversation.tags),
       messages: messages as Message[],
@@ -625,6 +666,9 @@ async function persistPlatformSnapshot(
   metadata: {
     title: string;
     model?: string;
+    // M2-6 对话级元数据（undefined 时 IPC / Web update 均跳过不覆盖旧值）。
+    mode?: string;
+    reasoningEffort?: string;
     schemaVersion: number;
     lastMessage: string;
     assistantRuns: Record<string, AssistantRun>;

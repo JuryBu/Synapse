@@ -308,6 +308,8 @@ function getWebMock(): SynapseAPI {
             title: data.title || '新对话',
             model: data.model || '',
             mode: data.mode || 'planning',
+            // M2-6 对话级元数据（Web 对等）：思考层级随对话存，缺省默认 'auto'。
+            reasoningEffort: data.reasoningEffort || 'auto',
             timestamp: Date.now(),
             messageCount: 0,
             lastMessage: data.lastMessage || '',
@@ -336,6 +338,11 @@ function getWebMock(): SynapseAPI {
             ...data,
             tags: data.tags === undefined ? summaries[idx].tags : normalizeWebTags(data.tags),
             archived: data.archived === undefined ? Boolean(summaries[idx].archived) : Boolean(data.archived),
+            // M2-6 对话级元数据（Web 对等）：undefined 不覆盖已有值（对齐 Electron IPC 跳过 undefined 列）。
+            mode: data.mode === undefined ? (summaries[idx].mode ?? 'planning') : data.mode,
+            reasoningEffort: data.reasoningEffort === undefined
+              ? (summaries[idx].reasoningEffort ?? 'auto')
+              : data.reasoningEffort,
             // M2-3：分支溯源仅在 create 时写定；update 传 undefined 时不覆盖已有值（对齐 Electron IPC 跳过 undefined 列）。
             parentId: data.parentId === undefined ? (summaries[idx].parentId ?? null) : (data.parentId ?? null),
             branchedFromMessageId: data.branchedFromMessageId === undefined

@@ -44,6 +44,9 @@ function mapConversation(row: any) {
         // M2-3 对话分支溯源：非分支对话两者为 null。
         parentId: row.parent_id ?? null,
         branchedFromMessageId: row.branched_from_message_id ?? null,
+        // M2-6 对话级元数据：mode 由 `...row` 自带（列名同 key）；reasoning_effort 列名带下划线需显式映射。
+        // 旧行（建列前）为 null，上层 loadPlatformSnapshot 回退默认。
+        reasoningEffort: row.reasoning_effort ?? null,
     };
 }
 
@@ -103,7 +106,7 @@ export function registerConversationHandlers(): void {
 
     // 创建对话
     ipcMain.handle('conversation:create', (_e, data: {
-        id: string; title?: string; model?: string; mode?: string; workspaceId?: string;
+        id: string; title?: string; model?: string; mode?: string; reasoningEffort?: string; workspaceId?: string;
         schemaVersion?: number; summary?: unknown; lastMessage?: string;
         assistantRuns?: unknown; fileSnapshots?: unknown; pendingDiffs?: unknown;
         archived?: boolean; tags?: string[];
@@ -112,16 +115,18 @@ export function registerConversationHandlers(): void {
     }) => {
         db.prepare(
             `INSERT INTO conversations (
-              id, workspace_id, title, model, mode, schema_version, summary_json,
+              id, workspace_id, title, model, mode, reasoning_effort, schema_version, summary_json,
               last_message, assistant_runs, file_snapshots, pending_diffs, archived, tags_json, archived_at,
               parent_id, branched_from_message_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
             data.id,
             data.workspaceId || null,
             data.title || '新对话',
             data.model || null,
             data.mode || 'planning',
+            // M2-6 对话级思考层级：缺省落默认 'auto'（与 agentSettings 初值一致）。
+            data.reasoningEffort || 'auto',
             data.schemaVersion ?? 1,
             toJson(data.summary),
             data.lastMessage || '',
@@ -158,7 +163,7 @@ export function registerConversationHandlers(): void {
 
     // 更新对话
     ipcMain.handle('conversation:update', (_e, id: string, data: {
-        title?: string; model?: string; schemaVersion?: number; summary?: unknown; lastMessage?: string;
+        title?: string; model?: string; mode?: string; reasoningEffort?: string; schemaVersion?: number; summary?: unknown; lastMessage?: string;
         assistantRuns?: unknown; fileSnapshots?: unknown; pendingDiffs?: unknown;
         archived?: boolean; tags?: string[];
         // M2-3：分支溯源一般在 create 时写定；update 仅在显式回填时生效（undefined 不动）。
@@ -168,6 +173,9 @@ export function registerConversationHandlers(): void {
         const vals: unknown[] = [];
         if (data.title !== undefined) { sets.push('title = ?'); vals.push(data.title); }
         if (data.model !== undefined) { sets.push('model = ?'); vals.push(data.model); }
+        // M2-6 对话级元数据：每次保存把该对话当前 mode / reasoning_effort 落库（undefined 时不动，保旧值）。
+        if (data.mode !== undefined) { sets.push('mode = ?'); vals.push(data.mode); }
+        if (data.reasoningEffort !== undefined) { sets.push('reasoning_effort = ?'); vals.push(data.reasoningEffort); }
         if (data.schemaVersion !== undefined) { sets.push('schema_version = ?'); vals.push(data.schemaVersion); }
         if (data.summary !== undefined) { sets.push('summary_json = ?'); vals.push(toJson(data.summary)); }
         if (data.lastMessage !== undefined) { sets.push('last_message = ?'); vals.push(data.lastMessage); }

@@ -25,7 +25,7 @@ import { addNotification } from '@/store/slices/notifications';
 import { clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, updateDiffStatus, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 import { countConversationTokens, MAX_CONTEXT_TOKENS } from '@/services/systemPrompt';
 import { conversationExporter } from '@/services/conversationExporter';
-import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, migrateSnapshotAttachments, branchConversation, AUTOSAVE_ID } from '@/services/conversationPersistence';
+import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, migrateSnapshotAttachments, branchConversation, beginConversationSwitch, endConversationSwitch, AUTOSAVE_ID } from '@/services/conversationPersistence';
 import { platform } from '@/platform';
 import { releaseMessageAttachments, resolveAttachmentDataUrl, sanitizeMessagesForPersistence } from '@/services/attachmentRefs';
 import { setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
@@ -77,6 +77,10 @@ export function AgentPanel() {
   const isStreaming = useAppSelector((s: RootState) => (s as any).conversation.isStreaming);
   const settings = useAppSelector((s: RootState) => (s as any).settings);
   const agentSettings = useAppSelector((s: RootState) => (s as any).agentSettings);
+  // M2-6：handleBranch 等异步回调（useCallback 依赖窄）需读当前 mode / reasoningEffort 落库，
+  //   用 ref 持有最新值避免闭包旧值，且无需把这两项塞进回调依赖数组。
+  const agentMetaRef = useRef({ mode, reasoningEffort: agentSettings.reasoningEffort as string });
+  agentMetaRef.current = { mode, reasoningEffort: agentSettings.reasoningEffort };
   const apiTokenCount = useAppSelector((s: RootState) => s.conversation.tokenCount);
   const [input, setInput] = useState('');
   const [activeAgentTab, setActiveAgentTab] = useState<'chat' | 'plan' | 'context'>('chat');
@@ -252,14 +256,31 @@ export function AgentPanel() {
   }, []);
 
   // Auto-save conversation to the active persistence backend.
+  // ★ M2-6：本 effect 同时承担「对话级 mode / reasoningEffort 持久化」职责——
+  //   id 为真实对话 id 时 saveAutosaveSnapshot 直接 update 该对话行，id 为空/autosave 时落 AUTOSAVE_ID 行。
+  //   故 mode/reasoningEffort 切换 UI 处只需 dispatch 改全局 agentSettings，本 effect（依赖含这两项）会去重落库，
+  //   无需在每个切换按钮里手写持久化。切走前 ConversationList.saveCurrentToHistory 再兜一道（debounce 未触发也不丢）。
   useEffect(() => {
     if (messages.length === 0 || isStreaming) return;
+    // effect 闭包捕获触发时刻的对话身份（A 的 id），供 700ms 后到点时与 store 最新身份比对。
+    const scopedId = conversation.id;
     const timeout = window.setTimeout(() => {
+      // ★ M2-6 切换竞态守卫：切走对话期间（ConversationList.handleSwitchConversation 异步多 await），
+      //   本 effect 的旧定时器可能在 cleanup 之前到点。若此刻 store 已切到别的对话（conversationRef.current.id
+      //   ≠ 本次闭包的 scopedId），这就是一条「属于已切走对话的迟到写入」——直接跳过，避免：
+      //   ① saveCurrentToHistory 已把 autosave fork 成真实 id 并 clearAutosaveSnapshot 后，
+      //      这条迟到 debounce 又用 id=null/AUTOSAVE_ID 重建一条 autosave 草稿（复活已 fork 的对话），
+      //      导致下次启动 loadAutosaveSnapshot 把复活草稿连同其 mode 当成上次对话恢复、mode 归属错乱。
+      const liveId = (conversationRef.current.id as string | null);
+      if (liveId !== (scopedId as string | null)) return;
       void saveAutosaveSnapshot({
         id: conversation.id,
         title: conversation.title,
         messages,
         model,
+        // M2-6：autosave 也带当前 mode / reasoningEffort，刷新/重启从 autosave 恢复时能拿回设置。
+        mode,
+        reasoningEffort: agentSettings.reasoningEffort,
         assistantRuns: conversation.assistantRuns,
         fileSnapshots: conversation.fileSnapshots,
         pendingDiffs: conversation.pendingDiffs,
@@ -279,6 +300,9 @@ export function AgentPanel() {
   }, [
     messages,
     model,
+    // M2-6：mode / reasoningEffort 变化也要重新落 autosave 行，保证刷新恢复拿到最新设置。
+    mode,
+    agentSettings.reasoningEffort,
     isStreaming,
     conversation.id,
     conversation.title,
@@ -302,7 +326,13 @@ export function AgentPanel() {
             assistantRuns: data?.assistantRuns,
             fileSnapshots: data?.fileSnapshots,
             pendingDiffs: data?.pendingDiffs,
+            // M2-3：恢复对话也回填分支溯源（autosave 行的 parent 字段，普通对话为 null）。
+            parentId: data?.parentId ?? null,
+            branchedFromMessageId: data?.branchedFromMessageId ?? null,
           }));
+          // M2-6：恢复对话时同步其 mode / reasoningEffort 到全局 agentSettings（旧 autosave 无此字段则回退默认）。
+          dispatch(setMode(data?.mode === 'fast' ? 'fast' : 'planning'));
+          dispatch(setReasoningEffort(data?.reasoningEffort || 'auto'));
           dispatch(addNotification({ type: 'info', title: '已恢复', message: '已恢复上次对话', duration: 2000 }));
           // ★ M2-R6 懒迁移：后台把旧内联 base64 抽离成 sha256 引用并回写 DB（用到才迁、不阻塞渲染）。
           // 首屏仍用内联 base64 渲染（能显示）；迁移确有变更时通过 onMigrated 把引用态写回 store，
@@ -335,6 +365,59 @@ export function AgentPanel() {
     })();
     return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // M2-6：顶栏「新建对话」入口。与 ConversationList.handleNewConversation 口径单一：
+  //   先把当前对话的 mode / reasoningEffort 随对话落库（saveConversationSnapshot），
+  //   再【条件清】autosave——仅当确实发生 autosave→真实 id 的 fork（summary.id 非 AUTOSAVE_ID）才
+  //   clearAutosaveSnapshot()，避免「当前对话是真实 id」场景下无条件 delete(AUTOSAVE_ID) 误删并存草稿镜像。
+  //   读 conversationRef / agentMetaRef 的 current 取最新值，杜绝 700ms debounce 未触发时按钮拿到旧 mode。
+  const handleNewConversation = useCallback(async () => {
+    // ★ M2-6 切换竞态：置闸覆盖 save(可能 fork+clearAutosave) → clearConversation/重置 整段窗口，
+    //   挡住旧对话迟到 autosave debounce 复活 AUTOSAVE_ID 草稿（与 ConversationList 两入口口径一致）。finally 复位。
+    beginConversationSwitch();
+    try {
+      const cur = conversationRef.current;
+      if ((cur.messages?.length ?? 0) > 0) {
+        // fork 判据与 ConversationList.saveCurrentToHistory 一致：当前是 autosave / 无 id 时 save 会 fork 成新 id。
+        const wasAutosave = !cur.id || cur.id === AUTOSAVE_ID;
+        try {
+          const summary = await saveConversationSnapshot({
+            id: cur.id,
+            title: cur.title,
+            messages: cur.messages,
+            model: cur.model,
+            // M2-6：新建前把当前对话的 mode / reasoningEffort 随对话落库，切回时能恢复。
+            mode: agentMetaRef.current.mode,
+            reasoningEffort: agentMetaRef.current.reasoningEffort,
+            assistantRuns: cur.assistantRuns,
+            fileSnapshots: cur.fileSnapshots,
+            pendingDiffs: cur.pendingDiffs,
+            timestamp: Date.now(),
+          });
+          if (summary) {
+            dispatch(updateConversation(summary));
+            // M2-R6：此处【不】GC 附件——save 已把这批消息（含 sha256 引用）落到新对话 id，实体仍被新对话引用
+            //   （refCount 不变、归属转移）；clearAutosaveSnapshot 走 conversation.delete(AUTOSAVE_ID)（不 release）。
+            //   故 refCount 守恒。仅在确实 fork 出真实 id 时清 autosave 镜像（条件清，与 ConversationList 对齐），
+            //   真实对话场景不再无条件 delete(AUTOSAVE_ID)，避免误删并存的真草稿镜像。
+            if (wasAutosave && summary.id && summary.id !== AUTOSAVE_ID) {
+              await clearAutosaveSnapshot();
+            }
+          }
+        } catch {
+          dispatch(addNotification({ type: 'warning', title: '自动保存失败', message: '当前对话保存失败，但仍会创建新对话' }));
+        }
+      }
+      dispatch(clearConversation());
+      // M2-6：新对话回默认设置（mode=planning / reasoningEffort=auto）。先落定旧对话设置再重置。
+      dispatch(setMode('planning'));
+      dispatch(setReasoningEffort('auto'));
+      dispatch(setSelectedId(null));
+      dispatch(addNotification({ type: 'info', title: '新对话', message: '已创建新对话' }));
+    } finally {
+      endConversationSwitch();
+    }
+  }, [dispatch]);
 
   const buildUserContentParts = useCallback((text: string, attachments: AttachmentRef[]): MessageContentPart[] => {
     const parts: MessageContentPart[] = [];
@@ -524,6 +607,9 @@ export function AgentPanel() {
   // 再从真实 id 分支——避免 parentId 指向易被清理/复用的 AUTOSAVE_ID。源对话内容/消息不被修改（分支是复制）。
   const handleBranch = useCallback((msgId: string) => {
     if (isStreaming) return;
+    // ★ M2-6 切换竞态：autosave 源分支会 clearAutosaveSnapshot()+promotion(fork 真实 id)+setConversation，
+    //   与切换/新建同构，置闸覆盖整段，挡住旧对话迟到 autosave debounce 复活 AUTOSAVE_ID 草稿。finally 复位。
+    beginConversationSwitch();
     void (async () => {
       try {
         const snapshotMessages = conversationRef.current.messages;
@@ -558,6 +644,9 @@ export function AgentPanel() {
             title: conversationRef.current.title,
             messages: snapshotMessages,
             model: conversationRef.current.model,
+            // M2-6：promotion（autosave 源提升为真实对话）随对话落当前 mode / reasoningEffort。
+            mode: agentMetaRef.current.mode,
+            reasoningEffort: agentMetaRef.current.reasoningEffort,
             assistantRuns: conversationRef.current.assistantRuns,
             fileSnapshots: conversationRef.current.fileSnapshots,
             pendingDiffs: conversationRef.current.pendingDiffs,
@@ -596,6 +685,9 @@ export function AgentPanel() {
         const result = await branchConversation(srcId, msgId, snapshotMessages, {
           title: conversationRef.current.title,
           model: conversationRef.current.model,
+          // M2-6：把当前 mode / reasoningEffort 传入，新分支 DB 行一开始即继承源设置（切回不退回默认）。
+          mode: agentMetaRef.current.mode,
+          reasoningEffort: agentMetaRef.current.reasoningEffort,
           recordSrcId,
           ...(wasAutosave ? { recordSnapshot } : {}),
         });
@@ -611,7 +703,13 @@ export function AgentPanel() {
           title: result.title,
           messages: result.messages,
           model: result.model,
+          // M2-3：切到新分支时回填溯源（DB 已由 branchConversation 写入 parentId/branchedFromMessageId）。
+          parentId: result.parentId,
+          branchedFromMessageId: result.branchedFromMessageId,
         }));
+        // M2-6：分支继承源对话当前的 mode / reasoningEffort（全局 agentSettings 此刻即源设置，无需改动）。
+        //   新分支落库时 branchConversation 未带 mode/reasoningEffort → DB 取默认；下次该分支被保存
+        //   （saveCurrentToHistory / autosave）即写入其当时设置，与切换恢复闭环一致。
         dispatch(setSelectedId(result.newId));
         // 附件 addRef 守恒检查：若有 sha 重试后仍未 +1，新分支这些图在源对话删除后可能被误删，提示用户。
         if (result.addRefFailedShas.length > 0) {
@@ -625,6 +723,8 @@ export function AgentPanel() {
         }
       } catch (err: any) {
         dispatch(addNotification({ type: 'error', title: '分支失败', message: err?.message || '从此分支时出错' }));
+      } finally {
+        endConversationSwitch();
       }
     })();
   }, [dispatch, isStreaming]);
@@ -826,30 +926,7 @@ export function AgentPanel() {
           <button className={`agent-tab ${activeAgentTab === 'context' ? 'active' : ''}`} onClick={() => setActiveAgentTab('context')}>📖 Context</button>
           <button
             className="mode-btn"
-            onClick={() => {
-              if (messages.length > 0) {
-                void saveConversationSnapshot({
-                  id: conversation.id,
-                  title: conversation.title,
-                  messages,
-                  model,
-                  assistantRuns: conversation.assistantRuns,
-                  fileSnapshots: conversation.fileSnapshots,
-                  pendingDiffs: conversation.pendingDiffs,
-                  timestamp: Date.now(),
-                }).then((summary) => {
-                  if (summary) dispatch(updateConversation(summary));
-                });
-              }
-              // M2-R6：此处【不】GC 附件。messages.length>0 时已 saveConversationSnapshot 把这批消息
-              // （含 sha256 引用）保存到一个新对话 id，附件实体仍被新对话引用（refCount 不变、归属转移）；
-              // clearAutosaveSnapshot 走 platform.conversation.delete(AUTOSAVE_ID)（不 release，autosave 只是镜像）。
-              // 故 refCount 守恒——若在此 release 会误删仍被新对话引用的实体。
-              dispatch(clearConversation());
-              dispatch(setSelectedId(null));
-              void clearAutosaveSnapshot();
-              dispatch(addNotification({ type: 'info', title: '新对话', message: '已创建新对话' }));
-            }}
+            onClick={() => { void handleNewConversation(); }}
             title="新建对话"
             style={{ marginLeft: 'auto' }}
             disabled={isStreaming}

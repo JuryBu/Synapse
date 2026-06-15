@@ -159,6 +159,10 @@ export function initDatabase(): Database.Database {
     ensureColumn(db, 'conversations', 'parent_id', 'TEXT');
     ensureColumn(db, 'conversations', 'branched_from_message_id', 'TEXT');
 
+    // M2-6 对话级元数据：每个对话记自己的思考层级 reasoning_effort（mode 列建表时已有，line ~50）。
+    // 旧行该列为 NULL，读回时由上层回退默认 'auto'；ensureColumn 懒迁移加列不破坏旧库。
+    ensureColumn(db, 'conversations', 'reasoning_effort', 'TEXT');
+
     ensureColumn(db, 'messages', 'model', 'TEXT');
     ensureColumn(db, 'messages', 'content_parts', 'TEXT');
     ensureColumn(db, 'messages', 'attachments', 'TEXT');

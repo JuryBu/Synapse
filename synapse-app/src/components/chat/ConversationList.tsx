@@ -8,10 +8,13 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import type { ConversationSummary } from '@/store/slices/conversationHistory';
 import { removeConversation, setConversations, setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
 import { clearConversation, setConversation } from '@/store/slices/conversation';
+import { setMode, setReasoningEffort } from '@/store/slices/agentSettings';
 import { addNotification } from '@/store/slices/notifications';
 import {
   AUTOSAVE_ID,
+  beginConversationSwitch,
   clearAutosaveSnapshot,
+  endConversationSwitch,
   deleteConversationSnapshot,
   deleteConversationSnapshots,
   exportConversationSnapshot,
@@ -77,6 +80,12 @@ export function ConversationList() {
   // 持有最新 conversation 供异步懒迁移 onMigrated 回调安全校验，避免 useCallback 闭包旧值误导。
   const currentConversationRef = useRef(currentConversation);
   currentConversationRef.current = currentConversation;
+  // M2-6：保存当前对话时需把【当前全局 agentSettings 的 mode / reasoningEffort】随对话落库。
+  //   用 ref 持有最新值，既避免把这两个高频可变项塞进 saveCurrentToHistory 的依赖数组，也防闭包旧值。
+  const agentMode = useAppSelector((s) => s.agentSettings.mode);
+  const agentReasoningEffort = useAppSelector((s) => s.agentSettings.reasoningEffort);
+  const agentSettingsRef = useRef({ mode: agentMode, reasoningEffort: agentReasoningEffort });
+  agentSettingsRef.current = { mode: agentMode, reasoningEffort: agentReasoningEffort };
   const [searchQuery, setSearchQuery] = useState('');
   const [archiveFilter, setArchiveFilter] = useState<ArchiveFilter>('active');
   const [tagFilter, setTagFilter] = useState('');
@@ -153,6 +162,10 @@ export function ConversationList() {
         title: currentConversation.title,
         messages: currentConversation.messages,
         model: currentConversation.model,
+        // M2-6：把当前对话的 mode / reasoningEffort（全局 agentSettings 镜像）随对话落库，
+        //   使切走再切回能恢复该对话各自的设置（A=fast / B=planning 不串）。
+        mode: agentSettingsRef.current.mode,
+        reasoningEffort: agentSettingsRef.current.reasoningEffort,
         assistantRuns: currentConversation.assistantRuns,
         fileSnapshots: currentConversation.fileSnapshots,
         pendingDiffs: currentConversation.pendingDiffs,
@@ -173,18 +186,32 @@ export function ConversationList() {
   }, [currentConversation, dispatch]);
 
   const handleNewConversation = useCallback(async () => {
-    await saveCurrentToHistory();
-    dispatch(clearConversation());
-    dispatch(setSelectedId(null));
-    setSelectedIds([]);
-    setIsBulkMode(false);
-    await refreshConversations({ ...activeFilters, query: '' });
-    dispatch(addNotification({ type: 'info', title: '新对话', message: '已创建新对话' }));
+    // ★ M2-6 切换竞态：同 handleSwitchConversation，置闸覆盖 saveCurrentToHistory(可能 fork+clearAutosave)
+    //   到 clearConversation/重置 的整段窗口，挡住旧对话迟到 autosave debounce 复活 AUTOSAVE_ID 草稿。
+    beginConversationSwitch();
+    try {
+      await saveCurrentToHistory();
+      dispatch(clearConversation());
+      // M2-6：新对话回默认设置（mode=planning / reasoningEffort=auto）。先 saveCurrentToHistory 落定旧对话设置再重置。
+      dispatch(setMode('planning'));
+      dispatch(setReasoningEffort('auto'));
+      dispatch(setSelectedId(null));
+      setSelectedIds([]);
+      setIsBulkMode(false);
+      await refreshConversations({ ...activeFilters, query: '' });
+      dispatch(addNotification({ type: 'info', title: '新对话', message: '已创建新对话' }));
+    } finally {
+      endConversationSwitch();
+    }
   }, [activeFilters, saveCurrentToHistory, refreshConversations, dispatch]);
 
   const handleSwitchConversation = useCallback(async (id: string) => {
-    await saveCurrentToHistory();
+    // ★ M2-6 切换竞态：置闸覆盖「saveCurrentToHistory(可能 fork+clearAutosave) → loadConversationSnapshot
+    //   → setConversation(新对话)」整段异步窗口。其间 AgentPanel 旧对话的 700ms autosave debounce 即便迟到触发，
+    //   saveAutosaveSnapshot 也会因闸门跳过对 AUTOSAVE_ID 行的写入，杜绝复活已 fork 的草稿。finally 复位。
+    beginConversationSwitch();
     try {
+      await saveCurrentToHistory();
       const snapshot = await loadConversationSnapshot(id);
       if (!snapshot) throw new Error('missing conversation');
       dispatch(setConversation({
@@ -195,7 +222,14 @@ export function ConversationList() {
         assistantRuns: snapshot.assistantRuns,
         fileSnapshots: snapshot.fileSnapshots,
         pendingDiffs: snapshot.pendingDiffs,
+        // M2-3：切换对话时把分支溯源回填进 store（此前未接 → 渲染显示 null，DB 一直是对的）。
+        parentId: snapshot.parentId ?? null,
+        branchedFromMessageId: snapshot.branchedFromMessageId ?? null,
       }));
+      // M2-6：把该对话各自的 mode / reasoningEffort 同步进全局 agentSettings（agentLoop 仍读 agentSettings，
+      //   口径不变）。已在 saveCurrentToHistory 把切换前对话的设置落库，故此处切走旧设置不丢。
+      dispatch(setMode(snapshot.mode === 'fast' ? 'fast' : 'planning'));
+      dispatch(setReasoningEffort(snapshot.reasoningEffort || 'auto'));
       dispatch(setSelectedId(id));
       // ★ M2-R6 懒迁移：打开历史对话时若含旧内联 base64，后台抽离成 sha256 引用并回写 DB（用到才迁、不阻塞）。
       // 迁移确有变更时把引用态写回 store（杜绝残留 base64 反复落库）；回写前校验仍是同一对话且消息未变。
@@ -218,6 +252,8 @@ export function ConversationList() {
       await refreshConversations();
     } catch {
       dispatch(addNotification({ type: 'error', title: '加载失败', message: '无法加载对话历史' }));
+    } finally {
+      endConversationSwitch();
     }
   }, [saveCurrentToHistory, refreshConversations, dispatch]);
 

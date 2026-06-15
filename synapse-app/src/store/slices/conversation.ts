@@ -166,6 +166,10 @@ interface ConversationState {
   tokenCount: number;
   tokenUsage: TokenUsage | null;
   pendingMessage: string;
+  // M2-3 对话分支溯源：分支出的对话记其来源（DB 一直对，此前 store 未接回 → 渲染显示 null）。
+  //   parentId = 源对话 id；branchedFromMessageId = 在源对话哪条消息处「从此分支」。非分支对话为 null。
+  parentId: string | null;
+  branchedFromMessageId: string | null;
 }
 
 const CONVERSATION_SCHEMA_VERSION = 1;
@@ -278,6 +282,8 @@ const initialState: ConversationState = {
   tokenCount: 0,
   tokenUsage: null,
   pendingMessage: '',
+  parentId: null,
+  branchedFromMessageId: null,
 };
 
 export const conversationSlice = createSlice({
@@ -292,6 +298,11 @@ export const conversationSlice = createSlice({
       fileSnapshots?: Record<string, FileSnapshot>;
       pendingDiffs?: FileDiffSummary[];
       model?: string;
+      // M2-3：分支/加载对话时回填溯源。语义为「undefined 不覆盖」——懒迁移回写、重命名回写等
+      //   不带这两字段的 setConversation 不会把已有溯源清成 null（避免回写副作用抹掉分支来源）。
+      //   切换/加载/分支这类「换对话身份」的入口必须显式传（含 null）以正确刷新。
+      parentId?: string | null;
+      branchedFromMessageId?: string | null;
     }>) {
       state.schemaVersion = CONVERSATION_SCHEMA_VERSION;
       state.id = action.payload.id;
@@ -301,6 +312,10 @@ export const conversationSlice = createSlice({
       state.fileSnapshots = action.payload.fileSnapshots ?? {};
       state.pendingDiffs = (action.payload.pendingDiffs ?? []).map(normalizeDiff);
       state.model = action.payload.model ?? state.model;
+      if ('parentId' in action.payload) state.parentId = action.payload.parentId ?? null;
+      if ('branchedFromMessageId' in action.payload) {
+        state.branchedFromMessageId = action.payload.branchedFromMessageId ?? null;
+      }
     },
     addMessage(state, action: PayloadAction<Message>) {
       state.messages.push(normalizeMessage(action.payload));
@@ -507,6 +522,9 @@ export const conversationSlice = createSlice({
       state.streamingContent = '';
       state.tokenCount = 0;
       state.tokenUsage = null;
+      // M2-3：新对话无分支来源。
+      state.parentId = null;
+      state.branchedFromMessageId = null;
     },
     setTitle(state, action: PayloadAction<string>) {
       state.title = action.payload;
