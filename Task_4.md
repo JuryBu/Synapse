@@ -156,7 +156,7 @@
   - 📌 遗留(子代理 notes)：autosave fork 时 record 从 AUTOSAVE_ID 迁到新真实 id 仍是历史遗留点(分支场景用 recordSrcId 绕过)，与 R6「正式保存 record 迁移 edge」同源，可合并单列。
   - 其后：**M2-S 稳定性**(retry后台化/重连/fallback/图片预检，见下) → M2-5 worktree agent 执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
 - 2026-06-16 🟡 **M2-S 稳定性加固（图片预检+retry进度 ✅ / 模型fallback+断线重连 待用户对齐）**——横切关注：
-  - ✅ 已做(workflow w00b3bigx，对抗审查 0 high/med 直接过)：①图片有效性预检 isLikelyValidImage(魔数 PNG/JPEG/GIF/WebP/AVIF/HEIC/BMP/SVG/ICO+外链/缺失/解码失败保守放行不误杀,node 10样本验证)+restoreApiMessagesAttachments 还原后剔除无效图占位+warning「N张无效图片已跳过」——根治「坏图拖累整条请求整体400」(用户截图场景)；②retry进度可见(StreamChunk retry变体+429/5xx/网络异常3退避点yield+UI「正在重试N/M」通知+收尾清除,不改现有重试判定/退避时长)。编译过。⏳真机验证(发坏图+真图混合:坏图跳过+真图正常识别不被拖累)进行中。
+  - ✅ 已做(workflow w00b3bigx，对抗审查 0 high/med 直接过)：①图片有效性预检 isLikelyValidImage(魔数 PNG/JPEG/GIF/WebP/AVIF/HEIC/BMP/SVG/ICO+外链/缺失/解码失败保守放行不误杀,node 10样本验证)+restoreApiMessagesAttachments 还原后剔除无效图占位+warning「N张无效图片已跳过」——根治「坏图拖累整条请求整体400」(用户截图场景)；②retry进度可见(StreamChunk retry变体+429/5xx/网络异常3退避点yield+UI「正在重试N/M」通知+收尾清除,不改现有重试判定/退避时长)。编译过。✅真机验证通过(子代理 a910f608)：isLikelyValidImage 判定全对(真PNG/JPEG true、坏图 false、外链/SVG 保守放行 true)、坏图发送前剔除为占位+warning、真图正常识别、混发真图不被坏图拖累、不再整体400(你截图场景彻底修复)。📌边界小本本:魔数合法但内容退化的图(如1x1极小图/截断图)上游vision仍可能单独400,超 isLikelyValidImage(只魔数校验)能力,可后续补最小尺寸/可解码校验(非缺陷)。
   - ⏸ 待用户对齐(不擅自做)：模型级 fallback(主→备,备用模型配置来源是设计选择)；断线彻底重连(现状单请求退避重试已覆盖瞬时抖动,彻底重连可能过度)。
   - 【以下为规划期 scout 记录(发现现状已有错误分类+退避+stream fallback,故 M2-S 是查漏补缺非从零)】：
   - 现状评估：aiClient 已有 maxRetries=3 请求重试(line 309-355) + streamMode fallback(stream→pseudo→off)；agentLoop 有 fallbackReason/connectionStatus/error 处理(line 594-833)。
