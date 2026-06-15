@@ -101,3 +101,11 @@
   - ⏳ git worktree 真机验证（create/list/remove）攒到 M2-5 一起。
 - 2026-06-15 ✅ **M2 record 多批次重构方案已定**（对齐 MC红石AI c-r-m，用户拍板）→ 详见 `Plan/Plan_4/Plan_4_M2_对话体系对齐.md` §五【已定最终方案】。决策：record 多批次追加 + DB 懒迁移 + 渐进式读(token预算+头尾融合 / 按需展开 record_read 工具 / 正则骨架) + 90% B方案 + fallback崩溃恢复 + 附件分离(存量也迁移) + 分支parent。分 stage：**M2-R1~R7 + M2-3**，其后 M2-5(git worktree agent执行,绑定押"对话级"待确认)/M2-6/M3。
   - 🌙 **晚上从 M2-R1 开始实现**（数据模型 + DB 懒迁移 + recordStore API：appendBatch/clampToBatch/getRecordSkeleton + 正则骨架）。设计 workflow 完整产出在 `tasks/wlxulkxne.output`（维度A/B/C + 综合蓝图）。
+- 2026-06-15 ✅ **M2-R1 record 多批次架构落地**（ultracode：实现 agent 中途 API 断、修复 agent 补全；commit `95a2625`）：record 单条全文→多批次追加(RecordBatch[]+派生水位+懒迁移)；recordGenerator generateBatch(旧批骨架 priorSkeleton 只读+新原文→本批独立、不合并全文)；agentLoop 压缩走 generateBatch+appendBatch(只追加末批/stepStart==末批stepEnd 幂等防脏写)；clampToBatch 单口径 stepEnd 连续前缀回溯保留(对齐算例)；database batches_json+record_schema_version 列 + ipc/platform/Web mock 懒迁移；AgentPanel UI 多批次压缩点分隔线。build+electron:build 通过。
+  - ⏳ 收尾中：① 子代理真机验证多批次端到端进行中(多批次生成/stepStart-stepEnd连续/UI多分隔线/回溯批次保留/本地API)；② 旧 generateRecord/buildUpdatePrompt 死代码待清(全 src 无调用)。
+  - 教训：record 全链路重构塞一个 workflow agent 太大、中途断成半成品(靠修复 agent 兜回)；以后大重构拆更细。
+- 2026-06-15 ✅ **M2-R1 多批次真机验证通过**（子代理 web-fetcher+本地API）：多批次生成(批0[0,5]+批1[5,9])、stepStart/stepEnd 首尾相接、各批独立不膨胀(288/211字符)、UI 多条压缩点分隔线、回溯批次保留(回溯第8条→批1丢批0留,clampToBatch对)、SQLite 落盘、阈值已改回。
+  - ✅ **修问题1：新对话 record 不触发**——conversation.id 新对话=null、autosave 落 'autosave-current'(含 conversations 行 FK满足)但不回写 store.id → record 被跳过。修：agentLoop/AgentPanel record 取 id 回退 AUTOSAVE_ID(导出常量)，新对话 record 落 autosave-current 立即生效。编译过。
+  - 📌 record 小本本：① edge：对话正式保存(saveConversationSnapshot: autosave-current→新conv-id)时 record 未迁移，需在保存流程加 copyRecord(autosave-current→新id)，和对话快照迁移一起做；② FK：autosave 已建 'autosave-current' conversations 行故 fallback FK 满足；generateBatch 60s 超时→回退字符截断(本地API慢偶发,可接受/R5优化)；③ 旧 generateRecord/buildUpdatePrompt 死代码待清(全 src 无调用)。
+  - ⏳ 问题1 真机复验 + 死代码清理 紧接做。
+  - 下一步：**R3 渐进式读注入**(token预算+头尾融合 + record_read 工具；默认参数：注入预算≈contextWindow 40%/头1批+尾2批) → R4(90% B方案)/R5(fallback)/R6(附件分离+存量迁移) → M2-3 对话分支 → M2-5 worktree agent 执行 → M3 Multi-AI。

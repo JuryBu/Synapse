@@ -2,7 +2,7 @@ import { platform } from '@/platform';
 import type { AssistantRun, FileDiffSummary, FileSnapshot, Message } from '@/store/slices/conversation';
 
 export const CONVERSATION_SCHEMA_VERSION = 1;
-const AUTOSAVE_ID = 'autosave-current';
+export const AUTOSAVE_ID = 'autosave-current';
 const AUTOSAVE_KEY = 'synapse_autosave';
 const LEGACY_CONVERSATIONS_KEY = 'synapse_conversations';
 const LEGACY_CONVERSATION_METADATA_KEY = 'synapse:conversation:metadata';

@@ -17,6 +17,7 @@ import { addNotification } from '../store/slices/notifications';
 import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS } from './systemPrompt';
 import { getRecord, appendBatch, getRecordSkeleton, type SynapseRecord } from './recordStore';
 import { generateBatch } from './recordGenerator';
+import { AUTOSAVE_ID } from './conversationPersistence';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 
 export interface ToolDefinition {
@@ -167,7 +168,10 @@ export class AgentLoop {
     let apiHistory: ChatMessage[];
     if (wasCompressed) {
       const keepCount = compressed.length - 1; // compressContext 保留的最近原文条数（含 tool 口径）
-      const conversationId = (rootState as any).conversation?.id as string | null;
+      // 问题1 修复：新对话 store.conversation.id 为 null，但 autosave 已把当前对话落到
+      // AUTOSAVE_ID('autosave-current')（含 conversations 行，FK 满足），故 record 回退用它，
+      // 让新对话的 record 多批次也能触发。（正式保存时 record 迁移到新 id 见 Task_4 小本本。）
+      const conversationId = ((rootState as any).conversation?.id as string | null) || AUTOSAVE_ID;
       let recordMd: string | null = null;
       if (conversationId) {
         try {

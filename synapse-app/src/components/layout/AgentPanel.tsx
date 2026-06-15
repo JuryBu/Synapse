@@ -25,7 +25,7 @@ import { addNotification } from '@/store/slices/notifications';
 import { clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, updateDiffStatus, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 import { countConversationTokens, MAX_CONTEXT_TOKENS } from '@/services/systemPrompt';
 import { conversationExporter } from '@/services/conversationExporter';
-import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot } from '@/services/conversationPersistence';
+import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, AUTOSAVE_ID } from '@/services/conversationPersistence';
 import { setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
 import { openTab } from '@/store/slices/editorTabs';
 import type { RootState } from '@/store';
@@ -90,7 +90,8 @@ export function AgentPanel() {
   const [modelSearch, setModelSearch] = useState('');
   // M2-R1: 读取当前对话 record 各批次的 stepEnd（不含 tool 口径），用于在消息流按批次标出
   // 多条「压缩点」分隔线（展示仍完整原文）。空 record 时为空数组。
-  const conversationId = conversation.id as string | null;
+  // 问题1：新对话 id 为 null 时回退 AUTOSAVE_ID（autosave 落盘用同一 id），让 record 分隔线/回溯也对新对话生效。
+  const conversationId = (conversation.id as string | null) || AUTOSAVE_ID;
   const [recordBatchStepEnds, setRecordBatchStepEnds] = useState<number[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -371,8 +372,7 @@ export function AgentPanel() {
   // 覆盖区在保留范围内则不动；否则 clamp totalRounds/totalSteps/lastUpdatedRound，保住 M 之前已生成的摘要、
   // 且保证后续增量压缩批次起点正确；clamp 后归零才删。record 是加速层，失败吞异常不阻塞主对话。
   const invalidateRecordForTruncation = useCallback((remainingMessages: any[]) => {
-    const conversationId = conversation.id;
-    if (!conversationId) return;
+    const conversationId = conversation.id || AUTOSAVE_ID;
     const keptRounds = remainingMessages.filter((m: any) => m.role === 'user').length;
     // step 口径对齐 agentLoop：record.totalSteps 来自不含 tool 的 requestHistory
     const keptSteps = remainingMessages.filter((m: any) => m.role !== 'tool').length;
