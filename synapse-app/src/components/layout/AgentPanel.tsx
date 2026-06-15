@@ -533,8 +533,26 @@ export function AgentPanel() {
         //    recordSrcId 记住 record 当前实际所在的 id（promotion 前的 id）——fork 不迁移 record，故 copyRecord 须从这里读。
         const recordSrcId = (conversationRef.current.id as string | null) || AUTOSAVE_ID;
         let srcId = recordSrcId;
+        // ★ issue④⑤修复：autosave 源分支时，下面的 clearAutosaveSnapshot() 在 Electron 会经 SQLite FK CASCADE
+        //   级联删掉 `records WHERE conversation_id='autosave-current'`。之后 branchConversation 再去现读 record
+        //   就读到 null（新分支零 record 继承），而 Web 模式 record 存独立分键不级联 → 继承正常 → 双模式分叉。
+        //   故在级联删除【之前】先把源 record 抓成内存快照，传给 branchConversation 从内存继承，两端一致。
+        //   （真实对话分支不走 clearAutosaveSnapshot，无此问题，故仅 autosave 分支需要快照；undefined 时
+        //    branchConversation 回退按 recordSrcId 现读。）
+        let recordSnapshot: Awaited<ReturnType<typeof getRecord>> | undefined;
         const wasAutosave = !conversationRef.current.id || conversationRef.current.id === AUTOSAVE_ID;
         if (wasAutosave) {
+          // 在 clearAutosaveSnapshot 触发 FK CASCADE 之前抓取源 record 内存快照（失败吞为 null，不阻塞分支）。
+          recordSnapshot = await getRecord(recordSrcId).catch(() => null);
+          // ★ M2-3 主键修复（核心）：messages.id 是全局 UNIQUE 主键。promotion 把当前 autosave 草稿
+          //   提升为真实源对话——saveConversationSnapshot(id=AUTOSAVE_ID) 会 createConversationId() 落到【新真实 id】，
+          //   并 replaceMessages(新id, 带原 message.id 的消息)。此时若 `autosave-current` 行仍占着同一批 message.id，
+          //   INSERT 会撞 `UNIQUE constraint failed: messages.id`、promotion 当场炸（走不到 branchConversation）。
+          //   修法：先 clearAutosaveSnapshot 删掉 autosave 行（释放这批 message.id）再 save——与「新建对话 fork
+          //   先清后写」严格同构。这样 promotion 全程【保持原 message.id 不变】，落库的 assistantRuns / runEvents
+          //   里按 message.id 的反向指针（AssistantRun.messageId / AssistantRunEvent.messageId）零破坏，源对话运行态完整。
+          //   安全：消息体已抓进局部 snapshotMessages（不依赖 DB autosave 行），先删 autosave 行不影响 save。
+          await clearAutosaveSnapshot();
           const saved = await saveConversationSnapshot({
             id: conversationRef.current.id,
             title: conversationRef.current.title,
@@ -558,7 +576,8 @@ export function AgentPanel() {
           }
           srcId = saved.id;
           dispatch(updateConversation(saved));
-          // 把当前 store 身份切到真实源 id（消息不变），并清掉 autosave 镜像（不 release）。
+          // 把当前 store 身份切到真实源 id（消息不变）。autosave 镜像已在 save 前 clearAutosaveSnapshot
+          // 清掉（为释放 message.id 主键占用，见上），此处无需再清。
           dispatch(setConversation({
             id: srcId,
             title: conversationRef.current.title,
@@ -569,15 +588,16 @@ export function AgentPanel() {
             pendingDiffs: conversationRef.current.pendingDiffs,
           }));
           dispatch(setSelectedId(srcId));
-          await clearAutosaveSnapshot();
         }
 
         // 2. 分支：复制子集到新对话 + copyRecord 继承 + 附件 addRef（源对话不动）。
-        //    parent = 稳定 srcId；record 从 recordSrcId 读（autosave promotion 后两者可能不同）。
+        //    parent = 稳定 srcId；record 优先用 autosave 级联删除前抓的内存快照（issue④⑤），
+        //    否则（真实对话分支，未抓快照）回退按 recordSrcId 现读。
         const result = await branchConversation(srcId, msgId, snapshotMessages, {
           title: conversationRef.current.title,
           model: conversationRef.current.model,
           recordSrcId,
+          ...(wasAutosave ? { recordSnapshot } : {}),
         });
         if (!result) {
           dispatch(addNotification({ type: 'error', title: '分支失败', message: '无法从此消息分支为新对话' }));

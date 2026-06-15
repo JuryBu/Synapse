@@ -147,7 +147,7 @@
   - UI：MessageBubble GitBranch 按钮+右键菜单；AgentPanel handleBranch(autosave源先fork真实id作parent、切换新对话、toast)。
   - 对抗审查 branch正确性5项全过+copyRecord/refCount守恒；修2medium：①addRef失败不再静默吞(tryAddRefOnce 区分reject/Web{error}+重试+addRefFailedShas+warning提示)②autosave save失败中止分支(提示先发消息)。
   - 核实：build EXIT0(2.70s)+electron:build过；fix remaining 空。
-  - ⏳ M2-3 真机验证(分支不改源/record继承到回溯点/附件refCount/切换)进行中。
+  - 🔴 M2-3 真机验证发现【阻断 bug】(子代理 a261ed1c)：分支按钮在/源对话保护到位，但点击分支报 `UNIQUE constraint failed: messages.id`——分支复制消息复用了源 message.id 撞全局主键，分支功能完全跑不通。根因：handleBranch promotion fork(clearAutosave 在 fork 之后→autosave-current 行的 message id 还占着) + branchConversation subset `{...m}` 保留原 message.id。修复方向:复制消息成独立新对话时重新生成 message.id(record 用 step/round、附件用 sha256，均不依赖 message.id，安全)；promotion 场景注意保留 assistantRuns 关联。**编译+对抗审查均过但真机才暴露——再次印证真机验证必要。** 修复 workflow 进行中。
   - 📌 遗留(子代理 notes)：autosave fork 时 record 从 AUTOSAVE_ID 迁到新真实 id 仍是历史遗留点(分支场景用 recordSrcId 绕过)，与 R6「正式保存 record 迁移 edge」同源，可合并单列。
   - 其后：**M2-S 稳定性**(retry后台化/重连/fallback/图片预检，见下) → M2-5 worktree agent 执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
 - 2026-06-16 📌 **M2-S 稳定性加固（用户补充：实际使用稳定性 retry 自动后台化/重连/fallback 需注意）**——横切关注，规划成专门 stage：

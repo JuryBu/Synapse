@@ -7,7 +7,8 @@ import {
   rollbackMigratedShas,
   collectMessageShas,
 } from './attachmentRefs';
-import { copyRecord } from './recordStore';
+import { copyRecord, copyRecordFrom } from './recordStore';
+import type { SynapseRecord } from './recordStore';
 
 export const CONVERSATION_SCHEMA_VERSION = 1;
 export const AUTOSAVE_ID = 'autosave-current';
@@ -61,6 +62,25 @@ export interface ConversationExportBundle {
 
 export function createConversationId(): string {
   return `conv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * 生成一条新消息 id。
+ * ★ M2-3 分支主键修复：messages.id 是全局 UNIQUE 主键。分支把消息复制成【独立新对话】时，
+ *   若复用源 message.id，INSERT 会撞 `UNIQUE constraint failed: messages.id`。
+ *   故复制时每条消息必须换新 id（branchedFromMessageId 仍指向源原 id，见 branchConversation）。
+ *
+ * ★ 审查 issue①②根治：原实现 `msg_<ts>_<6位base36随机>` 的唯一性在【同批紧循环 map】里只剩随机后缀一个维度
+ *   （所有 Date.now() 落同毫秒），36^6 ≈ 21.7 亿空间——既可能同批自撞（生日悖论，长对话非零概率），
+ *   也可能撞库里任意历史 message.id（全库越满概率越高），而 replaceMessages 是纯 INSERT（撞则整批事务回滚→分支失败）。
+ *   改用 crypto.randomUUID()（122 位随机，全库碰撞概率趋于 0），同时治同批自撞与跨行撞，且与 attachment sha 体系风格自洽。
+ *   非安全上下文 / 旧环境无 randomUUID 时回退到「时间戳 + 双段随机」高熵后缀（仍由 branchConversation 内 Set 兜底去重）。
+ */
+function createMessageId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return `msg_${uuid}`;
+  // Fallback（无 crypto.randomUUID 的环境）：双段随机扩大熵，降低同毫秒同后缀概率。
+  return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Promise<void> {
@@ -217,20 +237,65 @@ async function tryAddRefOnce(sha: string): Promise<boolean> {
  * @param meta 新对话标题/模型（缺省由消息派生）；recordSrcId 指定 record 实际所在的 id——
  *   autosave 源刚 fork 成真实 id 时，record 仍在 AUTOSAVE_ID 键下尚未迁移，此时 recordSrcId 应传旧 id，
  *   否则 copyRecord 从新真实 id 读不到任何 record（缺省回退 srcId）。
+ *   recordSnapshot：可选的【内存 record 快照】——autosave 源分支时，调用方在 clearAutosaveSnapshot
+ *   （会经 SQLite FK CASCADE 级联删掉 records 行）之前先抓好的源 record。传入则优先从内存继承（copyRecordFrom），
+ *   不再依赖可能已被级联删除的库行（修 issue④⑤：Electron autosave 分支 record 继承落空 + 双模式不对等）。
  * @returns BranchResult；分支点不存在 / 源消息为空 / 落库失败 → null。
  */
 export async function branchConversation(
   srcId: string,
   fromMessageId: string,
   messages: Message[],
-  meta?: { title?: string; model?: string; recordSrcId?: string },
+  meta?: { title?: string; model?: string; recordSrcId?: string; recordSnapshot?: SynapseRecord | null },
 ): Promise<BranchResult | null> {
   if (!srcId || !fromMessageId || !Array.isArray(messages) || messages.length === 0) return null;
   const cutIdx = messages.findIndex(m => m.id === fromMessageId);
   if (cutIdx < 0) return null;
 
   // 1. 子集 = 分支点及之前（含该条）。深拷贝隔离，绝不触碰源 store 引用。
-  const subset = messages.slice(0, cutIdx + 1).map(m => ({ ...m }));
+  //    ★ M2-3 主键修复：messages.id 是全局 UNIQUE 主键。分支是【复制成独立新对话】，源对话原行仍占着原 message.id，
+  //      若新对话复用同一批 message.id，replaceMessages → INSERT 会撞 `UNIQUE constraint failed: messages.id`。
+  //      故每条复制出的消息重新生成 message.id。安全性：
+  //        - record 继承只用 convId + step/round 计数（copyRecord），不依赖 message.id；
+  //        - 附件 refCount 只看 contentParts/attachments 的 sha256（collectMessageShas），不依赖 message.id；
+  //        - 按「清洁分支语义」新对话不复制 assistantRuns/fileSnapshots/pendingDiffs，
+  //          故 AssistantRun.messageId / runEvents 等按 message.id 的反向关联无需重映射（本就不带过去）。
+  //      branchedFromMessageId 必须指向【源对话的原 message.id】（fromMessageId），不是这里换出来的新 id。
+  //
+  //    ★ 审查 issue①（同批去重兜底）：createMessageId 已升级为 crypto.randomUUID（碰撞趋于 0），
+  //      但这里再加一道 Set 去重做【确定性】保证——同批内绝不出现两条相同 id（不靠概率），
+  //      杜绝纯 INSERT 撞 UNIQUE 致整批事务回滚、分支静默失败。
+  //
+  //    ★ 审查 issue③（high）修复：原 `{...m}` 全量展开会把每条消息内联的【运行/差异态】
+  //      （runId / runEvents / diffs / rollbackSnapshotId / 流式态）一并带进新分支并落库（IPC 会写
+  //      run_id/run_events/diffs/rollback_snapshot_id 列）。这与「清洁分支语义」自相矛盾：顶层
+  //      assistantRuns/fileSnapshots/pendingDiffs 被置空，但消息级内联态没清 → 新分支渲染出源对话遗留的
+  //      diff 卡片，而新分支 fileSnapshots={}，对这些遗留 diff 接受/拒绝/回溯时 snapshotId 落空 →
+  //      rollbackFileDiff 抛「缺少回退快照」或误改活动工作区；runId 在新分支 assistantRuns 里悬空。
+  //      故这里显式剥离运行/差异/流式态，只保留纯内容态（role/content/contentParts/attachments/thinking/
+  //      timestamp/model/toolCalls 等），与顶层「不带 assistantRuns/fileSnapshots/pendingDiffs」一致；
+  //      且不影响 collectMessageShas（只看 contentParts/attachments）和 copyRecord（只看 step/round 计数）。
+  const usedIds = new Set<string>();
+  const subset = messages.slice(0, cutIdx + 1).map(m => {
+    const {
+      runId: _runId,
+      runEvents: _runEvents,
+      diffs: _diffs,
+      rollbackSnapshotId: _rollbackSnapshotId,
+      isStreaming: _isStreaming,
+      streamState: _streamState,
+      streamMode: _streamMode,
+      fallbackReason: _fallbackReason,
+      showStreamCursor: _showStreamCursor,
+      showGeneratingPlaceholder: _showGeneratingPlaceholder,
+      ...keep
+    } = m;
+    // 确定性去重：极小概率两次 randomUUID 撞了也再生成，绝不让同批出现重复 id。
+    let id = createMessageId();
+    while (usedIds.has(id)) id = createMessageId();
+    usedIds.add(id);
+    return { ...keep, id };
+  });
   if (subset.length === 0) return null;
 
   // 2. step/round 口径（★ 必须与 clampToBatch / copyRecord 严格一致）：
@@ -255,8 +320,16 @@ export async function branchConversation(
 
   // 4. 继承 record 到分支点（截连续前缀批次）。record 是加速层，失败不阻塞分支。
   //    record 实际所在 id 可能 != parent srcId（autosave 刚 fork 时 record 还在旧 AUTOSAVE_ID 键下）。
+  //    ★ issue④⑤：autosave 源分支时调用方会先 clearAutosaveSnapshot（Electron 经 FK CASCADE 级联删掉
+  //      `records WHERE conversation_id='autosave-current'`），此时按 recordSrcId 现读已是 null。
+  //      故调用方在级联删除前抓好的内存 record 快照（meta.recordSnapshot）优先 —— 从内存继承，两端一致；
+  //      未传快照（普通真实对话分支，record 仍在库）则回退按 id 现读。
   const recordSrcId = meta?.recordSrcId || srcId;
-  await copyRecord(recordSrcId, newId, keptSteps, keptRounds).catch(() => null);
+  if (meta && 'recordSnapshot' in meta && meta.recordSnapshot !== undefined) {
+    await copyRecordFrom(meta.recordSnapshot ?? null, newId, keptSteps, keptRounds).catch(() => null);
+  } else {
+    await copyRecord(recordSrcId, newId, keptSteps, keptRounds).catch(() => null);
+  }
 
   // 5. 附件 refCount +1：新对话复用源对话同一附件实体，每个 sha256 加一次引用（与 collectMessageShas 口径守恒：
   //    每条消息内同一 sha 只计一次、跨消息累加）。

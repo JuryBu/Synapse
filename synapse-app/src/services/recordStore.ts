@@ -578,7 +578,37 @@ export async function copyRecord(
   if (!srcConvId || !dstConvId || srcConvId === dstConvId) return null;
   try {
     const src = await getRecord(srcConvId);
-    if (!src || src.batches.length === 0) return null;
+    return await copyRecordFrom(src, dstConvId, keptSteps, keptRounds);
+  } catch (err) {
+    console.warn('[recordStore] copyRecord failed:', err);
+    return null;
+  }
+}
+
+/**
+ * 同 copyRecord，但源是【已在内存里的 SynapseRecord 快照】而非按 id 现读。
+ *
+ * ★ 审查 issue④⑤修复（autosave 分支 record 继承被 FK CASCADE 抹掉 + 双模式不对等）：
+ *   Electron 的 records 表对 conversations 有 `FOREIGN KEY ... ON DELETE CASCADE`（foreign_keys=ON）。
+ *   handleBranch 在 autosave 源分支时会先 clearAutosaveSnapshot()（删 `autosave-current` 对话行）以释放
+ *   message.id 主键占用，SQLite 随即级联删掉 `records WHERE conversation_id='autosave-current'`；
+ *   等到 copyRecord(AUTOSAVE_ID) 再去 getRecord 时已读到 null → 新分支【零 record 继承】。
+ *   而 Web 模式 record 存独立分键 `synapse:record:<id>`、delete 路径不级联 → 继承正常 → 跨平台行为分叉。
+ *
+ *   统一修法（二者都「继承成功」）：在 clearAutosaveSnapshot【之前】先把源 record 读成内存快照（getRecord），
+ *   再把该快照传进来从内存继承，不再依赖可能已被级联删除的库行。其余截断/守恒口径与 copyRecord 完全一致。
+ *
+ * @param src 源 record 内存快照（调用方在级联删除前抓取）；null/空批 → 无可继承，返回 null。
+ */
+export async function copyRecordFrom(
+  src: SynapseRecord | null,
+  dstConvId: string,
+  keptSteps: number,
+  keptRounds: number,
+): Promise<SynapseRecord | null> {
+  if (!dstConvId) return null;
+  try {
+    if (!src || src.conversationId === dstConvId || src.batches.length === 0) return null;
 
     const safeSteps = Math.max(0, keptSteps);
 
@@ -597,7 +627,7 @@ export async function copyRecord(
     const keptLast = kept[kept.length - 1];
     if (keptLast && keptLast.roundEnd > safeRounds) {
       console.warn(
-        `[recordStore] copyRecord round/step 口径偏差：保留前缀末批 roundEnd=${keptLast.roundEnd} > keptRounds=${safeRounds}（以 stepEnd 为准，仅告警）`,
+        `[recordStore] copyRecordFrom round/step 口径偏差：保留前缀末批 roundEnd=${keptLast.roundEnd} > keptRounds=${safeRounds}（以 stepEnd 为准，仅告警）`,
       );
     }
 
@@ -607,7 +637,7 @@ export async function copyRecord(
     const cloned: RecordBatch[] = kept.map(b => ({ ...b }));
     return await upsertRecord({ conversationId: dstConvId, batches: cloned });
   } catch (err) {
-    console.warn('[recordStore] copyRecord failed:', err);
+    console.warn('[recordStore] copyRecordFrom failed:', err);
     return null;
   }
 }
