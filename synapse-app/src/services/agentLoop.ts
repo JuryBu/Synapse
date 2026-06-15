@@ -13,7 +13,7 @@ import {
   type AttachmentRef, type MessageContentPart, type StreamModeUsed,
 } from '../store/slices/conversation';
 import { setConnectionStatus } from '../store/slices/agentSettings';
-import { addNotification } from '../store/slices/notifications';
+import { addNotification, updateNotification, removeNotification } from '../store/slices/notifications';
 import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
 import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type SynapseRecord } from './recordStore';
 import { generateBatch } from './recordGenerator';
@@ -563,7 +563,19 @@ export class AgentLoop {
     // 只还原【实际要发送的这部分】（压缩后 apiHistory 里保留的最近原文）——开销最小，被摘要替代的历史图不白还原。
     // 还原后的真 base64 仅活在本次发送的 apiMessages（局部变量），绝不回写 store / DB。
     // 实体缺失则降级为文字占位（见 restoreApiMessagesAttachments），不阻断发送。失败吞掉走原 apiMessages。
-    apiMessages = await restoreApiMessagesAttachments(apiMessages).catch(() => apiMessages);
+    const restoreResult = await restoreApiMessagesAttachments(apiMessages)
+      .catch(() => ({ messages: apiMessages, skippedInvalidImages: 0 }));
+    apiMessages = restoreResult.messages;
+    // ★ M2-S 任务1：发送前图片有效性预检剔除了无效图（损坏/非图片字节），提示用户——
+    // 避免「历史里混进一张坏图 → 上游对整条请求整体 400 → 有效图与正常对话一起被拖垮」。
+    if (restoreResult.skippedInvalidImages > 0) {
+      store.dispatch(addNotification({
+        type: 'warning',
+        title: '已跳过无效图片',
+        message: `${restoreResult.skippedInvalidImages} 张无效图片已跳过（损坏或非图片格式），不影响本次发送`,
+        duration: 4000,
+      }));
+    }
 
     // Auto-generate title from first message
     if (!opts?.skipUserMessage && (store.getState() as RootState).conversation.messages.length <= 1) {
@@ -594,6 +606,10 @@ export class AgentLoop {
       let fallbackReason: string | undefined;
       let fallbackNotified = false;
       let streamModeRecorded = false;
+      // M2-S 任务2：本轮重试进度提示。首个 retry 事件创建一条 info 通知，后续重试复用同一 id 更新文案
+      // （不堆积多条）；本轮结束（成功/失败/中止）统一移除，让用户看到「正在重试 N/M」而非干等。
+      const retryNotifId = `retry-${runId}`;
+      let retryNotifShown = false;
       store.dispatch(addAssistantRun({
         id: runId,
         startedAt: runStartedAt,
@@ -665,11 +681,41 @@ export class AgentLoop {
           currentMode === 'fast' || !toolsEnabled ? undefined : (this.tools.length > 0 ? this.tools : undefined),
         );
 
+        // M2-S 任务2：重试已恢复（收到任何实质数据）则清掉「正在重试」提示，避免残留。
+        const clearRetryNotice = () => {
+          if (retryNotifShown) {
+            retryNotifShown = false;
+            store.dispatch(removeNotification(retryNotifId));
+          }
+        };
+
         for await (const chunk of stream) {
           if (!this.running) break;
           noteStreamMode(chunk.streamMode, chunk.fallbackReason);
 
+          // M2-S 任务2：重试进度可观测——aiClient 在每次退避重试【前】发该事件。
+          // 首次创建 info 通知，后续重试复用同一 id 更新文案（不堆叠），让用户看到「连接不稳，正在重试 N/M」。
+          if (chunk.type === 'retry' && chunk.retry) {
+            const { attempt, maxRetries, reason } = chunk.retry;
+            const message = `连接不稳，正在重试 ${attempt}/${maxRetries}…（${reason}）`;
+            store.dispatch(setConnectionStatus('checking'));
+            if (!retryNotifShown) {
+              retryNotifShown = true;
+              store.dispatch(addNotification({
+                id: retryNotifId,
+                type: 'info',
+                title: '连接不稳，正在重试',
+                message,
+                duration: 0, // 持续显示，本轮收尾时主动移除
+              }));
+            } else {
+              store.dispatch(updateNotification({ id: retryNotifId, message }));
+            }
+            continue;
+          }
+
           if (chunk.type === 'content' && chunk.content) {
+            clearRetryNotice();
             fullContent += chunk.content;
             store.dispatch(appendMessageContent({ id: assistantMessageId, content: chunk.content }));
             store.dispatch(setMessageStreamState({ id: assistantMessageId, streamState: 'streaming', streamMode: streamModeUsed, fallbackReason }));
@@ -683,6 +729,7 @@ export class AgentLoop {
             }));
           }
           if (chunk.type === 'thinking' && chunk.thinking && showThinking) {
+            clearRetryNotice();
             store.dispatch(appendMessageThinking({ id: assistantMessageId, content: chunk.thinking, status: 'streaming' }));
             store.dispatch(setMessageStreamState({ id: assistantMessageId, streamState: 'streaming', streamMode: streamModeUsed, fallbackReason }));
             store.dispatch(addRunEvent({
@@ -741,6 +788,11 @@ export class AgentLoop {
 
       if (!this.running) wasAborted = true;
       store.dispatch(setStreaming(false));
+      // M2-S 任务2：本轮收尾兜底移除「正在重试」提示（成功/失败/中止/异常任一路径都清，不残留）。
+      if (retryNotifShown) {
+        retryNotifShown = false;
+        store.dispatch(removeNotification(retryNotifId));
+      }
 
       if (wasAborted) {
         const abortedAt = Date.now();

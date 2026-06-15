@@ -27,6 +27,115 @@ function isDataUrl(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith('data:');
 }
 
+// ===== ⓪ 发送瞬时图片有效性预检（M2-S 任务1） =====
+
+/**
+ * 从 data:URL 解出前若干字节（仅取头部，不整图解码）。
+ * 失败（非 data: / 非 base64 / 解码异常）返回 null。
+ * @param maxBytes 需要嗅探的最大字节数（魔数最长的 WebP 需要 12 字节，取 16 留余量）。
+ */
+function sniffDataUrlBytes(dataUrl: string, maxBytes = 16): Uint8Array | null {
+  if (typeof dataUrl !== 'string') return null;
+  // data:[<mime>][;base64],<payload>
+  const comma = dataUrl.indexOf(',');
+  if (!dataUrl.startsWith('data:') || comma < 0) return null;
+  const meta = dataUrl.slice(5, comma);          // "image/png;base64"
+  const payload = dataUrl.slice(comma + 1);
+  if (!payload) return null;
+
+  const isBase64 = /;base64/i.test(meta);
+  try {
+    if (isBase64) {
+      // 只解码足够覆盖魔数的前缀：base64 每 4 字符 → 3 字节，截一小段解码即可（避免整图解码）。
+      const need = Math.ceil((maxBytes / 3) * 4);
+      let head = payload.slice(0, need).replace(/\s/g, '');
+      // base64 长度必须是 4 的倍数才能解；不足则按 4 对齐截断（丢掉不完整的尾组，头部魔数不受影响）。
+      head = head.slice(0, head.length - (head.length % 4));
+      if (!head) return null;
+      const decode = (b64: string): Uint8Array => {
+        if (typeof atob === 'function') {
+          const bin = atob(b64);
+          const out = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+          return out;
+        }
+        // Node / Electron 主进程兜底（一般渲染层有 atob，这里仅防御）。
+        const BufferCtor = (globalThis as any).Buffer;
+        if (BufferCtor) return new Uint8Array(BufferCtor.from(b64, 'base64'));
+        return new Uint8Array(0);
+      };
+      const bytes = decode(head);
+      return bytes.length ? bytes.slice(0, maxBytes) : null;
+    }
+    // 非 base64（百分号编码的 data:URL，图片极少这么传，但兜底解一下头部）。
+    const decoded = decodeURIComponent(payload.slice(0, maxBytes * 4));
+    const out = new Uint8Array(Math.min(decoded.length, maxBytes));
+    for (let i = 0; i < out.length; i++) out[i] = decoded.charCodeAt(i) & 0xff;
+    return out.length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+function matchMagic(bytes: Uint8Array, magic: number[], offset = 0): boolean {
+  if (bytes.length < offset + magic.length) return false;
+  for (let i = 0; i < magic.length; i++) {
+    if (bytes[offset + i] !== magic[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * 发送瞬时纯函数判断：dataUrl 是否「看起来是」一张合法图片（只读头部魔数，不整图解码）。
+ *
+ * 背景（M2-S 任务1）：多轮对话会重发历史所有图，只要历史里混进过一张无效图（损坏/非图片字节），
+ * 上游对该请求里任一无效图会整体 400，把同请求里的有效图和正常对话一起拖垮。发送前对每张图做头部
+ * 预检，无效图从请求体剔除，避免整条请求带病发出。
+ *
+ * 覆盖主流容器（魔数）：
+ *   - PNG  : 89 50 4E 47
+ *   - JPEG : FF D8 FF
+ *   - GIF  : 47 49 46 38            ("GIF8")
+ *   - WebP : 52 49 46 46 (RIFF) + 偏移8 处 57 45 42 50 ("WEBP")
+ *   - BMP  : 42 4D                  ("BM")
+ *   - AVIF/HEIC/HEIF : ISO BMFF ftyp 容器——偏移4 处 66 74 79 70 ("ftyp")
+ *
+ * 设计取舍：宁可漏过个别冷门格式（返回 true）也绝不误杀主流合法图——
+ *   - 解不出字节（非 data: / 非图片 dataUrl，如外链 http url 不会进这里）→ 保守判 true（不剔除，交上游处理）。
+ *   - 能解出字节但完全不匹配任一主流魔数 → 判 false（高概率是损坏/非图片字节，剔除）。
+ */
+export function isLikelyValidImage(dataUrl: string): boolean {
+  // 只对 data:URL 做魔数预检；非 data:（如外链 http(s) 图片）无法读头部，保守放行。
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return true;
+
+  // SVG 是【文本型图】（无二进制魔数，解码后以 <?xml / <svg 开头），不能用二进制魔数判，按 mime 直接放行，避免误杀。
+  const comma = dataUrl.indexOf(',');
+  const mimeMeta = comma > 0 ? dataUrl.slice(5, comma).toLowerCase() : '';
+  if (mimeMeta.includes('image/svg')) return true;
+
+  const bytes = sniffDataUrlBytes(dataUrl, 16);
+  // 解不出头部字节（空/解码失败/非 base64 无法嗅探）：保守放行，不在预检阶段误杀。
+  if (!bytes || bytes.length < 2) return true;
+
+  // PNG
+  if (matchMagic(bytes, [0x89, 0x50, 0x4e, 0x47])) return true;
+  // JPEG
+  if (matchMagic(bytes, [0xff, 0xd8, 0xff])) return true;
+  // GIF ("GIF8" 覆盖 87a/89a)
+  if (matchMagic(bytes, [0x47, 0x49, 0x46, 0x38])) return true;
+  // BMP ("BM")
+  if (matchMagic(bytes, [0x42, 0x4d])) return true;
+  // WebP : RIFF....WEBP
+  if (matchMagic(bytes, [0x52, 0x49, 0x46, 0x46]) && matchMagic(bytes, [0x57, 0x45, 0x42, 0x50], 8)) return true;
+  // AVIF / HEIC / HEIF : ISO BMFF，偏移4 处为 "ftyp"（major brand 多变，认 ftyp 容器即可）
+  if (matchMagic(bytes, [0x66, 0x74, 0x79, 0x70], 4)) return true;
+  // ICO(图标 00 00 01 00) / CUR(光标 00 00 02 00)：合法图标格式，避免误杀。
+  if (matchMagic(bytes, [0x00, 0x00, 0x01, 0x00]) || matchMagic(bytes, [0x00, 0x00, 0x02, 0x00])) return true;
+
+  // 能解出字节但不匹配任一主流魔数 → 判定为无效图（损坏/非图片字节）。
+  return false;
+}
+
 // ===== ① 引用收集（GC 用） =====
 
 /**
@@ -129,8 +238,14 @@ export function sanitizeMessagesForPersistence(messages: Message[]): Message[] {
  * - 已是 data: 的 url（懒迁移未及 / 内存态预览）保持不动。
  * - get 失败 / 找不到实体：image 留文字占位「[图片缺失]」，file 留 filename，不崩、不阻断发送。
  */
-export async function restoreApiMessagesAttachments(apiMessages: ChatMessage[]): Promise<ChatMessage[]> {
-  return Promise.all(apiMessages.map(async (msg): Promise<ChatMessage> => {
+export async function restoreApiMessagesAttachments(
+  apiMessages: ChatMessage[],
+): Promise<{ messages: ChatMessage[]; skippedInvalidImages: number }> {
+  // M2-S 任务1：发送瞬时对每张【还原后的真 data: 图】做头部魔数预检，无效图剔除为文字占位并计数，
+  // 避免一张坏图让整条请求被上游整体 400 拖垮。计数返回给调用方（agentLoop）做用户提示。
+  let skippedInvalidImages = 0;
+
+  const messages = await Promise.all(apiMessages.map(async (msg): Promise<ChatMessage> => {
     if (typeof msg.content === 'string' || !Array.isArray(msg.content)) return msg;
 
     const parts = msg.content as any[];
@@ -145,12 +260,22 @@ export async function restoreApiMessagesAttachments(apiMessages: ChatMessage[]):
         // ★ 还原成功/已是 base64 都输出【纯净标准 part】——只留 { type, image_url:{url,detail} }，
         //   剥掉引用元数据(sha256/size/mime/name/attachmentId)，避免非标准字段进请求体被严格网关拒绝。
         const detail = part.image_url?.detail;
+        const partName: string | undefined = part.name || part.image_url?.name;
         const cleanImage = (u: string) => ({ type: 'image_url', image_url: detail ? { url: u, detail } : { url: u } });
-        if (url.startsWith('data:')) { touched = true; return cleanImage(url); } // 已有真 base64（内存预览/未迁移）
+        // 真 data: 图发送前预检：无效（损坏/非图片字节）→ 剔除为文字占位 + 计数，不整条带病发出。
+        const emitImageOrPlaceholder = (u: string) => {
+          if (u.startsWith('data:') && !isLikelyValidImage(u)) {
+            skippedInvalidImages++;
+            const n = partName ? ` ${partName}` : '';
+            return { type: 'text', text: `[图片无效已跳过${n}]` };
+          }
+          return cleanImage(u);
+        };
+        if (url.startsWith('data:')) { touched = true; return emitImageOrPlaceholder(url); } // 已有真 base64（内存预览/未迁移）
         if (!sha) return part;                                // 无引用可还原，原样（可能是外链 http url）
         const got = await platform.attachment.get(sha).catch(() => null);
         touched = true;
-        if (got?.dataUrl) return cleanImage(got.dataUrl);
+        if (got?.dataUrl) return emitImageOrPlaceholder(got.dataUrl);
         // 实体缺失：降级为文字占位，避免发出空 url 的 image part 被服务端拒绝
         const name = part.name ? ` ${part.name}` : '';
         return { type: 'text', text: `[图片缺失${name}]` };
@@ -178,6 +303,8 @@ export async function restoreApiMessagesAttachments(apiMessages: ChatMessage[]):
     if (!touched) return msg;
     return { ...msg, content: restored } as ChatMessage;
   }));
+
+  return { messages, skippedInvalidImages };
 }
 
 // ===== ④ record 源占位（去 base64 + 留可读占位） =====

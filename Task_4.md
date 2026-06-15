@@ -155,7 +155,10 @@
   - 📌 M2-3 残留(归 M2-6，非阻断)：分支后 setConversation 未回填 parentId/branchedFromMessageId 到 store(DB 正确，但 store/loadConversation 路径都未接这两字段→store 显示 null)；M2-6 做对话级元数据 per-conv 时统一接(setConversation+loadConversation+snapshot 都带 parentId/mode 等对话级字段)。
   - 📌 遗留(子代理 notes)：autosave fork 时 record 从 AUTOSAVE_ID 迁到新真实 id 仍是历史遗留点(分支场景用 recordSrcId 绕过)，与 R6「正式保存 record 迁移 edge」同源，可合并单列。
   - 其后：**M2-S 稳定性**(retry后台化/重连/fallback/图片预检，见下) → M2-5 worktree agent 执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
-- 2026-06-16 📌 **M2-S 稳定性加固（用户补充：实际使用稳定性 retry 自动后台化/重连/fallback 需注意）**——横切关注，规划成专门 stage：
+- 2026-06-16 🟡 **M2-S 稳定性加固（图片预检+retry进度 ✅ / 模型fallback+断线重连 待用户对齐）**——横切关注：
+  - ✅ 已做(workflow w00b3bigx，对抗审查 0 high/med 直接过)：①图片有效性预检 isLikelyValidImage(魔数 PNG/JPEG/GIF/WebP/AVIF/HEIC/BMP/SVG/ICO+外链/缺失/解码失败保守放行不误杀,node 10样本验证)+restoreApiMessagesAttachments 还原后剔除无效图占位+warning「N张无效图片已跳过」——根治「坏图拖累整条请求整体400」(用户截图场景)；②retry进度可见(StreamChunk retry变体+429/5xx/网络异常3退避点yield+UI「正在重试N/M」通知+收尾清除,不改现有重试判定/退避时长)。编译过。⏳真机验证(发坏图+真图混合:坏图跳过+真图正常识别不被拖累)进行中。
+  - ⏸ 待用户对齐(不擅自做)：模型级 fallback(主→备,备用模型配置来源是设计选择)；断线彻底重连(现状单请求退避重试已覆盖瞬时抖动,彻底重连可能过度)。
+  - 【以下为规划期 scout 记录(发现现状已有错误分类+退避+stream fallback,故 M2-S 是查漏补缺非从零)】：
   - 现状评估：aiClient 已有 maxRetries=3 请求重试(line 309-355) + streamMode fallback(stream→pseudo→off)；agentLoop 有 fallbackReason/connectionStatus/error 处理(line 594-833)。
   - gap：① retry 未「后台化」(失败重试阻塞在 run，3 次后直接弹「AI 请求失败」体验差) ② 无断线自动重连(只重试当前请求) ③ 错误未分类(400/401/422 不该 retry vs 5xx/超时/网络该 retry) ④ 无模型级 fallback(主模型失败→备用模型)。
   - 规划：M2-S = 错误分类 + 后台 retry(退避) + 断线重连 + 模型 fallback + UI 不打断；排在 M2-3 后或按需提前；retry 后台化形态/策略需详设计、可能与用户对齐。

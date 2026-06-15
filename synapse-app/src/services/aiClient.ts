@@ -44,7 +44,7 @@ export interface AIClientConfig {
 }
 
 export interface StreamChunk {
-  type: 'content' | 'thinking' | 'tool_call' | 'done' | 'error';
+  type: 'content' | 'thinking' | 'tool_call' | 'done' | 'error' | 'retry';
   content?: string;
   thinking?: string;
   toolCall?: ToolCallRequest;
@@ -52,6 +52,9 @@ export interface StreamChunk {
   streamMode?: 'real' | 'pseudo' | 'off';
   fallbackReason?: string;
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  // M2-S 任务2：重试进度可观测。每次退避重试【前】发一个该事件，让 UI 显示「正在重试 N/M」
+  // 而非干等。仅在重试真实发生时发出，不改变现有【是否重试】判定与退避时长。
+  retry?: { attempt: number; maxRetries: number; reason: string };
 }
 
 const DEFAULT_ENDPOINTS: Record<string, string> = {
@@ -327,6 +330,8 @@ export class AIClient {
             retries++;
             if (retries <= maxRetries) {
               const delay = Math.min(1000 * Math.pow(2, retries), 10000);
+              // M2-S 任务2：重试前发进度事件（不改判定与退避时长，仅多一个可观测信号）
+              yield { type: 'retry', retry: { attempt: retries, maxRetries, reason: '请求过于频繁（429）' }, streamMode: 'real' };
               await new Promise(r => setTimeout(r, delay));
               continue;
             }
@@ -349,6 +354,8 @@ export class AIClient {
             retries++;
             if (retries <= maxRetries) {
               const delay = Math.min(1000 * Math.pow(2, retries), 10000);
+              // M2-S 任务2：重试前发进度事件
+              yield { type: 'retry', retry: { attempt: retries, maxRetries, reason: `服务器错误（${status}）` }, streamMode: 'real' };
               await new Promise(r => setTimeout(r, delay));
               continue;
             }
@@ -475,6 +482,8 @@ export class AIClient {
           return;
         }
         const delay = Math.min(1000 * Math.pow(2, retries), 10000);
+        // M2-S 任务2：网络异常重试前发进度事件
+        yield { type: 'retry', retry: { attempt: retries, maxRetries, reason: err?.message ? `连接异常（${String(err.message).slice(0, 60)}）` : '连接异常' }, streamMode: 'real' };
         await new Promise(r => setTimeout(r, delay));
       }
     }
