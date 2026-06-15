@@ -360,6 +360,9 @@ function getWebMock(): SynapseAPI {
         if (!data?.conversationId) return false;
         writeWebRecord(data.conversationId, {
           conversationId: data.conversationId,
+          // M2-R1：batches 是真相源，必须存住，否则多批写回后再读退化回单批（与 Electron 行为分叉）。
+          batches: Array.isArray(data.batches) ? data.batches : undefined,
+          schemaVersion: data.schemaVersion ?? 2,
           contentMd: data.contentMd ?? '',
           totalRounds: data.totalRounds ?? 0,
           totalSteps: data.totalSteps ?? 0,

@@ -31,7 +31,7 @@ import { openTab } from '@/store/slices/editorTabs';
 import type { RootState } from '@/store';
 import { rollbackFileDiff } from '@/services/fileRollback';
 import { describeCapabilities } from '@/services/modelCapabilities';
-import { getRecord, clampRecord } from '@/services/recordStore';
+import { getRecord, clampToBatch } from '@/services/recordStore';
 
 const MAX_IMAGE_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
@@ -88,17 +88,48 @@ export function AgentPanel() {
     return () => document.removeEventListener('mousedown', handleDocMouseDown);
   }, [modelMenuOpen]);
   const [modelSearch, setModelSearch] = useState('');
-  // M1 Step3: 读取当前对话 record 覆盖到的消息条数，用于在消息流标出「压缩点」分隔线（展示仍完整）
+  // M2-R1: 读取当前对话 record 各批次的 stepEnd（不含 tool 口径），用于在消息流按批次标出
+  // 多条「压缩点」分隔线（展示仍完整原文）。空 record 时为空数组。
   const conversationId = conversation.id as string | null;
-  const [recordCoverageSteps, setRecordCoverageSteps] = useState(0);
+  const [recordBatchStepEnds, setRecordBatchStepEnds] = useState<number[]>([]);
   useEffect(() => {
     let cancelled = false;
-    if (!conversationId) { setRecordCoverageSteps(0); return; }
+    if (!conversationId) { setRecordBatchStepEnds([]); return; }
     void getRecord(conversationId).then(rec => {
-      if (!cancelled) setRecordCoverageSteps(rec?.totalSteps ?? 0);
+      if (cancelled) return;
+      const ends = (rec?.batches ?? [])
+        .map(b => b.stepEnd)
+        .filter(s => s > 0);
+      setRecordBatchStepEnds(ends);
     });
     return () => { cancelled = true; };
   }, [conversationId, messages.length]);
+
+  // 把各批 stepEnd（不含 tool 计数）映射到含-tool 的真实 messages 下标：
+  // 分隔线画在「该批最后一条非-tool 消息」之后。返回 Map<messageIdx, [批序号...]>。
+  const batchDividerByIdx = useMemo(() => {
+    const map = new Map<number, number[]>();
+    if (recordBatchStepEnds.length === 0) return map;
+    const endSet = new Map<number, number[]>(); // stepEnd -> 批序号列表
+    recordBatchStepEnds.forEach((end, i) => {
+      const arr = endSet.get(end) ?? [];
+      arr.push(i);
+      endSet.set(end, arr);
+    });
+    let eligibleCount = 0;
+    for (let idx = 0; idx < messages.length; idx++) {
+      if ((messages[idx] as any).role === 'tool') continue;
+      eligibleCount += 1;
+      const hit = endSet.get(eligibleCount);
+      if (hit) {
+        // 分隔线挂在「下一条消息之前」，即该批最后一条非-tool 消息的下一个下标。
+        const dividerIdx = idx + 1;
+        const existing = map.get(dividerIdx) ?? [];
+        map.set(dividerIdx, [...existing, ...hit]);
+      }
+    }
+    return map;
+  }, [recordBatchStepEnds, messages]);
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRef[]>([]);
   const [previewAttachment, setPreviewAttachment] = useState<AttachmentRef | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -345,7 +376,8 @@ export function AgentPanel() {
     const keptRounds = remainingMessages.filter((m: any) => m.role === 'user').length;
     // step 口径对齐 agentLoop：record.totalSteps 来自不含 tool 的 requestHistory
     const keptSteps = remainingMessages.filter((m: any) => m.role !== 'tool').length;
-    void clampRecord(conversationId, keptRounds, keptSteps);
+    // M2-R1：批次整体保留语义（穿过截断点的批及之后整批回退原文），替代旧数字 clamp。
+    void clampToBatch(conversationId, keptRounds, keptSteps);
   }, [conversation.id]);
 
   // Edit user message → truncate after it → re-send
@@ -660,12 +692,12 @@ export function AgentPanel() {
               <>
                 {messages.map((msg: any, idx: number) => (
                   <Fragment key={msg.id}>
-                    {recordCoverageSteps > 0 && idx === recordCoverageSteps && (
+                    {batchDividerByIdx.has(idx) && (
                       <div
                         style={{ textAlign: 'center', fontSize: 11, color: 'var(--syn-text-muted)', padding: '6px 12px', margin: '6px 0', borderTop: '1px dashed rgba(255,255,255,0.12)', opacity: 0.75 }}
-                        title="此线以上的历史已压缩为 record 摘要；发送给 AI 时用摘要代替原文，这里仍显示完整对话"
+                        title="此线以上的历史已压缩为 record 摘要批次；发送给 AI 时用摘要代替原文，这里仍显示完整对话"
                       >
-                        ⌁ 以上 {recordCoverageSteps} 条已压缩为 record 摘要，AI 看摘要 + 最近对话 ⌁
+                        ⌁ record 批次 {batchDividerByIdx.get(idx)!.map(i => `#${i + 1}`).join('、')} 边界 — 以上已压缩为摘要，AI 看摘要 + 最近对话 ⌁
                       </div>
                     )}
                   <MessageBubble

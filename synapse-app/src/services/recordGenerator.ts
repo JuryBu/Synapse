@@ -22,6 +22,7 @@
 
 import { AIClient, type ChatMessage } from './aiClient';
 import { store } from '@/store';
+import { extractSkeleton } from './recordStore';
 
 /** 参与生成的单条消息（取自 store 的 Message 子集，避免耦合完整类型） */
 export interface RecordSourceMessage {
@@ -208,6 +209,42 @@ ${TEMPLATE_RULES}
 ${body}`;
 }
 
+/**
+ * M2-R1 批次日志 prompt：本批【独立完整】日志语义。
+ * - 旧批骨架（priorSkeleton）只读概览，仅供模型理解上文、避免重复，【绝不要把它合并进输出】。
+ * - 仅就「本批新增对话内容」产出本批自己的过程日志，不重揉旧全文（防膨胀 + 命中下一轮 cache 稳定前缀）。
+ */
+function buildBatchPrompt(
+  input: GenerateBatchInput,
+  body: string,
+  roundStart: number,
+  roundEnd: number,
+  priorSkeleton: string,
+): string {
+  const skeletonSection = priorSkeleton.trim()
+    ? `## 已有历史批次骨架（只读上下文，帮助你理解上文，【不要】把它写进输出）
+
+${priorSkeleton.trim()}
+
+`
+    : '';
+  return `你是一个技术过程记录助手。请把「本批新增对话内容」浓缩成一份【独立完整】的「对话过程日志」，供后续轮次的 AI 快速回顾这一批发生的工作。
+
+${skeletonSection}${TEMPLATE_RULES}
+
+特别要求（多批次架构）：
+1. 只记录「本批新增对话内容」里发生的事，不要复述上面的历史骨架。
+2. 本批日志要能独立阅读，不依赖未在本批出现的细节。
+
+## 元数据（写入日志开头，逐字使用）
+- 工作区: ${input.workspaceName || '（未指定）'}
+- 本批轮次: 第 ${roundStart} ~ ${roundEnd} 轮
+
+## 本批新增对话内容
+
+${body}`;
+}
+
 function buildUpdatePrompt(
   input: GenerateRecordInput,
   body: string,
@@ -375,6 +412,87 @@ export async function generateRecord(input: GenerateRecordInput): Promise<Genera
   } catch (err) {
     // 关键降级点：绝不向上抛，让主对话回退字符截断压缩
     console.warn('[recordGenerator] generateRecord failed, falling back:', err);
+    return null;
+  }
+}
+
+/**
+ * M2-R1 批次生成入参：只描述【本批切片】，区间由调用方（agentLoop）依据水位自算后透传。
+ * 与旧 GenerateRecordInput 的关键区别：不传 existingRecordMd 整段全文，改传 priorSkeleton 只读骨架。
+ */
+export interface GenerateBatchInput {
+  conversationId: string;
+  /** 本批要浓缩的消息切片（与上一批不重叠），含 tool 轮次 */
+  messages: RecordSourceMessage[];
+  /** 旧批骨架拼接（只读概览，帮助模型理解上文、避免重复，不进输出），可空 */
+  priorSkeleton?: string | null;
+  /** 本批用户轮次起点（含，1 起），由调用方自算透传 */
+  roundStart: number;
+  /** 本批用户轮次终点（含），由调用方自算透传 */
+  roundEnd: number;
+  /** 工作区名（写入元数据，可空） */
+  workspaceName?: string;
+}
+
+/** M2-R1 批次生成结果：仅本批自身内容与派生信号，区间由调用方持有后传 appendBatch */
+export interface GenerateBatchResult {
+  /** 本批独立完整过程日志 markdown */
+  contentMd: string;
+  /** 本批骨架（正则本地提取，零成本） */
+  skeleton: string;
+  /** 模板小节数概览信号（弱语义，正常 0） */
+  phases: number;
+  /** 本批时间跨度 "start ~ end"（可空） */
+  timeSpan: string;
+}
+
+/**
+ * 生成【单个批次】的独立过程日志（M2-R1 多批次架构压缩点专用）。
+ *
+ * 与 generateRecord 的区别：
+ *   - 不喂 existingRecordMd 整段全文让模型合并覆盖全程；改喂 priorSkeleton 旧批骨架【只读概览】，
+ *     模型只就本批新原文产出【本批自己】的日志 → 已有批次永不重写、批间不重复、cache 稳定前缀保住。
+ *   - 不返回累计水位；区间（round/step start/end）由 agentLoop 持有后透传 appendBatch。
+ *
+ * @returns 成功返回 GenerateBatchResult；任何失败/输出不合格返回 null（调用方据此降级）。
+ */
+export async function generateBatch(input: GenerateBatchInput): Promise<GenerateBatchResult | null> {
+  try {
+    const messages = Array.isArray(input.messages) ? input.messages : [];
+    if (messages.length === 0) return null;
+
+    const client = resolveClient();
+    if (!client) {
+      console.warn('[recordGenerator] 缺少可用 API Key / 模型，跳过 batch 生成');
+      return null;
+    }
+
+    const body = serializeMessages(messages);
+    if (!body.trim()) return null;
+
+    const timeSpan = mergeTimeSpan(null, messages);
+    const prompt = buildBatchPrompt(
+      input,
+      body,
+      Math.max(1, input.roundStart),
+      Math.max(input.roundStart, input.roundEnd),
+      String(input.priorSkeleton ?? ''),
+    );
+
+    const contentMd = sanitizeOutput(await callOnce(client, [{ role: 'user', content: prompt }]));
+    if (!contentMd) {
+      console.warn('[recordGenerator] batch 输出不合格（缺模板头/超长/为空），降级');
+      return null;
+    }
+
+    return {
+      contentMd,
+      skeleton: extractSkeleton(contentMd),
+      phases: countSections(contentMd),
+      timeSpan,
+    };
+  } catch (err) {
+    console.warn('[recordGenerator] generateBatch failed, falling back:', err);
     return null;
   }
 }

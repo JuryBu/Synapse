@@ -60,14 +60,19 @@ function buildConversationFilters(opts?: { archived?: 'all' | 'active' | 'archiv
 function mapRecord(row: any) {
     if (!row) return null;
     const phases = fromJson<number>(row.phases_json);
+    // M2-R1：batches 是真相源（v2 落 batches_json），随行返回供 recordStore.normalizeRecord 解析；
+    // schemaVersion 决定是否走懒迁移（<2 且无 batches 时合成历史批）。
+    const batches = fromJson<unknown[]>(row.batches_json);
     return {
         conversationId: row.conversation_id,
+        batches: Array.isArray(batches) ? batches : undefined,
         contentMd: row.content_md ?? '',
         totalRounds: row.total_rounds ?? 0,
         totalSteps: row.total_steps ?? 0,
         phases: typeof phases === 'number' ? phases : 0,
         lastUpdatedRound: row.last_updated_round ?? 0,
         timeSpan: row.time_span ?? '',
+        schemaVersion: row.record_schema_version ?? 1,
         updatedAt: row.updated_at,
     };
 }
@@ -356,17 +361,21 @@ export function registerConversationHandlers(): void {
         return mapRecord(db.prepare('SELECT * FROM records WHERE conversation_id = ?').get(conversationId));
     });
 
-    // 写入 / 覆盖 record（upsert 整条，调用方负责合并）
+    // 写入 / 覆盖 record（upsert 整条，调用方负责合并）。
+    // M2-R1：batches_json（多批结构，真相源）+ record_schema_version 一并落盘；
+    // content_md 仍写派生全文（v1 回滚保险 / 旧调用方兼容）。
     ipcMain.handle('record:upsert', (_e, data: {
-        conversationId: string; contentMd?: string; totalRounds?: number; totalSteps?: number;
+        conversationId: string; batches?: unknown[]; schemaVersion?: number;
+        contentMd?: string; totalRounds?: number; totalSteps?: number;
         phases?: number; lastUpdatedRound?: number; timeSpan?: string; updatedAt?: number;
     }) => {
         if (!data?.conversationId) return false;
         db.prepare(
             `INSERT INTO records (
               conversation_id, content_md, total_rounds, total_steps,
-              phases_json, last_updated_round, time_span, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              phases_json, last_updated_round, time_span, updated_at,
+              batches_json, record_schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(conversation_id) DO UPDATE SET
               content_md = excluded.content_md,
               total_rounds = excluded.total_rounds,
@@ -374,7 +383,9 @@ export function registerConversationHandlers(): void {
               phases_json = excluded.phases_json,
               last_updated_round = excluded.last_updated_round,
               time_span = excluded.time_span,
-              updated_at = excluded.updated_at`,
+              updated_at = excluded.updated_at,
+              batches_json = excluded.batches_json,
+              record_schema_version = excluded.record_schema_version`,
         ).run(
             data.conversationId,
             data.contentMd ?? '',
@@ -386,6 +397,8 @@ export function registerConversationHandlers(): void {
             // 全库时间戳统一为「秒」(unixepoch)，与 conversations/messages 表一致；
             // 回退也用秒，避免 idx_records_updated 与其它表跨表比较差 1000 倍。
             data.updatedAt ?? Math.floor(Date.now() / 1000),
+            toJson(data.batches ?? null),
+            data.schemaVersion ?? 2,
         );
         return true;
     });

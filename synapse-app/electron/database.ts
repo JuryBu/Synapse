@@ -152,6 +152,11 @@ export function initDatabase(): Database.Database {
     ensureColumn(db, 'messages', 'rollback_snapshot_id', 'TEXT');
     ensureColumn(db, 'messages', 'error', 'TEXT');
 
+    // M2-R1 多批次 record：batches_json 落多批结构（真相源），record_schema_version 标记 v2。
+    // content_md 旧列保留不删（v1 回滚保险 / 懒迁移源）。用 ensureColumn 兼容旧库。
+    ensureColumn(db, 'records', 'batches_json', 'TEXT');
+    ensureColumn(db, 'records', 'record_schema_version', 'INTEGER NOT NULL DEFAULT 1');
+
     console.log('[database] Initialized at:', dbPath);
     return db;
 }

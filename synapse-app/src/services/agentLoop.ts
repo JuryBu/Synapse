@@ -15,8 +15,8 @@ import {
 import { setConnectionStatus } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
 import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS } from './systemPrompt';
-import { getRecord, upsertRecord } from './recordStore';
-import { generateRecord } from './recordGenerator';
+import { getRecord, appendBatch, getRecordSkeleton, type SynapseRecord } from './recordStore';
+import { generateBatch } from './recordGenerator';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 
 export interface ToolDefinition {
@@ -62,6 +62,26 @@ function chatContentToText(content: ChatMessage['content']): string {
     .filter((part: any) => part?.type === 'text')
     .map((part: any) => part.text)
     .join('');
+}
+
+/**
+ * M2-R1 渐进式读：把多批 record 拼成注入前缀。
+ * 末批保留【全文】（最近、最相关），之前的批次降级为【骨架】只读概览，控制注入膨胀。
+ * 单批时即末批全文；空 record 返回空串。
+ */
+function buildRecordPrefix(record: SynapseRecord): string {
+  const batches = record.batches ?? [];
+  if (batches.length === 0) return record.contentMd ?? '';
+  if (batches.length === 1) return batches[0].contentMd;
+  const last = batches[batches.length - 1];
+  const headSkeletons = batches
+    .slice(0, -1)
+    .map(b => b.skeleton || '')
+    .filter(Boolean)
+    .join('\n\n---\n\n');
+  return headSkeletons
+    ? `${headSkeletons}\n\n---\n\n${last.contentMd}`
+    : last.contentMd;
 }
 
 export class AgentLoop {
@@ -141,44 +161,66 @@ export class AgentLoop {
       realTokenCount,
     );
 
-    // M1 Step2: 压缩时优先用 record（结构化摘要）作稳定前缀以命中 prompt cache；
-    // 无对话 id / record 生成失败时回退到 compressContext 的字符截断。
+    // M2-R1: 压缩时优先用 record（多批次结构化摘要）作稳定前缀以命中 prompt cache；
+    // 压缩点【追加一个新批次】（appendBatch，已有批次永不重写），注入前缀按渐进式读拼接
+    //（末批全文 + 之前批次骨架）。无对话 id / 生成失败时回退到 compressContext 的字符截断。
     let apiHistory: ChatMessage[];
     if (wasCompressed) {
-      const keepCount = compressed.length - 1; // compressContext 保留的最近原文条数
+      const keepCount = compressed.length - 1; // compressContext 保留的最近原文条数（含 tool 口径）
       const conversationId = (rootState as any).conversation?.id as string | null;
       let recordMd: string | null = null;
       if (conversationId) {
         try {
           const existingRecord = await getRecord(conversationId);
-          recordMd = existingRecord?.contentMd ?? null;
-          const batchEnd = Math.max(0, requestHistory.length - keepCount);
-          const batchStart = Math.min(existingRecord?.totalSteps ?? 0, batchEnd);
-          const batchSlice = requestHistory.slice(batchStart, batchEnd);
+
+          // 被压缩段 = 去掉「最近 keepCount 条原文」之前的全部历史（含 tool）。
+          const keepStartIdx = Math.max(0, requestHistory.length - keepCount);
+          const compressedSegment = requestHistory.slice(0, keepStartIdx);
+
+          // ★ step 口径对齐 record（全程不含 tool）：把被压缩段过滤掉 tool 后，
+          //   才是 record 应覆盖到的「不含 tool」消息序列；本批 = 该序列里超出末批 stepEnd 的尾部。
+          const coveredEligible = compressedSegment.filter(m => m.role !== 'tool');
+          const priorSteps = existingRecord?.totalSteps ?? 0;       // = 末批 stepEnd（不含 tool）
+          const priorRounds = existingRecord?.totalRounds ?? 0;     // = 末批 roundEnd
+          const batchSlice = coveredEligible.slice(priorSteps);     // 本批切片（不含 tool，与上一批不重叠）
+
+          recordMd = existingRecord ? buildRecordPrefix(existingRecord) : null;
+
           if (batchSlice.length > 0) {
-            const recordResult = await generateRecord({
+            const batchUserCount = batchSlice.filter(m => m.role === 'user').length;
+            const roundStart = priorRounds + 1;
+            const roundEnd = priorRounds + batchUserCount;
+            const stepStart = priorSteps;
+            const stepEnd = priorSteps + batchSlice.length;
+            // 旧批骨架只读概览：本批之前所有批次的 skeleton 拼接（getRecordSkeleton）。
+            const priorSkeleton = existingRecord
+              ? await getRecordSkeleton(conversationId)
+              : '';
+
+            const batchResult = await generateBatch({
               conversationId,
               messages: batchSlice.map(m => ({
                 role: m.role as 'user' | 'assistant' | 'system' | 'tool',
                 content: chatContentToText(m.content),
               })),
-              existingRecordMd: existingRecord?.contentMd ?? null,
-              priorRounds: existingRecord?.totalRounds ?? 0,
-              priorSteps: existingRecord?.totalSteps ?? 0,
-              priorTimeSpan: existingRecord?.timeSpan ?? null,
+              priorSkeleton,
+              roundStart,
+              roundEnd,
               workspaceName: workspaceName || undefined,
             });
-            if (recordResult) {
-              await upsertRecord({
+            if (batchResult) {
+              const updated = await appendBatch({
                 conversationId,
-                contentMd: recordResult.contentMd,
-                totalRounds: recordResult.totalRounds,
-                totalSteps: recordResult.totalSteps,
-                phases: recordResult.phases,
-                lastUpdatedRound: recordResult.totalRounds,
-                timeSpan: recordResult.timeSpan,
+                stepStart,
+                stepEnd,
+                roundStart,
+                roundEnd,
+                contentMd: batchResult.contentMd,
+                skeleton: batchResult.skeleton,
+                phases: batchResult.phases,
+                timeSpan: batchResult.timeSpan,
               });
-              recordMd = recordResult.contentMd;
+              if (updated) recordMd = buildRecordPrefix(updated);
             }
           }
         } catch (err) {
