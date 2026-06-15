@@ -184,11 +184,24 @@ export function initDatabase(): Database.Database {
     return db;
 }
 
-function ensureColumn(database: Database.Database, table: string, column: string, definition: string): void {
+// 导出供 IPC 层做防御性自愈（见 conversation.ts：注册时再补一次 reasoning_effort 列，
+// 兼容「迁移因旧构建/异常未覆盖到该列」的库）。幂等：列已存在则 no-op。
+export function ensureColumn(database: Database.Database, table: string, column: string, definition: string): void {
     const columns = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!columns.some(c => c.name === column)) {
         database.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
     }
+}
+
+/**
+ * 运行期检测某表是否含某列。供写入路径在「列可能缺失」时降级，避免一条写整条 throw。
+ * ★ M2-6 真机根因：reasoning_effort 列是 ensureColumn 后加的；若运行的库该列未迁移成功，
+ *   带该列的 INSERT/UPDATE 会整条失败 → 连 mode/messages 也一起存不进（mode 列建表自带故幸存，
+ *   造成「mode 对、reasoningEffort 错」的非对称表象）。写入侧据此判定，缺列则跳过该字段。
+ */
+export function hasColumn(database: Database.Database, table: string, column: string): boolean {
+    const columns = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return columns.some(c => c.name === column);
 }
 
 export function getDatabase(): Database.Database {

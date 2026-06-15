@@ -4,7 +4,7 @@
  */
 
 import { ipcMain } from 'electron';
-import { getDatabase } from '../database';
+import { getDatabase, ensureColumn, hasColumn } from '../database';
 
 function toJson(value: unknown): string | null {
     return value === undefined || value === null ? null : JSON.stringify(value);
@@ -104,6 +104,15 @@ function mapMessage(row: any) {
 export function registerConversationHandlers(): void {
     const db = getDatabase();
 
+    // ★ M2-6 真机根因防御性自愈：reasoning_effort 列是 ensureColumn 后加的（database.ts ~line164）。
+    //   若运行的库该列未迁移成功（旧构建初始化的库、迁移异常等），带该列的 INSERT/UPDATE 会整条 throw，
+    //   连 mode/messages 一起存不进去（mode 列建表自带故幸存 → 表象「mode 对、reasoningEffort 错」）。
+    //   这里在 handler 注册时再补一次（幂等），把列补齐到当前运行库；万一仍补不上，下方写入路径按
+    //   hasReasoningEffortColumn 降级（跳过该字段，至少不拖垮整条保存）。
+    try { ensureColumn(db, 'conversations', 'reasoning_effort', 'TEXT'); } catch { /* 自愈失败则靠下方降级兜底 */ }
+    // 缓存列存在性（PRAGMA 不必每次写都跑）。注册期仅一次；ensureColumn 已尽力补齐，故通常为 true。
+    const hasReasoningEffortColumn = hasColumn(db, 'conversations', 'reasoning_effort');
+
     // 创建对话
     ipcMain.handle('conversation:create', (_e, data: {
         id: string; title?: string; model?: string; mode?: string; reasoningEffort?: string; workspaceId?: string;
@@ -113,20 +122,20 @@ export function registerConversationHandlers(): void {
         // M2-3 对话分支：fork 时写入溯源；普通新建为 undefined → 落 NULL。
         parentId?: string | null; branchedFromMessageId?: string | null;
     }) => {
-        db.prepare(
-            `INSERT INTO conversations (
-              id, workspace_id, title, model, mode, reasoning_effort, schema_version, summary_json,
-              last_message, assistant_runs, file_snapshots, pending_diffs, archived, tags_json, archived_at,
-              parent_id, branched_from_message_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
+        // ★ 缺列降级：reasoning_effort 列缺失时，动态拼一条【不含该列】的 INSERT，
+        //   保住 mode/messages 正常落库（不再因一个缺列整条失败）。列存在则带上（正常路径）。
+        const cols = [
+            'id', 'workspace_id', 'title', 'model', 'mode',
+            'schema_version', 'summary_json', 'last_message',
+            'assistant_runs', 'file_snapshots', 'pending_diffs', 'archived', 'tags_json', 'archived_at',
+            'parent_id', 'branched_from_message_id',
+        ];
+        const vals: unknown[] = [
             data.id,
             data.workspaceId || null,
             data.title || '新对话',
             data.model || null,
             data.mode || 'planning',
-            // M2-6 对话级思考层级：缺省落默认 'auto'（与 agentSettings 初值一致）。
-            data.reasoningEffort || 'auto',
             data.schemaVersion ?? 1,
             toJson(data.summary),
             data.lastMessage || '',
@@ -138,7 +147,17 @@ export function registerConversationHandlers(): void {
             data.archived ? Math.floor(Date.now() / 1000) : null,
             data.parentId ?? null,
             data.branchedFromMessageId ?? null,
-        );
+        ];
+        if (hasReasoningEffortColumn) {
+            // 插在 mode 之后位置一致即可（列顺序与 vals 顺序对应；这里追加到尾部并补对应值）。
+            cols.push('reasoning_effort');
+            // M2-6 对话级思考层级：缺省/空串落默认 'auto'（与 agentSettings 初值一致；空串也回退避免下拉落空）。
+            vals.push(data.reasoningEffort || 'auto');
+        }
+        const placeholders = cols.map(() => '?').join(', ');
+        db.prepare(
+            `INSERT INTO conversations (${cols.join(', ')}) VALUES (${placeholders})`,
+        ).run(...vals);
         return { id: data.id };
     });
 
@@ -175,7 +194,13 @@ export function registerConversationHandlers(): void {
         if (data.model !== undefined) { sets.push('model = ?'); vals.push(data.model); }
         // M2-6 对话级元数据：每次保存把该对话当前 mode / reasoning_effort 落库（undefined 时不动，保旧值）。
         if (data.mode !== undefined) { sets.push('mode = ?'); vals.push(data.mode); }
-        if (data.reasoningEffort !== undefined) { sets.push('reasoning_effort = ?'); vals.push(data.reasoningEffort); }
+        // ★ 缺列降级：reasoning_effort 列缺失时跳过该字段，避免整条 UPDATE throw 拖垮 mode/last_message 等同批写入
+        //   （真机根因：M2-6 把 reasoning_effort 耦合进同一 UPDATE，列缺失即连带其它字段一起失败）。
+        //   空串也回退默认 'auto'，避免 DB 落空串导致下拉框落空。
+        if (hasReasoningEffortColumn && data.reasoningEffort !== undefined) {
+            sets.push('reasoning_effort = ?');
+            vals.push(data.reasoningEffort || 'auto');
+        }
         if (data.schemaVersion !== undefined) { sets.push('schema_version = ?'); vals.push(data.schemaVersion); }
         if (data.summary !== undefined) { sets.push('summary_json = ?'); vals.push(toJson(data.summary)); }
         if (data.lastMessage !== undefined) { sets.push('last_message = ?'); vals.push(data.lastMessage); }

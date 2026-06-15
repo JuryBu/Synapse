@@ -108,9 +108,17 @@ function createMessageId(): string {
 
 export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Promise<void> {
   const id = snapshot.id || AUTOSAVE_ID;
-  // ★ M2-6 切换竞态封堵：切换/新建对话流程进行中，丢弃任何对 AUTOSAVE_ID 镜像行的迟到写入，
-  //   避免 clearAutosaveSnapshot 后又被旧 debounce 复活成草稿。真实对话 id 的落库不受影响（非 autosave 镜像）。
-  if (id === AUTOSAVE_ID && isConversationSwitching()) return;
+  // ★ M2-6 切换竞态封堵（本轮收紧，把 mode/reasoningEffort 一并纳入保护）：
+  //   切换/新建/分支流程进行中（begin~endConversationSwitch 窗口），丢弃【任何 id】的被动 autosave 写入，
+  //   而非仅挡 AUTOSAVE_ID 镜像。原因：切走对话时 AgentPanel 的 700ms autosave debounce 可能在
+  //   「setConversation(刚加载对话) 已生效、但 setReasoningEffort(该对话 DB 值) 尚未在同批 render 落定」的
+  //   窗口到点，用【全局旧 reasoningEffort】update 回刚加载对话的真实 id 行 → 把 DB 里该对话存的 high 冲成 auto
+  //   （真机 A2：high→auto）。saveAutosaveSnapshot 是唯一的被动 autosave 入口；切换前 saveCurrentToHistory
+  //   已主动把切走对话落库、切换后依赖变化会重新触发 debounce，故切换窗口内丢弃这一拍 autosave 不丢数据，
+  //   却能堵死「加载瞬间用全局旧值回写覆盖刚加载对话」的覆盖点（mode 同享此保护，不破坏 mode 既有行为）。
+  //   主动落库（saveConversationSnapshot / handleNewConversation / branch promotion）走 persistPlatformSnapshot，
+  //   不经此函数，不受闸门影响——它们本就该落库。
+  if (isConversationSwitching()) return;
   const timestamp = snapshot.timestamp ?? Date.now();
   // M2-R6：落库前剥掉任何残留 base64（持 sha256 引用即清内联 data:），localStorage / 平台两条路都净化。
   const sanitizedMessages = sanitizeMessagesForPersistence(snapshot.messages);
@@ -643,8 +651,10 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
       model: conversation.model,
       // M2-6：随快照回带对话级 mode / reasoningEffort（两端 mapConversation/Web get 都带这两字段）。
       //   旧对话该列为 null/缺省 → 回退默认（mode='planning'、reasoningEffort='auto'），切换时同步进全局 agentSettings。
-      mode: conversation.mode ?? 'planning',
-      reasoningEffort: conversation.reasoningEffort ?? conversation.reasoning_effort ?? 'auto',
+      //   ★ 健壮性：用「空串/NULL/undefined 都回退」（fallbackMeta，非纯 ??）——DB reasoning_effort 列无 DEFAULT，
+      //     旧行或异常写入可能落空串 ''，?? 不拦空串会让下拉框落空（子代理 low 提到）。mode 一并兜空串保持对称。
+      mode: fallbackMeta(conversation.mode, 'planning'),
+      reasoningEffort: fallbackMeta(conversation.reasoningEffort ?? conversation.reasoning_effort, 'auto'),
       archived: Boolean(conversation.archived),
       tags: normalizeTags(conversation.tags),
       messages: messages as Message[],
@@ -717,6 +727,15 @@ function mapConversationSummary(row: any): ConversationSummary | null {
     archived: Boolean(row.archived),
     tags: normalizeTags(row.tags),
   };
+}
+
+/**
+ * 对话级元数据（mode / reasoningEffort）回退：null / undefined / 空串都回退到默认。
+ * ★ M2-6 健壮性：reasoning_effort 列无 DEFAULT，旧行/异常可能落空串 ''；纯 `?? 'auto'` 不拦空串，
+ *   会让恢复出的下拉值落空。统一走此函数，把空串也视作「未设置」回退默认（与 dispatch 侧 `x || 'auto'` 同口径）。
+ */
+function fallbackMeta(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() !== '' ? value : fallback;
 }
 
 function normalizeTimestamp(value: unknown): number {
