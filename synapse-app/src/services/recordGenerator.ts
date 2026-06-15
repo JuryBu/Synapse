@@ -191,7 +191,15 @@ ${skeletonSection}${TEMPLATE_RULES}
 ${body}`;
 }
 
-/** 从 store 的 settings slice 解析出可用的 AIClient 配置；缺 Key 返回 null */
+/**
+ * 从 store 的 settings slice 解析出可用的 AIClient 配置；缺 Key 返回 null。
+ *
+ * ★ R5 可中止安全前提（务必保持）：本函数【每次都 new 一个独立 AIClient 实例】，绝不复用/缓存。
+ *   这条压缩调用拿到的 client 与【主对话 client】（agentLoop 构造时持有的那一个）、以及其它任何
+ *   record 调用的 client 完全隔离。因此 callOnce 在中止/超时时直接 `client.abort()` 只会中断【本次压缩】
+ *   的底层 LLM 请求，不会误伤主对话或并发的其它 record 生成。若将来改成复用/缓存 client，
+ *   abort 语义会破裂——必须改为「为本次压缩传入独立 signal 的安全路径」，否则会误中断他人请求。
+ */
 function resolveClient(): AIClient | null {
   const state = store.getState() as any;
   const settings = state?.settings;
@@ -212,15 +220,38 @@ function resolveClient(): AIClient | null {
   });
 }
 
-/** 非流式收集一次完整回复；遇到 error chunk 抛出，超时抛出 */
-async function callOnce(client: AIClient, messages: ChatMessage[]): Promise<string> {
+/**
+ * 非流式收集一次完整回复；遇到 error chunk 抛出，超时抛出，外部 abort 抛出。
+ *
+ * R5 可中止：Promise.race 三方竞争——collect（正常收集）/ timeout（60s 兜底）/ abort（外部 signal）。
+ *   - 任一 abort 触发（signal 已 aborted 或运行中收到 abort 事件）→ 立即 `client.abort()` 中断底层
+ *     LLM fetch，并 reject(Error('aborted'))，调用方据此降级返回 null。
+ *   - timeout 与 abort 都靠 `client.abort()` 真正掐断网络请求（client 为本次压缩独立实例，见 resolveClient）。
+ *   - 进入前若 signal 已 aborted，直接抛出，连请求都不发。
+ */
+async function callOnce(client: AIClient, messages: ChatMessage[], signal?: AbortSignal): Promise<string> {
+  // 进入即检查：已中止则连请求都不发
+  if (signal?.aborted) throw new Error('aborted');
+
   let content = '';
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let onAbort: (() => void) | null = null;
+
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       client.abort();
       reject(new Error('record generation timeout'));
     }, GENERATE_TIMEOUT_MS);
+  });
+
+  // abort 竞争项：外部 signal 触发 → 掐断底层请求 + reject。无 signal 时永不 settle（不干扰其它两路）。
+  const aborted = new Promise<never>((_, reject) => {
+    if (!signal) return;
+    onAbort = () => {
+      client.abort();
+      reject(new Error('aborted'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
   });
 
   const collect = (async () => {
@@ -232,9 +263,10 @@ async function callOnce(client: AIClient, messages: ChatMessage[]): Promise<stri
   })();
 
   try {
-    return await Promise.race([collect, timeout]);
+    return await Promise.race([collect, timeout, aborted]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
   }
 }
 
@@ -316,12 +348,21 @@ export interface GenerateBatchResult {
  *     模型只就本批新原文产出【本批自己】的日志 → 已有批次永不重写、批间不重复、cache 稳定前缀保住。
  *   - 不返回累计水位；区间（round/step start/end）由 agentLoop 持有后透传 appendBatch。
  *
- * @returns 成功返回 GenerateBatchResult；任何失败/输出不合格返回 null（调用方据此降级）。
+ * R5 可中止：可选 signal 透传到 callOnce。调用方（agentLoop）在用户 stop 时 abort 该 signal，
+ *   本函数随即返回 null（abort/超时/失败统一降级口径），调用方据此走【不 appendBatch】回退路径，
+ *   record 保持压缩前状态、apiHistory 走字符截断或旧 record 前缀，绝不丢 store.messages。
+ *
+ * @returns 成功返回 GenerateBatchResult；任何失败/中止/输出不合格返回 null（调用方据此降级）。
  */
-export async function generateBatch(input: GenerateBatchInput): Promise<GenerateBatchResult | null> {
+export async function generateBatch(
+  input: GenerateBatchInput,
+  signal?: AbortSignal,
+): Promise<GenerateBatchResult | null> {
   try {
     const messages = Array.isArray(input.messages) ? input.messages : [];
     if (messages.length === 0) return null;
+    // 进入即检查：已中止则不浪费一次 LLM 调用
+    if (signal?.aborted) return null;
 
     const client = resolveClient();
     if (!client) {
@@ -341,7 +382,7 @@ export async function generateBatch(input: GenerateBatchInput): Promise<Generate
       String(input.priorSkeleton ?? ''),
     );
 
-    const contentMd = sanitizeOutput(await callOnce(client, [{ role: 'user', content: prompt }]));
+    const contentMd = sanitizeOutput(await callOnce(client, [{ role: 'user', content: prompt }], signal));
     if (!contentMd) {
       console.warn('[recordGenerator] batch 输出不合格（缺模板头/超长/为空），降级');
       return null;

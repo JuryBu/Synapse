@@ -17,7 +17,7 @@ import { addNotification } from '../store/slices/notifications';
 import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
 import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type SynapseRecord } from './recordStore';
 import { generateBatch } from './recordGenerator';
-import { AUTOSAVE_ID } from './conversationPersistence';
+import { AUTOSAVE_ID, saveAutosaveSnapshot } from './conversationPersistence';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 
 export interface ToolDefinition {
@@ -272,6 +272,18 @@ export class AgentLoop {
   private tools: ToolDefinition[] = [];
   private toolExecutor: ToolExecutor | null = null;
   private running = false;
+  /**
+   * R5 压缩点专用中止器【集合】：每个在途的【record 压缩 LLM 生成】（generateBatch）登记一个独立 controller。
+   * 与 this.client（主对话 client）相互独立——主对话靠 this.client.abort()，压缩靠这里。
+   *
+   * ★ R5 修复（并发/重入归属）：原先用单个实例字段 this.compressController 跨 run 共享，
+   *   快速连发/编辑重试触发的第二次 run 会无条件覆盖它、且其 finally 置 null 会误清别人的 controller，
+   *   导致 stop() abort 不到旧压缩、或把新压缩的 controller 误置空（双双失去 stop 能力）。
+   *   现改为：controller 为【每次 run 的局部变量】，进入压缩分支时 add 到本集合、finally 只 delete 自己那个；
+   *   stop() 遍历集合 abort 全部在途压缩并 clear。归属清晰、互不误伤。
+   *   （叠加 run() 入口重入闸后，正常情况下集合至多 1 个；集合是「即便重入闸将来被绕过也不误伤」的双保险。）
+   */
+  private compressControllers = new Set<AbortController>();
 
   constructor(client: AIClient) {
     this.client = client;
@@ -285,10 +297,34 @@ export class AgentLoop {
   stop() {
     this.running = false;
     this.client.abort();
+    // R5：中断【所有】正在进行的 record 压缩生成（若有），让 generateBatch 立即返回 null 走降级，
+    // 而非傻等 60s timeout。遍历集合 abort 全部在途 controller 后整体 clear（已 abort 的不再复用）。
+    for (const controller of this.compressControllers) controller.abort();
+    this.compressControllers.clear();
   }
 
   async run(userMessage: string, opts?: { skipUserMessage?: boolean; contentParts?: MessageContentPart[]; attachments?: AttachmentRef[] }): Promise<void> {
+    // ★ R5 修复（重入闸，问题1/2 核心防线）：run() 已在跑时拒绝二次进入。
+    // 背景：压缩窗口期（可达 60s 的 generateBatch）原先 isStreaming 仍为 false——它要进 while 循环才首次
+    // dispatch(setStreaming(true))，而压缩分支在它之前。UI 的 handleSend/autosave 都以 isStreaming 为闸门，
+    // 压缩期被当空闲，用户再点发送/编辑/重试会复用同一 AgentLoop 单例再次 run()，造成两路压缩对同一
+    // conversationId 并发（appendBatch 非事务 read-modify-write 交错 → 丢批/脏写），且第二次 run 覆盖
+    // this.running 与压缩 controller（旧压缩失去 stop 控制）。这里入口即挡住二次 run，从源头杜绝并发重入。
+    if (this.running) {
+      console.warn('[AgentLoop] run() 被拒绝：上一轮仍在进行（压缩/生成中），忽略本次重入请求。');
+      store.dispatch(addNotification({
+        type: 'info',
+        title: '正在处理中',
+        message: '上一条还在生成或压缩历史，请稍候再发送',
+        duration: 2500,
+      }));
+      return;
+    }
     this.running = true;
+    // ★ R5 修复（问题1）：进入即点亮 isStreaming，让 handleSend/autosave 的 isStreaming 闸门【覆盖整个压缩窗口】，
+    // 不再留「压缩期 isStreaming=false 被当空闲」的重入缝隙。下方 while 循环每轮也会 dispatch(true)（幂等无害）。
+    store.dispatch(setStreaming(true));
+    try {
     // Stage 14: 确保 RULES 已加载
     const { extensionManager } = await import('./extensionManager');
     await extensionManager.loadRulesFromFS().catch(() => { });
@@ -365,9 +401,27 @@ export class AgentLoop {
     // M2-R1: 压缩时优先用 record（多批次结构化摘要）作稳定前缀以命中 prompt cache；
     // 压缩点【追加一个新批次】（appendBatch，已有批次永不重写），注入前缀按渐进式读拼接
     //（末批全文 + 之前批次骨架）。无对话 id / 生成失败时回退到 compressContext 的字符截断。
+    //
+    // ★ R5 健壮性契约（可中止 + 回到压缩前一刻 + 崩溃恢复），务必维持：
+    //   1. 可中止：本批 generateBatch 透传 compressController.signal；用户 stop() 时 abort →
+    //      generateBatch 立即返回 null（不傻等 60s），落入下方「batchResult 为假」分支 → 不调 appendBatch。
+    //   2. 回到压缩前一刻：generateBatch 失败/中止 → 不进 appendBatch → record 维持压缩前状态（旧批不动）。
+    //      此时 recordMd 仍可能是【旧 record 的渐进式前缀】（非空，line ~391 已先算好），那是压缩前的合法快照，
+    //      apiHistory 用它作摘要前缀；旧 record 都没有时 recordMd 为 null → 走 compressContext 字符截断回退。
+    //      两条路都不丢 store.messages（apiHistory 只是「本轮发送给模型的视图」，不改动 store）。
+    //   3. 崩溃恢复：appendBatch 落库是【原子 + 幂等】的——
+    //      原子：Electron 走 record:upsert 单条 INSERT...ON CONFLICT DO UPDATE（better-sqlite3 单语句即单事务），
+    //            Web 走 writeWebRecord 单次 localStorage.setItem 整对象写入；二者皆「要么整批写入、要么完全没写」。
+    //      幂等：appendBatch 要求 stepStart == 末批 stepEnd 才追加（否则脏写拒绝、原样返回旧 record）。
+    //      故「generateBatch 成功但 appendBatch 写库中途崩溃」时，要么这批没落库（重启后 getRecord 拿压缩前一致态，
+    //      下次压缩从同一 priorSteps 重算本批，不重复不丢）、要么整批已落库（下次压缩 priorSteps 前移、续记下一批）。
     let apiHistory: ChatMessage[];
     if (wasCompressed) {
       const keepCount = compressed.length - 1; // compressContext 保留的最近原文条数（含 tool 口径）
+      // R5：为本次压缩生成新建独立中止器，作为【本 run 的局部变量】并登记到实例集合。
+      // 局部变量保证归属——不会被并发/重入 run 覆盖引用；登记集合让 stop() 能遍历 abort 到它。
+      const compressController = new AbortController();
+      this.compressControllers.add(compressController);
       // 问题1 修复：新对话 store.conversation.id 为 null，但 autosave 已把当前对话落到
       // AUTOSAVE_ID('autosave-current')（含 conversations 行，FK 满足），故 record 回退用它，
       // 让新对话的 record 多批次也能触发。（正式保存时 record 迁移到新 id 见 Task_4 小本本。）
@@ -411,7 +465,7 @@ export class AgentLoop {
               roundStart,
               roundEnd,
               workspaceName: workspaceName || undefined,
-            });
+            }, compressController.signal); // R5：透传本 run 局部 compressController 的 signal，用户 stop 时立即降级返回 null
             if (batchResult) {
               const updated = await appendBatch({
                 conversationId,
@@ -424,11 +478,37 @@ export class AgentLoop {
                 phases: batchResult.phases,
                 timeSpan: batchResult.timeSpan,
               });
-              if (updated) recordMd = buildRecordPrefix(updated, modelContextWindow);
+              if (updated) {
+                recordMd = buildRecordPrefix(updated, modelContextWindow);
+                // ★ R5 修复（问题3：record 水位 vs messages 缺口）：appendBatch 已把【本批覆盖到的 step】落库，
+                // 但触发本轮压缩的新 user 消息此刻可能还没被 autosave（700ms 防抖 + 压缩期同步占住事件循环，
+                // 且压缩成功后立即进 while 重新点亮 isStreaming 关掉 autosave 闸门）。这里主动同步持久化一次
+                // store.messages，保证「record 已覆盖的消息」在 DB 里一定存在——否则崩溃恢复后 record 水位会指向
+                // messages 里不存在的 step，造成水位错位。持久化失败吞掉（record/autosave 都是加速层，绝不阻塞主对话）。
+                try {
+                  const liveConversation = (store.getState() as RootState).conversation;
+                  await saveAutosaveSnapshot({
+                    id: liveConversation.id,
+                    title: liveConversation.title,
+                    messages: liveConversation.messages,
+                    model: currentModel,
+                    assistantRuns: liveConversation.assistantRuns,
+                    fileSnapshots: liveConversation.fileSnapshots,
+                    pendingDiffs: liveConversation.pendingDiffs,
+                    timestamp: Date.now(),
+                  });
+                } catch (saveErr) {
+                  console.warn('[agentLoop] 压缩后同步 autosave 失败（不阻塞主对话）:', saveErr);
+                }
+              }
             }
           }
         } catch (err) {
           console.warn('[agentLoop] record 压缩失败，回退字符截断:', err);
+        } finally {
+          // R5：本次压缩生成结束（成功/降级/中止/异常）即从集合移除【自己这个】 controller，
+          // 只 delete 局部变量，绝不整体置空——避免误清别的在途 run 登记的 controller（归属隔离）。
+          this.compressControllers.delete(compressController);
         }
       }
       apiHistory = recordMd
@@ -796,9 +876,14 @@ export class AgentLoop {
       // No tool calls = conversation complete
       break;
     }
-
-    store.dispatch(clearStreamingContent());
-    this.running = false;
+    } finally {
+      // ★ R5 修复（问题1）：无论正常结束 / break / 抛出未捕获异常，都在 finally 统一收尾：
+      // 关掉 isStreaming 闸门、清流式残留、释放 running。避免「入口点亮 isStreaming 后中途抛异常」
+      // 留下 isStreaming=true + running=true 永久卡死（handleSend/autosave 再也进不来）。
+      store.dispatch(clearStreamingContent());
+      store.dispatch(setStreaming(false));
+      this.running = false;
+    }
   }
 
 }

@@ -287,6 +287,20 @@ export async function getRecord(conversationId: string): Promise<SynapseRecord |
 }
 
 /**
+ * 同 getRecord，但【不吞底层异常】——读失败时抛出，让调用方区分「确实不存在(null)」与「读失败(throw)」。
+ *
+ * ★ R5 修复（问题4）：appendBatch 的幂等水位（expectedStepStart = 末批 stepEnd）依赖这次读到的真实 record。
+ *   若用吞异常的 getRecord，瞬时 IPC/IO 抖动会把「实际有旧批」误读成 null → 期望 stepStart==0，
+ *   而调用方传入的 stepStart=priorSteps>0 → 幂等校验判脏写拒绝、静默丢批；或新对话恰好 priorSteps=0
+ *   时把本应接续的批当首批写入、step 错位。故 appendBatch 改用本函数：读失败直接降级（不基于错误水位写）。
+ *   返回 null 仅表示「确实不存在」（normalizeRecord 判定为空 record），与读失败语义分离。
+ */
+async function getRecordOrThrow(conversationId: string): Promise<SynapseRecord | null> {
+  const raw = await platform.conversation.getRecord?.(conversationId);
+  return normalizeRecord(raw);
+}
+
+/**
  * 写入 / 覆盖 record —— 纯持久化层（整条覆盖语义，含 batches）。
  * ★ 职责边界：本函数只做派生水位计算 + 落盘，不做内容生成/合并/追加语义。
  *   追加走 appendBatch、回溯裁剪走 clampToBatch。
@@ -313,14 +327,25 @@ export async function upsertRecord(input: RecordUpsertInput): Promise<SynapseRec
   }
 }
 
-/** 落盘形状：携带 batches（运行态结构）+ 派生水位 + schemaVersion，platform 层各自序列化 */
-function toPersistShape(record: SynapseRecord): Record<string, unknown> {
+/**
+ * 落盘形状：携带 batches（运行态结构）+ 派生水位 + schemaVersion，platform 层各自序列化。
+ *
+ * @param expectedStepStart 可选的【乐观并发水位门】（仅 appendBatch 传）：
+ *   要求落盘时 DB 当前 total_steps（= 末批 stepEnd）必须 == 本值，否则不写、返回 false。
+ *   把幂等校验下推到底层单次写入（Electron 走 SQL `ON CONFLICT DO UPDATE ... WHERE total_steps=?`、
+ *   Web 走 setItem 前内存比对），杜绝「读改写」交错窗口：两路并发压缩各自读到同一 priorSteps，
+ *   第一路写入推进 total_steps 后，第二路写入因 WHERE 不匹配被拒，不再后写覆盖先写。
+ *   不传（undefined）= 整条无条件覆盖（upsertRecord / clampToBatch 用），保持原语义。
+ */
+function toPersistShape(record: SynapseRecord, expectedStepStart?: number): Record<string, unknown> {
   return {
     conversationId: record.conversationId,
     batches: record.batches,
     contentMd: record.contentMd, // 派生只读，供旧 content_md 列回写（回滚保险）
     totalRounds: record.totalRounds,
     totalSteps: record.totalSteps,
+    // 乐观并发水位门（仅 appendBatch 传，整条覆盖路径不传 → undefined → 底层无条件写）
+    expectedStepStart,
     // phases 真相源 = 各 RecordBatch.phases；这里的全批求和【仅为派生只读统计】（兼容旧 phases_json 列 / 调试）。
     // ★ 读回时 normalizeRecord 一律从 batches[].phases 取每批值，绝不用本标量回填批次（标量无法拆回各批）。
     //   仅 v1 懒迁移（无 batches）分支才用它合成那 1 个历史批的 phases。
@@ -338,16 +363,37 @@ function toPersistShape(record: SynapseRecord): Record<string, unknown> {
  *   - 幂等校验：本批 stepStart 必须 == 末批 stepEnd（无批则 0），否则视脏写拒绝（为 fallback 重入预留）。
  *   - index 由末批 index+1 派生（无批则 0），调用方不需关心。
  * 成功返回追加后的最新 record，校验失败/异常返回 null（不抛）。
+ *
+ * ★ R5 崩溃恢复依赖（务必维持，否则压缩点不再「崩溃可恢复」）：
+ *   本函数把【整个 record（旧批 + 新批）】一次性交给 saveRecord 落盘，落盘必须是【原子】操作——
+ *     - Electron：platform → record:upsert 单条 INSERT...ON CONFLICT DO UPDATE，better-sqlite3 单语句即单事务，
+ *       进程在写中途崩溃也不会留下「写了一半的 batches_json」（要么旧值、要么新值整体）。
+ *     - Web：platform → writeWebRecord 单次 localStorage.setItem(整对象 JSON 字符串)，同样整体写入。
+ *   叠加上面的【幂等】校验（stepStart == 末批 stepEnd），即可保证：「generateBatch 成功但 saveRecord 崩溃」时，
+ *   重启后 getRecord 拿到的是压缩前一致态，下一次压缩仍从同一 priorSteps 重算本批——不重复、不丢、不脏写。
+ *   若将来改为「分多次写库」或非原子写入，这条恢复保证会破裂，必须用显式事务包住整批写入。
  */
 export async function appendBatch(input: AppendBatchInput): Promise<SynapseRecord | null> {
   if (!input?.conversationId) return null;
+
+  // ★ R5 修复（问题4 上半）：读 record 用【不吞异常】的 getRecordOrThrow，区分「确实不存在」与「读失败」。
+  //   读失败（IPC/IO 抖动）时直接降级返回 null（不基于错误水位写），由 agentLoop 走前缀回退——
+  //   绝不在读失败的情况下按 stepStart==0 误判首批而脏写/错位写。
+  let existing: SynapseRecord | null;
   try {
-    const existing = await getRecord(input.conversationId);
+    existing = await getRecordOrThrow(input.conversationId);
+  } catch (err) {
+    console.warn('[recordStore] appendBatch 读取 record 失败，降级不写（交由调用方前缀回退）:', err);
+    return null;
+  }
+
+  try {
     const prevBatches = existing?.batches ?? [];
     const lastBatch = prevBatches[prevBatches.length - 1];
     const expectedStepStart = lastBatch?.stepEnd ?? 0;
 
-    // 幂等防脏写：本批起点必须严格接续末批终点
+    // 幂等防脏写（本地快速失败）：本批起点必须严格接续末批终点。
+    // 这是【串行重入 + 本地读到的水位】这一层的防线；并发交错的最终防线在底层写入的乐观水位门（见下方 saveRecord）。
     if (input.stepStart !== expectedStepStart) {
       console.warn(
         `[recordStore] appendBatch 脏写拒绝：stepStart=${input.stepStart} != 末批 stepEnd=${expectedStepStart}`,
@@ -375,7 +421,16 @@ export async function appendBatch(input: AppendBatchInput): Promise<SynapseRecor
     };
     const merged = [...prevBatches, newBatch];
     const record = buildRecord(input.conversationId, merged, nowSec());
-    await platform.conversation.saveRecord?.(toPersistShape(record));
+    // ★ R5 修复（问题4 下半）：把幂等水位门 expectedStepStart 下推到底层单次原子写入。
+    //   saveRecord 返回 false = DB 当前 total_steps != expectedStepStart（本批读取后已被并发的另一路压缩推进），
+    //   说明发生了交错并发——本路放弃写入（不后写覆盖先写），返回读取时的 existing 快照（合法压缩前状态）。
+    const wrote = await platform.conversation.saveRecord?.(toPersistShape(record, input.stepStart));
+    if (wrote === false) {
+      console.warn(
+        `[recordStore] appendBatch 并发水位门拒绝：DB 末批 stepEnd 已被另一路推进（expected=${input.stepStart}），放弃本批写入。`,
+      );
+      return existing;
+    }
     return record;
   } catch (err) {
     console.warn('[recordStore] appendBatch failed:', err);

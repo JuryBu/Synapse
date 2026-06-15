@@ -356,8 +356,21 @@ function getWebMock(): SynapseAPI {
         return filterWebConversationSummaries(matched, opts);
       },
       getRecord: async (conversationId: string) => readWebRecord(conversationId),
+      // ★ R5 崩溃恢复（Web 对等）：writeWebRecord 是单次 localStorage.setItem(整对象 JSON)，
+      //   整体写入即原子——与 Electron record:upsert 单语句对齐，配合 appendBatch 幂等保证「崩溃可恢复」。
       saveRecord: async (data: any) => {
         if (!data?.conversationId) return false;
+        // ★ R5 修复（问题1/4 Web 对等）：乐观并发水位门。appendBatch 传 expectedStepStart 时，
+        // 仅当现有 record 的 totalSteps（= 末批 stepEnd）等于本值才写入，否则返回 false（不写）——
+        // 与 Electron SQL `WHERE total_steps=?` 对齐，杜绝交错读改写后写覆盖先写。
+        // 不传（undefined）= 无条件整条覆盖（upsertRecord/clampToBatch），保持原语义。
+        if (typeof data.expectedStepStart === 'number') {
+          const current = readWebRecord(data.conversationId);
+          const currentSteps = current?.totalSteps ?? 0;
+          if (currentSteps !== data.expectedStepStart) {
+            return false;
+          }
+        }
         writeWebRecord(data.conversationId, {
           conversationId: data.conversationId,
           // M2-R1：batches 是真相源，必须存住，否则多批写回后再读退化回单批（与 Electron 行为分叉）。

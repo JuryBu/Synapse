@@ -364,29 +364,24 @@ export function registerConversationHandlers(): void {
     // 写入 / 覆盖 record（upsert 整条，调用方负责合并）。
     // M2-R1：batches_json（多批结构，真相源）+ record_schema_version 一并落盘；
     // content_md 仍写派生全文（v1 回滚保险 / 旧调用方兼容）。
+    // ★ R5 崩溃恢复依赖：这是【单条 INSERT...ON CONFLICT DO UPDATE】，better-sqlite3 单语句即单事务、
+    //   天然原子——进程在 .run() 中途崩溃不会留下半写的 batches_json（要么旧值、要么新值整体）。
+    //   recordStore.appendBatch 的「崩溃可恢复」正建立在此原子性 + 其幂等校验之上；
+    //   若将来拆成多条 SQL 写入，必须用 db.transaction(...) 包住，否则恢复保证破裂。
     ipcMain.handle('record:upsert', (_e, data: {
         conversationId: string; batches?: unknown[]; schemaVersion?: number;
         contentMd?: string; totalRounds?: number; totalSteps?: number;
         phases?: number; lastUpdatedRound?: number; timeSpan?: string; updatedAt?: number;
+        // ★ R5 修复（问题1/4）：可选乐观并发水位门。appendBatch 落新批时传入「期望的 DB 当前末批 stepEnd」
+        // (= 本批 stepStart)。仅当 DB 现有 total_steps（派生 = 末批 stepEnd）等于本值时才 DO UPDATE，
+        // 否则不写（changes=0 → 返回 false）。把幂等校验下推到这条【单条原子 upsert】的 WHERE，
+        // 杜绝「getRecord→内存合并→saveRecord」的交错读改写窗口（两路并发各自读到同一 priorSteps，
+        // 第一路写入推进 total_steps 后，第二路 WHERE 不匹配被拒，不再后写覆盖先写）。
+        // 不传（undefined）时保持原【无条件整条覆盖】语义（upsertRecord / clampToBatch 用），始终返回 true。
+        expectedStepStart?: number;
     }) => {
         if (!data?.conversationId) return false;
-        db.prepare(
-            `INSERT INTO records (
-              conversation_id, content_md, total_rounds, total_steps,
-              phases_json, last_updated_round, time_span, updated_at,
-              batches_json, record_schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(conversation_id) DO UPDATE SET
-              content_md = excluded.content_md,
-              total_rounds = excluded.total_rounds,
-              total_steps = excluded.total_steps,
-              phases_json = excluded.phases_json,
-              last_updated_round = excluded.last_updated_round,
-              time_span = excluded.time_span,
-              updated_at = excluded.updated_at,
-              batches_json = excluded.batches_json,
-              record_schema_version = excluded.record_schema_version`,
-        ).run(
+        const args = [
             data.conversationId,
             data.contentMd ?? '',
             data.totalRounds ?? 0,
@@ -399,8 +394,39 @@ export function registerConversationHandlers(): void {
             data.updatedAt ?? Math.floor(Date.now() / 1000),
             toJson(data.batches ?? null),
             data.schemaVersion ?? 2,
-        );
-        return true;
+        ];
+        const setClause = `
+              content_md = excluded.content_md,
+              total_rounds = excluded.total_rounds,
+              total_steps = excluded.total_steps,
+              phases_json = excluded.phases_json,
+              last_updated_round = excluded.last_updated_round,
+              time_span = excluded.time_span,
+              updated_at = excluded.updated_at,
+              batches_json = excluded.batches_json,
+              record_schema_version = excluded.record_schema_version`;
+        const hasGate = typeof data.expectedStepStart === 'number';
+        // 带水位门时：DO UPDATE 仅当现有 total_steps == expectedStepStart 才执行（WHERE 引用绑定参数 + 当前行列）。
+        // 注意：纯 INSERT（无冲突，首批且 expectedStepStart 应为 0）不受 WHERE 影响，照常插入。
+        const sql = hasGate
+            ? `INSERT INTO records (
+                  conversation_id, content_md, total_rounds, total_steps,
+                  phases_json, last_updated_round, time_span, updated_at,
+                  batches_json, record_schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET ${setClause}
+                  WHERE records.total_steps = ?`
+            : `INSERT INTO records (
+                  conversation_id, content_md, total_rounds, total_steps,
+                  phases_json, last_updated_round, time_span, updated_at,
+                  batches_json, record_schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET ${setClause}`;
+        if (hasGate) args.push(data.expectedStepStart as number);
+        const result = db.prepare(sql).run(...args);
+        // 带水位门时返回真实写入与否（changes=0 表示 WHERE 不匹配、被并发推进，未写）；
+        // 无水位门时整条覆盖必然生效，返回 true。
+        return hasGate ? result.changes > 0 : true;
     });
 
     // 删除某对话的 record（对话删除时已由外键级联，这里供显式失效用）

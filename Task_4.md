@@ -121,4 +121,12 @@
   - 核实：build EXIT0(1.67s)+electron:build tsc无error。
   - 📌 R4 low 小本本：estimateTokens 粗估对英文/JSON 系统性低估(首轮无API兜底偏弱,0.9阈值留余量)；per-message+4开销 system/tools 未计(量级可忽略)；判定仅 run 入口一次、不含本 run 内 tool round 增量(单次长 agentic run 循环中段可能超窗,首版可接受)。
   - ⏳ R4 真机验证(90%触发时机+多模态+少条超长截断)attach 到 record 体系完整链路一起验。
-  - 下一步：**R5**(fallback崩溃恢复:同步+可中止+回压缩前一刻)/R6(附件分离+存量迁移) → M2-3对话分支 → M2-5 worktree agent执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
+- 2026-06-16 ✅ **M2-R5 压缩 fallback 崩溃恢复落地**（ultracode：实现+对抗审查抓2 high+修复）：
+  - 可中止：recordGenerator callOnce/generateBatch 加 AbortSignal(Promise.race 3路:collect/60s timeout/abort，abort 调 client.abort() 断底层 fetch)；agentLoop stop() abort 压缩 controller。resolveClient 每次 new 独立 AIClient 故 abort 不误伤主对话。
+  - 回压缩前：generateBatch 失败/中止→null→不 appendBatch→record 维持压缩前，不丢 store.messages。
+  - 崩溃恢复：appendBatch 落库原子(Electron 单条 INSERT...ON CONFLICT DO UPDATE/Web localStorage 整对象写)+幂等(stepStart==末批stepEnd)；注释固化依赖。
+  - 🔴 对抗审查(wsp1fdb7u)抓 2 high 并修复：①压缩60s窗口期 isStreaming=false 可重入 run→appendBatch 并发丢批 → run 入口重入闸(this.running 拒二次进入)+setStreaming(true)提前到入口；②compressController 单字段被重入覆盖/finally误清 → 改 Set<AbortController>每run局部归属+stop()遍历abort全集；幂等校验下推 record:upsert 单SQL+expectedStepStart 水位门(防并发脏写,连带缓解 getRecord 吞错)。
+  - 核实：build EXIT0(2.67s)+electron:build tsc无error。
+  - 📌 R5 low 小本本：callOnce timeout/abort 回调无条件 client.abort()(已 settle 时 no-op 无害)；run() 非可重入(已加入口闸,UI isStreaming 串行化双保险)。
+  - ⏳ R5 真机验证(压缩中 stop 中断+重入被挡)attach record 体系完整链路。
+  - 下一步：**R6**(附件分离存储+存量迁移) → M2-3对话分支 → M2-5 worktree agent执行 → M2-6 复制消息+mode per-conv → M3 Multi-AI。
