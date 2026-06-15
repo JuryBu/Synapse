@@ -98,4 +98,6 @@
   - 用户答：git worktree **完整做**（含 M2-5 agent 在 worktree 执行）。
 - 2026-06-14 ✅ **M2-4 git worktree 管理后端完成**（ultracode workflow，5 agents）：`electron/ipc/worktree.ts`（list/create/remove/status IPC，child_process spawn 数组传参防注入、路径穿越双向校验、remove 默认不 force、`listWorktreePaths` 归属校验已接线 remove/status）+ main 注册 + preload + platform 抽象/Web 降级 + SettingsPanel「工作树」UI（纯加法不重构）+ tsconfig.electron 补 noUnusedLocals。编译 build+electron:build 过；3 skeptic 独立验证 + fix 修了归属校验(Task #19)。
   - 小本本(low)：spawn 加 killSignal 兜底超时；SAFE_NAME 拒前导连字符；runGit 剔除 env.GIT_DIR/GIT_WORK_TREE；status 已暴露未被 UI 消费(可等 M2-5)。
-  - ⏳ git worktree 真机验证（create/list/remove）攒到 M2-5 一起。下一步 **M2-5 agent 在 worktree 内执行**（架构级，单独一波）。
+  - ⏳ git worktree 真机验证（create/list/remove）攒到 M2-5 一起。
+- 2026-06-15 ✅ **M2 record 多批次重构方案已定**（对齐 MC红石AI c-r-m，用户拍板）→ 详见 `Plan/Plan_4/Plan_4_M2_对话体系对齐.md` §五【已定最终方案】。决策：record 多批次追加 + DB 懒迁移 + 渐进式读(token预算+头尾融合 / 按需展开 record_read 工具 / 正则骨架) + 90% B方案 + fallback崩溃恢复 + 附件分离(存量也迁移) + 分支parent。分 stage：**M2-R1~R7 + M2-3**，其后 M2-5(git worktree agent执行,绑定押"对话级"待确认)/M2-6/M3。
+  - 🌙 **晚上从 M2-R1 开始实现**（数据模型 + DB 懒迁移 + recordStore API：appendBatch/clampToBatch/getRecordSkeleton + 正则骨架）。设计 workflow 完整产出在 `tasks/wlxulkxne.output`（维度A/B/C + 综合蓝图）。
