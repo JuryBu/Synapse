@@ -19,7 +19,18 @@ export interface ToolSchema {
   };
 }
 
-export type ToolHandler = (args: Record<string, any>) => Promise<string>;
+/**
+ * 工具执行上下文（M2-5 worktree 按需 / M3 并行子代理隔离）。
+ * contextId = 「当前执行上下文 id」：现阶段 = conversationId（含 AUTOSAVE_ID），M3 阶段 = agentId/subagentId。
+ * 由 agentLoop 执行工具时显式注入（见 execute 的 contextId 参数），沿调用链传到需要它的 handler
+ * （worktree 根解析、cwd 解析、enter/exit_worktree），杜绝并行子代理共享全局态时互相串台。
+ * 显式参数传递而非模块级变量——避免多 AgentLoop 实例并发交错执行工具时单一全局槽位被覆盖。
+ */
+export interface ToolExecContext {
+  contextId?: string;
+}
+
+export type ToolHandler = (args: Record<string, any>, ctx?: ToolExecContext) => Promise<string>;
 
 type ToolCategory = 'file' | 'search' | 'command' | 'web' | 'learning' | 'custom';
 type ApprovalLevel = 'auto' | 'read' | 'write' | 'dangerous';
@@ -89,9 +100,11 @@ class ToolRegistry {
   }
 
   /**
-   * Execute tool with approval check + transparent retry
+   * Execute tool with approval check + transparent retry.
+   * @param contextId 当前执行上下文 id（agentLoop 注入；现阶段=conversationId，M3=agentId/subagentId）。
+   *        worktree 根/cwd 解析与 enter/exit_worktree 据此定位「本上下文」的活动 worktree，避免并行串台。
    */
-  async execute(name: string, args: Record<string, any>): Promise<string> {
+  async execute(name: string, args: Record<string, any>, contextId?: string): Promise<string> {
     const tool = this.tools.get(name);
     if (!tool) return `Error: Tool "${name}" not found`;
 
@@ -103,12 +116,13 @@ class ToolRegistry {
       }
     }
 
+    const ctx: ToolExecContext = { contextId };
     // Execute with retry
     let lastError = '';
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       try {
         const startTime = Date.now();
-        const result = await tool.handler(args);
+        const result = await tool.handler(args, ctx);
         const elapsed = Date.now() - startTime;
         // Attach execution time metadata
         return attempt > 0
@@ -162,9 +176,9 @@ toolRegistry.register({
       required: ['path'],
     },
   },
-}, async (args) => {
+}, async (args, ctx) => {
   const { fileSystem } = await import('./fileSystem');
-  const content = await fileSystem.readFile(args.path);
+  const content = await fileSystem.readFile(args.path, ctx?.contextId);
   if (!content) return `文件不存在: ${args.path}`;
 
   const lines = content.split('\n');
@@ -188,9 +202,19 @@ toolRegistry.register({
       required: ['path'],
     },
   },
-}, async (args) => {
-  const { fileSystem } = await import('./fileSystem');
-  const tree = await fileSystem.getWorkspaceTree();
+}, async (args, ctx) => {
+  const { fileSystem, getActiveRoots, resolveWorktreePath } = await import('./fileSystem');
+  // ★ medium#2 对称修复：本上下文有活动 worktree 时，list_dir 也重定向到该 worktree（与
+  //   view_file/write_to_file/run_command 口径一致），否则 AI 在 worktree 里 list_dir 会看到主工作区
+  //   目录树、再 view_file 同路径却读到 worktree 内容，列表与实际内容割裂、可能据错误清单决策。
+  //   无活动 worktree 时 rootOverride 为 undefined → getWorkspaceTree 走主工作区（行为同现状，零回归）。
+  let rootOverride: string | undefined;
+  const { activeWorktreePath } = await getActiveRoots(ctx?.contextId);
+  if (activeWorktreePath) {
+    // 把请求路径解析到 worktree 下作为取树根（args.path 为子目录时也能列 worktree 内对应子目录）。
+    rootOverride = await resolveWorktreePath(args.path, ctx?.contextId);
+  }
+  const tree = await fileSystem.getWorkspaceTree(rootOverride);
   if (!tree) return `目录不存在: ${args.path}`;
 
   const formatNode = (node: any, indent = ''): string => {
@@ -222,12 +246,14 @@ toolRegistry.register({
       required: ['path', 'content'],
     },
   },
-}, async (args) => {
+}, async (args, ctx) => {
   const { fileSystem } = await import('./fileSystem');
   let before = '';
   let existed = fileSystem.hasNode(args.path);
   try {
-    const existingContent = await fileSystem.readFile(args.path);
+    // M2-5：读旧内容做 diff 也走 worktree 重定向（与写入同上下文/同根），避免「拿主工作区旧内容 diff
+    //   worktree 新内容」的错位 diff。
+    const existingContent = await fileSystem.readFile(args.path, ctx?.contextId);
     const isWebMissingPreview = !existed && existingContent.startsWith('// 文件内容预览:');
     if (!isWebMissingPreview) {
       before = existingContent;
@@ -236,7 +262,7 @@ toolRegistry.register({
   } catch {
     existed = false;
   }
-  await fileSystem.writeFile(args.path, args.content);
+  await fileSystem.writeFile(args.path, args.content, ctx?.contextId);
   const snapshotId = generateChangeId('snapshot');
   const diffId = generateChangeId('diff');
   const beforeContent = existed ? before : '';
@@ -549,11 +575,25 @@ toolRegistry.register({
       required: ['command'],
     },
   },
-}, async (args) => {
+}, async (args, ctx) => {
   const { isElectron } = await import('@platform/index');
   if (isElectron && window.synapse) {
     try {
-      const result = await window.synapse.command.exec(args.command, args.cwd);
+      // M2-5：cwd 优先级 = 显式 args.cwd > 本上下文活动 worktree > 主工作区 currentPath。
+      // 都没有时传 undefined，主进程 command:exec 兜底 process.cwd()。
+      //
+      // ★ medium#1 显式行为变更（已记录为有意改进，非回归）：
+      //   旧链路 AI 几乎不传 cwd → undefined → 主进程落 process.cwd()（Electron 安装/启动目录，潜在 bug）。
+      //   新链路无活动 worktree 时落【已打开工作区 currentPath】，命令跑在用户工作区根而非安装目录——
+      //   方向正确（把「跑在安装目录」修成「跑在工作区」）。无 currentPath（未打开工作区）时仍回退 undefined
+      //   → process.cwd()，与现状一致。本变更已在 Task_4 显式记录。
+      let cwd: string | undefined = (typeof args.cwd === 'string' && args.cwd.trim()) ? args.cwd : undefined;
+      if (!cwd) {
+        const { getActiveRoots } = await import('./fileSystem');
+        const { activeWorktreePath, currentPath } = await getActiveRoots(ctx?.contextId);
+        cwd = activeWorktreePath ?? currentPath ?? undefined;
+      }
+      const result = await window.synapse.command.exec(args.command, cwd);
       const output = [
         result.stdout ? `📤 stdout:\n${result.stdout}` : '',
         result.stderr ? `⚠️ stderr:\n${result.stderr}` : '',
@@ -567,3 +607,135 @@ toolRegistry.register({
   // Web 模式 Mock
   return `⚠️ 命令执行请求: \`${args.command}\`\n工作目录: ${args.cwd || '(当前)'}\n\n[Web 模式下命令执行不可用，请使用 Electron 模式]`;
 }, 'command', 'dangerous');
+
+// --- Worktree Tools（M2-5：按需进入隔离工作树）---
+// 默认在主工作区改文件，行为与现状一致。仅当需要把改动隔离在独立分支/工作树里
+// （例如试验性大改、与主工作区并行、用户明确要求「在 worktree 里改」）时，才调 enter_worktree。
+// 进入后 view_file/write_to_file/run_command 的根路径自动重定向到该 worktree；exit_worktree 退回主工作区。
+
+/** 默认分支/工作树名：worktree 仓侧 SAFE_NAME 只允许 [A-Za-z0-9._-]，不能含 `/`，故用连字符。 */
+function defaultWorktreeBranch(): string {
+  const ts = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `synapse-wt-${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`;
+}
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'enter_worktree',
+    description:
+      '进入一个隔离的 git 工作树（worktree）在独立分支里改文件。'
+      + '【默认不需要】——一般小修小改直接在主工作区操作即可，不要调用本工具。'
+      + '仅在需要隔离改动时才用：例如做试验性/大范围改动想与主工作区分开、'
+      + '需要在一个独立分支上工作、或用户明确要求「在 worktree 里改」。'
+      + '进入后，view_file / write_to_file / run_command 的根路径会自动重定向到该 worktree 目录；'
+      + '改完可继续留着给用户看 diff，或调 exit_worktree 退回主工作区。'
+      + '相同 branch 已存在对应 worktree 时会直接复用而非重建。仅 Electron 桌面模式可用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        branch: {
+          type: 'string',
+          description: '分支名（可选，只允许字母/数字/点/连字符/下划线）。缺省自动生成 synapse-wt-<时间戳>。',
+        },
+      },
+      required: [],
+    },
+  },
+}, async (args, ctx) => {
+  const { isElectron, platform } = await import('@platform/index');
+  if (!isElectron || !platform.worktree) {
+    return '⚠️ git worktree 仅在 Electron 桌面模式下可用。当前为 Web 模式，已保持在主工作区（文件操作照常）。';
+  }
+
+  const { store } = await import('@/store');
+  const { enterWorktree } = await import('@/store/slices/worktreeSession');
+  const { addNotification } = await import('@/store/slices/notifications');
+  const { AUTOSAVE_ID } = await import('./conversationPersistence');
+  const state = store.getState() as any;
+  const repoRoot = (state?.workspace?.currentPath as string | null) ?? null;
+  if (!repoRoot) {
+    return '⚠️ 尚未打开工作区，无法进入 worktree。请先打开一个工作区（且该目录是 git 仓库），再重试。';
+  }
+
+  // contextId = 当前执行上下文（agentLoop 注入；现阶段=conversationId）。缺省时回退当前对话 id ?? AUTOSAVE_ID，
+  // 保证至少把活动 worktree 绑到一个稳定的上下文键上（与 record/autosave 回退口径一致）。
+  const contextId = ctx?.contextId
+    || ((state?.conversation?.id as string | null) || AUTOSAVE_ID);
+
+  const branch = (typeof args.branch === 'string' && args.branch.trim())
+    ? args.branch.trim()
+    : defaultWorktreeBranch();
+
+  // 先看该分支是否已有对应 worktree（复用，避免「目标路径已存在」报错）。
+  try {
+    const listed = await platform.worktree.list({ repoRoot });
+    if (!listed.error && Array.isArray(listed.worktrees)) {
+      const existing = listed.worktrees.find(wt => wt.branch === branch && !wt.bare);
+      if (existing) {
+        store.dispatch(enterWorktree({ contextId, path: existing.path, branch, repoRoot }));
+        // ★ medium#5：进入（复用）也给用户一条通知，让磁盘/git 状态变化可见（不止返回给 AI）。
+        store.dispatch(addNotification({
+          type: 'info',
+          title: '已进入 worktree',
+          message: `复用已有工作树（分支 ${branch}）：${existing.path}`,
+          duration: 4000,
+        }));
+        return `✅ 已复用并进入 worktree（分支 ${branch}）：\n${existing.path}\n\n后续 view_file/list_dir/write_to_file/run_command 将作用于此工作树。改完可调 exit_worktree 退回主工作区。`;
+      }
+    } else if (listed.error) {
+      return `⚠️ 无法进入 worktree：${listed.message || 'git worktree list 失败'}（已保持在主工作区）。`;
+    }
+  } catch (err: any) {
+    return `⚠️ 无法进入 worktree：${err?.message ?? err}（已保持在主工作区）。`;
+  }
+
+  // 未复用到 → 新建（git 写操作，approval=write 会触发用户确认）。
+  const created = await platform.worktree.create({ repoRoot, branch });
+  if (created.error || !created.path) {
+    return `⚠️ 创建 worktree 失败：${created.message || '未知错误'}（已保持在主工作区，文件操作照常）。`;
+  }
+  const createdBranch = created.branch ?? branch;
+  store.dispatch(enterWorktree({ contextId, path: created.path, branch: createdBranch, repoRoot }));
+  // ★ medium#5：创建成功后 dispatch 一条通知（与 M2-6 其它写操作的通知口径对齐），告知用户
+  //   「已在磁盘 X 路径创建工作树目录 + git 里新建分支 Y」，避免用户对磁盘/git 状态变化无感知。
+  store.dispatch(addNotification({
+    type: 'info',
+    title: '已创建并进入 worktree',
+    message: `新分支 ${createdBranch}，工作树目录：${created.path}`,
+    duration: 5000,
+  }));
+  return `✅ 已创建并进入 worktree（新分支 ${createdBranch}）：\n${created.path}\n\n后续 view_file/list_dir/write_to_file/run_command 将作用于此工作树（与主工作区隔离）。改完可调 exit_worktree 退回主工作区。`;
+}, 'command', 'write');
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'exit_worktree',
+    description:
+      '退出当前 worktree，让后续文件/命令操作回到主工作区。'
+      + '仅当之前调过 enter_worktree 进入了某 worktree 时才有意义；'
+      + '未处于任何 worktree 时调用是安全的空操作。'
+      + '注意：本工具只切换「当前作用目录」回主工作区，不会删除 worktree（worktree 及其分支仍在磁盘/git 里，'
+      + '可在设置-工作树里查看/删除，或之后再 enter_worktree 复用同一分支）。',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+}, async (_args, ctx) => {
+  const { store } = await import('@/store');
+  const { exitWorktree, selectWorktreeEntry } = await import('@/store/slices/worktreeSession');
+  const { AUTOSAVE_ID } = await import('./conversationPersistence');
+  const state = store.getState() as any;
+  const contextId = ctx?.contextId
+    || ((state?.conversation?.id as string | null) || AUTOSAVE_ID);
+  const prev = selectWorktreeEntry(state, contextId)?.activeWorktreePath ?? null;
+  if (!prev) {
+    return '当前已在主工作区（未处于任何 worktree），无需退出。';
+  }
+  store.dispatch(exitWorktree({ contextId }));
+  return `✅ 已退出 worktree，回到主工作区。后续 view_file/list_dir/write_to_file/run_command 将作用于主工作区。\n（刚才的 worktree 仍保留在磁盘与 git 中：${prev}）`;
+}, 'command', 'auto');

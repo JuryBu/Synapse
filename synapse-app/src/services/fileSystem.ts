@@ -6,6 +6,110 @@
 
 import { isElectron } from '@platform/index';
 
+// ==========================================
+// M2-5：活动 worktree 根解析（按需重定向，按执行上下文索引）
+// ==========================================
+//
+// 不默认绑 worktree。仅当当前执行上下文（contextId）处于某 worktree（worktreeSession.byContext[contextId] 存在）
+// 时，把 fs 工具（view_file/list_dir/write_to_file 经 readFile/listTree/writeFile）与 run_command 的根
+// 重定向到该 worktree；否则一切照旧走主工作区（workspace.currentPath），无活动 worktree 且无 currentPath 时
+// 与现状逐字节一致。
+//
+// contextId 由 agentLoop 执行工具时显式注入（见 toolRegistry.execute）。无 contextId 时按【无活动 worktree】
+// 处理（短路、零重定向）——保证现状/无上下文调用路径行为不变。
+
+import { selectWorktreeEntry } from '@/store/slices/worktreeSession';
+
+/** 路径是否为绝对路径（POSIX `/`、Windows 盘符 `X:\`、UNC `\\`）。渲染端无 node path，自己判。 */
+function isAbsolutePath(p: string): boolean {
+  return /^([a-zA-Z]:[\\/]|[\\/])/.test(p);
+}
+
+/** 末尾分隔符归一去掉，便于做前缀比较（保留盘符根如 `C:` 不动）。 */
+function stripTrailingSep(p: string): string {
+  return p.replace(/[\\/]+$/, '');
+}
+
+/**
+ * 取某执行上下文当前生效的「活动根」信息。
+ * 用动态 import 读 store，避免 fileSystem 单例在模块加载期与 store 形成初始化顺序耦合
+ * （与 toolRegistry 内动态 import store 的既有惯例一致）。
+ *
+ * @param contextId 当前执行上下文 id（缺省/无则按「无活动 worktree」处理）。
+ * 返回：
+ * - activeWorktreePath：本上下文活动 worktree 绝对路径（null = 无，走主工作区）。
+ * - repoRoot：进入该 worktree 时锚定的 git 仓根（绝对路径前缀重写以此为基准，不随工作区切换漂移）。
+ * - currentPath：实时主工作区路径（仅在无锚定 repoRoot 时回退作前缀基准）。
+ */
+export async function getActiveRoots(contextId?: string): Promise<{
+  activeWorktreePath: string | null;
+  repoRoot: string | null;
+  currentPath: string | null;
+}> {
+  try {
+    const { store } = await import('@/store');
+    const state = store.getState() as any;
+    const currentPath = (state?.workspace?.currentPath as string | null) ?? null;
+    const entry = selectWorktreeEntry(state, contextId);
+    return {
+      activeWorktreePath: entry?.activeWorktreePath ?? null,
+      repoRoot: entry?.repoRoot ?? null,
+      currentPath,
+    };
+  } catch {
+    // store 不可用（极端初始化时序）时安全降级为「无重定向」，保持现状行为。
+    return { activeWorktreePath: null, repoRoot: null, currentPath: null };
+  }
+}
+
+/**
+ * 把工具传入的 path 解析到当前上下文「活动 worktree」根下（仅 Electron 真实文件链路用）。
+ *
+ * 规则（无活动 worktree 时全部短路 → 与现状逐字节一致）：
+ * 1. 无 activeWorktreePath（含无 contextId）：原样返回 path（主工作区行为，主进程 resolveFilePath 照旧）。
+ * 2. 有 activeWorktreePath：
+ *    - 相对路径 → 拼到 activeWorktreePath 下；
+ *    - 绝对路径且位于「进入时锚定的 repo 根 repoRoot 下」→ 把前缀 repoRoot 重写为 activeWorktreePath
+ *      （worktree 是主工作区同名分支副本，同一相对位置在两边都存在 → AI 沿用工作区内绝对路径也能落对）；
+ *    - 其它绝对路径（worktree 内绝对路径 / 工作区外路径 / `~`）→ 原样返回，不强行改写。
+ *
+ * ★ medium#6 修复：绝对路径前缀基准用【进入 worktree 时锚定的 repoRoot】而非【实时 workspace.currentPath】。
+ *   否则进入 worktree 后用户切了工作区（currentPath 变了），相对路径仍拼到旧 worktree、绝对路径却因前缀对
+ *   不上而落到新工作区，出现「相对进旧 worktree、绝对进新工作区」的割裂。锚定 repoRoot 让前缀基准在整段
+ *   worktree 生命周期内一致。repoRoot 缺失（旧条目/异常）时回退实时 currentPath，行为不劣于改前。
+ */
+export async function resolveWorktreePath(rawPath: string, contextId?: string): Promise<string> {
+  if (typeof rawPath !== 'string' || !rawPath) return rawPath;
+  const { activeWorktreePath, repoRoot, currentPath } = await getActiveRoots(contextId);
+  if (!activeWorktreePath) return rawPath; // 无活动 worktree：照旧。
+
+  // `~` 交主进程展开，不在渲染端改写。
+  if (rawPath === '~' || rawPath.startsWith('~/') || rawPath.startsWith('~\\')) return rawPath;
+
+  const root = stripTrailingSep(activeWorktreePath);
+
+  if (!isAbsolutePath(rawPath)) {
+    // 相对路径：拼到活动 worktree 根下（统一用 `/`，主进程 path.resolve 再归一）。
+    const rel = rawPath.replace(/^[\\/]+/, '');
+    return `${root}/${rel}`;
+  }
+
+  // 绝对路径且在「进入时锚定的 repo 根」下 → 把前缀换成 worktree 根（同名相对位置在 worktree 里）。
+  const base = repoRoot ?? currentPath;
+  if (base) {
+    const baseStripped = stripTrailingSep(base);
+    const norm = rawPath.replace(/\\/g, '/');
+    const baseNorm = baseStripped.replace(/\\/g, '/');
+    if (norm === baseNorm) return root;
+    if (norm.toLowerCase().startsWith(`${baseNorm.toLowerCase()}/`)) {
+      return `${root}/${norm.slice(baseNorm.length + 1)}`;
+    }
+  }
+
+  // worktree 内绝对路径 / 工作区外绝对路径：尊重原样。
+  return rawPath;
+}
+
 export interface FileNode {
   name: string;
   path: string;
@@ -224,9 +328,10 @@ class FileSystemService {
     return node?.children ?? this.fileTree.children ?? [];
   }
 
-  async readFile(filePath: string): Promise<string> {
+  async readFile(filePath: string, contextId?: string): Promise<string> {
     if (isElectron && window.synapse) {
-      return await window.synapse.file.read(filePath);
+      // M2-5：本上下文有活动 worktree 时重定向到该 worktree（无则原样透传，行为同现状）。
+      return await window.synapse.file.read(await resolveWorktreePath(filePath, contextId));
     }
     if (this.memoryFiles.has(filePath)) {
       return this.memoryFiles.get(filePath)!;
@@ -280,9 +385,10 @@ class FileSystemService {
     }
   }
 
-  async writeFile(filePath: string, content: string): Promise<void> {
+  async writeFile(filePath: string, content: string, contextId?: string): Promise<void> {
     if (isElectron && window.synapse) {
-      const result = await window.synapse.file.write(filePath, content);
+      // M2-5：本上下文有活动 worktree 时重定向到该 worktree（无则原样透传，行为同现状）。
+      const result = await window.synapse.file.write(await resolveWorktreePath(filePath, contextId), content);
       if (result && typeof result === 'object' && 'error' in result && result.error) {
         throw new Error(result.message || '文件写入失败');
       }
@@ -421,8 +527,19 @@ class FileSystemService {
     return results;
   }
 
-  async getWorkspaceTree(): Promise<FileNode> {
+  /**
+   * 取工作区目录树。
+   * @param rootOverride 可选：显式指定取树的根（仅 Electron）。
+   *   - 不传（UI 文件树面板 / QuickOpen / Synopsis 等）：取【主工作区】树，并刷新 this.fileTree 缓存（行为同现状）。
+   *   - 传值（M2-5 list_dir 在本上下文有活动 worktree 时传 worktree 根）：仅取该根下的树并直接返回，
+   *     【不】污染 this.fileTree / workspaceTrees 缓存——避免把 worktree 树写进 UI 主工作区文件树面板。
+   */
+  async getWorkspaceTree(rootOverride?: string): Promise<FileNode> {
     if (isElectron && window.synapse?.workspace) {
+      if (rootOverride) {
+        // worktree 根专用：取树即返回，不写主工作区缓存（list_dir 用，UI 面板不受影响）。
+        return await window.synapse.workspace.tree(rootOverride);
+      }
       const tree = await window.synapse.workspace.tree(this.getCurrentWorkspacePath());
       this.fileTree = tree;
       this.workspaceTrees.set(this.currentWorkspace, tree);

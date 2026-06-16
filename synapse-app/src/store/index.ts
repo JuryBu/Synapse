@@ -8,6 +8,7 @@ import { settingsSlice } from './slices/settings';
 import { themeSlice } from './slices/theme';
 import { notificationsSlice } from './slices/notifications';
 import { workspaceSlice } from './slices/workspace';
+import { worktreeSessionSlice } from './slices/worktreeSession';
 import { editorTabsSlice } from './slices/editorTabs';
 import multiAIReducer, { BUILT_IN_MODES } from './slices/multiAI';
 import { normalizeModelOption } from '@/services/modelCapabilities';
@@ -207,6 +208,8 @@ export const store = configureStore({
     theme: themeSlice.reducer,
     notifications: notificationsSlice.reducer,
     workspace: workspaceSlice.reducer,
+    // M2-5：会话级活动 worktree 运行态（不持久化；前缀 worktreeSession/ 不入 persistMiddleware）。
+    worktreeSession: worktreeSessionSlice.reducer,
     editorTabs: editorTabsSlice.reducer,
     multiAI: multiAIReducer,
   },

@@ -31,7 +31,12 @@ export interface ToolDefinition {
 }
 
 export interface ToolExecutor {
-  (name: string, args: Record<string, any>): Promise<string>;
+  /**
+   * @param contextId 当前执行上下文 id（worktree 按需 / M3 并行子代理隔离用）：
+   *   透传给 toolRegistry.execute，由 worktree 相关工具据此定位「本上下文」的活动 worktree，避免并行串台。
+   *   现阶段 = conversationId（含 AUTOSAVE_ID），M3 阶段 = agentId/subagentId。
+   */
+  (name: string, args: Record<string, any>, contextId?: string): Promise<string>;
 }
 
 const MAX_TOOL_ROUNDS = 25;
@@ -288,6 +293,13 @@ export class AgentLoop {
   private toolExecutor: ToolExecutor | null = null;
   private running = false;
   /**
+   * M2-5 / M3：本 AgentLoop 实例的【执行上下文 id】。
+   * - 单 agent（主对话）：构造时不传 → 执行工具时回退当前对话 id（conversation.id ?? AUTOSAVE_ID），
+   *   worktree 活动态随对话身份走，与「切换对话不串台」配套。
+   * - M3 子代理：构造时传 subagentId → 每个子代理实例各自一个稳定 contextId，并行 enter_worktree 互不覆盖。
+   */
+  private readonly contextId?: string;
+  /**
    * R5 压缩点专用中止器【集合】：每个在途的【record 压缩 LLM 生成】（generateBatch）登记一个独立 controller。
    * 与 this.client（主对话 client）相互独立——主对话靠 this.client.abort()，压缩靠这里。
    *
@@ -300,8 +312,9 @@ export class AgentLoop {
    */
   private compressControllers = new Set<AbortController>();
 
-  constructor(client: AIClient) {
+  constructor(client: AIClient, opts?: { contextId?: string }) {
     this.client = client;
+    this.contextId = opts?.contextId;
   }
 
   registerTools(tools: ToolDefinition[], executor: ToolExecutor) {
@@ -903,11 +916,17 @@ export class AgentLoop {
 
       // Execute tool calls if any
       if (pendingToolCalls.length > 0 && this.toolExecutor) {
+        // M2-5 / M3：本轮工具执行的上下文 id。优先实例 contextId（M3 子代理各自固定），
+        // 否则回退【执行此刻】的当前对话 id ?? AUTOSAVE_ID——worktree 活动态随对话身份走，
+        // 与「切换对话清 worktree（不串台）」配套，且新对话（id=null）也有稳定键 AUTOSAVE_ID。
+        const execContextId = this.contextId
+          || ((store.getState() as RootState).conversation?.id as string | null)
+          || AUTOSAVE_ID;
         for (const tc of pendingToolCalls) {
           if (!this.running) break;
           try {
             const args = JSON.parse(tc.function.arguments);
-            const result = await this.toolExecutor(tc.function.name, args);
+            const result = await this.toolExecutor(tc.function.name, args, execContextId);
             const fileChanges = consumeTrackedFileChanges();
             for (const change of fileChanges) {
               store.dispatch(recordFileSnapshot(change.snapshot));

@@ -9,6 +9,7 @@ import type { ConversationSummary } from '@/store/slices/conversationHistory';
 import { removeConversation, setConversations, setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
 import { clearConversation, setConversation } from '@/store/slices/conversation';
 import { setMode, setReasoningEffort } from '@/store/slices/agentSettings';
+import { exitWorktree } from '@/store/slices/worktreeSession';
 import { addNotification } from '@/store/slices/notifications';
 import {
   AUTOSAVE_ID,
@@ -189,6 +190,12 @@ export function ConversationList() {
     // ★ M2-6 切换竞态：同 handleSwitchConversation，置闸覆盖 saveCurrentToHistory(可能 fork+clearAutosave)
     //   到 clearConversation/重置 的整段窗口，挡住旧对话迟到 autosave debounce 复活 AUTOSAVE_ID 草稿。
     beginConversationSwitch();
+    // ★ M2-5 worktree 止血：对话身份变化（新建）即回主工作区——清掉【离开的对话】的活动 worktree 条目。
+    //   即便治本已按 contextId 索引，新对话与 autosave 草稿共用 AUTOSAVE_ID 这个 contextId，
+    //   不清则新对话会继承上一条 autosave 对话的 worktree 重定向（串台），故必须显式 exit。
+    const leavingContextId = (currentConversationRef.current.id as string | null) || AUTOSAVE_ID;
+    dispatch(exitWorktree({ contextId: leavingContextId }));
+    dispatch(exitWorktree({ contextId: AUTOSAVE_ID }));
     try {
       await saveCurrentToHistory();
       dispatch(clearConversation());
@@ -210,6 +217,12 @@ export function ConversationList() {
     //   → setConversation(新对话)」整段异步窗口。其间 AgentPanel 旧对话的 700ms autosave debounce 即便迟到触发，
     //   saveAutosaveSnapshot 也会因闸门跳过对 AUTOSAVE_ID 行的写入，杜绝复活已 fork 的草稿。finally 复位。
     beginConversationSwitch();
+    // ★ M2-5 worktree 止血：切到另一对话即回主工作区——清掉【离开的对话】+ AUTOSAVE_ID 的活动 worktree 条目。
+    //   防 autosave 草稿（共用 AUTOSAVE_ID）的 worktree 重定向被切入对话误继承。切入对话若自身有条目，
+    //   按 contextId 索引天然各自独立、不受影响。
+    const leavingContextId = (currentConversationRef.current.id as string | null) || AUTOSAVE_ID;
+    dispatch(exitWorktree({ contextId: leavingContextId }));
+    dispatch(exitWorktree({ contextId: AUTOSAVE_ID }));
     try {
       await saveCurrentToHistory();
       const snapshot = await loadConversationSnapshot(id);

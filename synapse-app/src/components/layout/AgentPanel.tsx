@@ -23,6 +23,7 @@ import { AgentLoop } from '@/services/agentLoop';
 import { toolRegistry } from '@/services/toolRegistry';
 import { addNotification } from '@/store/slices/notifications';
 import { clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, updateDiffStatus, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { exitWorktree } from '@/store/slices/worktreeSession';
 import { countConversationTokens, MAX_CONTEXT_TOKENS } from '@/services/systemPrompt';
 import { conversationExporter } from '@/services/conversationExporter';
 import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, migrateSnapshotAttachments, branchConversation, beginConversationSwitch, endConversationSwitch, AUTOSAVE_ID } from '@/services/conversationPersistence';
@@ -218,10 +219,18 @@ export function AgentPanel() {
     const loop = new AgentLoop(aiClient);
     loop.registerTools(
       toolRegistry.getSchemas() as any[],
-      (name, args) => toolRegistry.execute(name, args),
+      // M2-5：透传 agentLoop 注入的 contextId，让 worktree 工具按本上下文定位活动 worktree（并行不串台）。
+      (name, args, contextId) => toolRegistry.execute(name, args, contextId),
     );
     // P1-3: 设置审批回调（弹出确认对话框）
     toolRegistry.setApprovalCallback(async (toolName, args, level) => {
+      // ★ medium#5：worktree 创建是真实 git 写盘 + 建新分支，通用「执行工具」文案会让用户误以为是无害模式切换。
+      //   给 enter_worktree 定制说明，明确「会在磁盘建工作树目录 + git 里新建/复用分支」，降低误批风险。
+      if (toolName === 'enter_worktree') {
+        const branch = typeof args?.branch === 'string' && args.branch.trim() ? args.branch.trim() : '（自动生成时间戳分支）';
+        const msg = `AI 请求进入 git worktree（隔离工作树）\n\n这会在磁盘 userData/worktrees 下创建一个工作树目录，并在当前仓库新建（或复用已有）分支：\n  分支：${branch}\n\n进入后 AI 的文件读写/命令将作用于该工作树（与主工作区隔离），而非直接改主工作区。是否同意？`;
+        return window.confirm(msg);
+      }
       const msg = `AI 请求执行工具 "${toolName}"（权限: ${level}）\n参数: ${JSON.stringify(args, null, 2).slice(0, 200)}`;
       return window.confirm(msg);
     });
@@ -375,6 +384,13 @@ export function AgentPanel() {
     // ★ M2-6 切换竞态：置闸覆盖 save(可能 fork+clearAutosave) → clearConversation/重置 整段窗口，
     //   挡住旧对话迟到 autosave debounce 复活 AUTOSAVE_ID 草稿（与 ConversationList 两入口口径一致）。finally 复位。
     beginConversationSwitch();
+    // ★ M2-5 worktree 止血：新建对话即回主工作区——清掉【离开的对话】+ AUTOSAVE_ID 的活动 worktree 条目，
+    //   防新对话（共用 AUTOSAVE_ID contextId）继承上一条 autosave 对话的 worktree 重定向（串台）。
+    {
+      const leavingContextId = (conversationRef.current.id as string | null) || AUTOSAVE_ID;
+      dispatch(exitWorktree({ contextId: leavingContextId }));
+      dispatch(exitWorktree({ contextId: AUTOSAVE_ID }));
+    }
     try {
       const cur = conversationRef.current;
       if ((cur.messages?.length ?? 0) > 0) {
@@ -610,6 +626,14 @@ export function AgentPanel() {
     // ★ M2-6 切换竞态：autosave 源分支会 clearAutosaveSnapshot()+promotion(fork 真实 id)+setConversation，
     //   与切换/新建同构，置闸覆盖整段，挡住旧对话迟到 autosave debounce 复活 AUTOSAVE_ID 草稿。finally 复位。
     beginConversationSwitch();
+    // ★ M2-5 worktree 止血：分支切到新对话即回主工作区——清掉源对话 + AUTOSAVE_ID 的活动 worktree 条目。
+    //   分支是【新对话】，应从主工作区起步，不继承源对话的 worktree 重定向（避免新分支误写进源的隔离分支）。
+    //   promotion（autosave 源 fork 成真实 id）会改变 contextId，这里把源侧两个可能的键都清干净。
+    {
+      const leavingContextId = (conversationRef.current.id as string | null) || AUTOSAVE_ID;
+      dispatch(exitWorktree({ contextId: leavingContextId }));
+      dispatch(exitWorktree({ contextId: AUTOSAVE_ID }));
+    }
     void (async () => {
       try {
         const snapshotMessages = conversationRef.current.messages;
