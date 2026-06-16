@@ -45,11 +45,26 @@ export type ToolHandler = (args: Record<string, any>, ctx?: ToolExecContext) => 
 type ToolCategory = 'file' | 'search' | 'command' | 'web' | 'learning' | 'custom';
 type ApprovalLevel = 'auto' | 'read' | 'write' | 'dangerous';
 
+/**
+ * ★ high#4（M3-2c 审查）工具权限类别——与 SubagentConfig.toolPermissions 联合类型严格对齐
+ *   （'read' | 'write' | 'command' | 'search' | 'generate'）。子代理工具闸门据此过滤：
+ *   编辑器 SubagentForm 勾选的 toolPermissions 决定该子代理运行时能拿到哪些工具，使「编辑承诺」与
+ *   「运行消费」契约对齐（不再呈现一个运行期被静默忽略的权限闸门）。
+ *   注意：spawn_subagent 不归任何权限类别（permissionCategory 为 undefined），其可用性只由 maxDepth 控制，
+ *   不被 toolPermissions 过滤（否则会与 M3-1a 派发深度语义冲突）。
+ */
+export type ToolPermissionCategory = 'read' | 'write' | 'command' | 'search' | 'generate';
+
 interface RegisteredTool {
   schema: ToolSchema;
   handler: ToolHandler;
   category: ToolCategory;
   approvalLevel: ApprovalLevel;
+  /**
+   * ★ high#4 子代理工具权限闸门所属类别（与 SubagentConfig.toolPermissions 对齐）。
+   *   undefined = 不归任何权限类别（如 spawn_subagent 由 maxDepth 控制，不参与 toolPermissions 过滤）。
+   */
+  permissionCategory?: ToolPermissionCategory;
 }
 
 // Approval callback — set by UI to show confirmation dialog.
@@ -72,8 +87,9 @@ class ToolRegistry {
     handler: ToolHandler,
     category: ToolCategory = 'custom',
     approvalLevel: ApprovalLevel = 'auto',
+    permissionCategory?: ToolPermissionCategory,
   ) {
-    this.tools.set(schema.function.name, { schema, handler, category, approvalLevel });
+    this.tools.set(schema.function.name, { schema, handler, category, approvalLevel, permissionCategory });
   }
 
   get(name: string): RegisteredTool | undefined {
@@ -82,6 +98,27 @@ class ToolRegistry {
 
   getSchemas(): ToolSchema[] {
     return Array.from(this.tools.values()).map(t => t.schema);
+  }
+
+  /**
+   * ★ high#4 子代理工具闸门：按权限类别集合过滤工具 schema。
+   *   - 仅返回 permissionCategory ∈ allowed 的工具（与 SubagentConfig.toolPermissions 对齐）；
+   *   - permissionCategory 为 undefined 的工具（如 spawn_subagent）【不】由此过滤——其可用性由调用方
+   *     （buildSubagentTools）按 maxDepth 单独决定，故这里一律剔除，交由调用方按需补回；
+   *   - allowed 为空 → 不返回任何带权限类别的工具（子代理被收紧到无文件/搜索/命令权限）。
+   */
+  getSchemasForPermissions(allowed: ReadonlyArray<ToolPermissionCategory>): ToolSchema[] {
+    const allowSet = new Set(allowed);
+    return Array.from(this.tools.values())
+      .filter(t => t.permissionCategory !== undefined && allowSet.has(t.permissionCategory))
+      .map(t => t.schema);
+  }
+
+  /** ★ high#4：取无权限类别（不参与 toolPermissions 过滤）的工具 schema，如 spawn_subagent。 */
+  getUncategorizedSchemas(): ToolSchema[] {
+    return Array.from(this.tools.values())
+      .filter(t => t.permissionCategory === undefined)
+      .map(t => t.schema);
   }
 
   /**
@@ -202,7 +239,7 @@ toolRegistry.register({
   const slice = lines.slice(start, end);
 
   return `文件: ${args.path} (行 ${start + 1}-${end}/${lines.length})\n\n${slice.join('\n')}`;
-}, 'file', 'read');
+}, 'file', 'read', 'read');
 
 toolRegistry.register({
   type: 'function',
@@ -245,7 +282,7 @@ toolRegistry.register({
   };
 
   return `目录: ${args.path}\n\n${formatNode(tree)}`;
-}, 'file', 'read');
+}, 'file', 'read', 'read');
 
 toolRegistry.register({
   type: 'function',
@@ -305,7 +342,7 @@ toolRegistry.register({
     },
   }, ctx?.contextId);
   return `✅ 已写入文件: ${args.path} (${args.content.length} 字符)`;
-}, 'file', 'write');
+}, 'file', 'write', 'write');
 
 // --- Search Tools ---
 
@@ -330,7 +367,7 @@ toolRegistry.register({
     return `未找到包含 "${args.query}" 的文件`;
   }
   return `搜索 "${args.query}" 找到 ${results.length} 个结果:\n${results.map((r: any) => `- ${r.path}: ${r.match}`).join('\n')}`;
-}, 'search', 'read');
+}, 'search', 'read', 'search');
 
 // --- Learning Tools ---
 
@@ -352,7 +389,7 @@ toolRegistry.register({
   const fileName = args.file;
   const page = args.page || 1;
   return `📚 课件: ${fileName} (第 ${page} 页)\n\n[此功能需要 Electron 环境支持文件解析]\n提示: 在 Electron 模式下，此工具将使用 pdf.js / mammoth / pptx-parser 解析课件内容。`;
-}, 'learning', 'read');
+}, 'learning', 'read', 'read');
 
 toolRegistry.register({
   type: 'function',
@@ -370,7 +407,7 @@ toolRegistry.register({
   },
 }, async (args) => {
   return `📋 知识概要 - ${args.file}\n模式: ${args.mode || 'brief'}\n\n[此功能需要 Synopsis 引擎支持]\n提示: Synopsis 引擎将使用 Map-Reduce 策略对课件进行多模态概要生成。`;
-}, 'learning', 'auto');
+}, 'learning', 'auto', 'generate');
 
 toolRegistry.register({
   type: 'function',
@@ -390,7 +427,7 @@ toolRegistry.register({
 }, async (args) => {
   const count = args.count || 5;
   return `🎯 练习题生成请求\n主题: ${args.topic}\n数量: ${count}\n难度: ${args.difficulty || 'medium'}\n\n[AI 将基于课程上下文直接生成练习题，无需额外工具调用]`;
-}, 'learning', 'auto');
+}, 'learning', 'auto', 'generate');
 
 // --- Memory Tools（M1 上下文 harness：Synapse 内置 AI 主动记忆）---
 // ⚠️ 这是 Synapse 内置记忆，存本地 SQLite（Web 模式存 localStorage），独立于用户环境里
@@ -441,7 +478,7 @@ toolRegistry.register({
   if (!saved) return '⚠️ 记忆写入失败（记忆是辅助层，不影响当前对话继续进行）。';
   const tagStr = saved.tags.length ? ` [${saved.tags.join(', ')}]` : '';
   return `✅ 已记入 Synapse 记忆库 (id=${saved.id}, 分类=${saved.category}${saved.pinned ? ', 置顶' : ''})${tagStr}\n标题: ${saved.title}`;
-}, 'custom', 'auto');
+}, 'custom', 'auto', 'write');
 
 toolRegistry.register({
   type: 'function',
@@ -481,7 +518,7 @@ toolRegistry.register({
     return `${i + 1}. ${pin}${m.title} (${m.category})${tagStr}\n   ${m.content.replace(/\s+/g, ' ').slice(0, 300)}`;
   });
   return `🧠 Synapse 记忆库命中 ${results.length} 条:\n\n${lines.join('\n\n')}`;
-}, 'custom', 'auto');
+}, 'custom', 'auto', 'search');
 
 // --- Record Tools（M2-R3 渐进式读：按需展开骨架批次）---
 // record 历史摘要注入时，中段较老的批次被降级为「骨架」（只有标题 + 首行要点）以控制注入膨胀。
@@ -522,7 +559,7 @@ toolRegistry.register({
     return `未找到批次 ${batchIndex} 的全文（该批可能不存在、已被回溯裁剪，或当前对话无 record）。`;
   }
   return `📜 批次 ${batchIndex} 完整过程日志:\n\n${contentMd}`;
-}, 'custom', 'auto');
+}, 'custom', 'auto', 'read');
 
 // --- Web Tools ---
 
@@ -541,7 +578,7 @@ toolRegistry.register({
   },
 }, async (args) => {
   return `🔍 网页搜索: "${args.query}"\n\n[Web 搜索功能需要配置搜索 API]\n提示: 支持接入 Serper/Tavily 等搜索 API。`;
-}, 'web', 'auto');
+}, 'web', 'auto', 'search');
 
 toolRegistry.register({
   type: 'function',
@@ -572,7 +609,7 @@ toolRegistry.register({
   } catch (err: any) {
     return `读取 URL 失败: ${err.message}`;
   }
-}, 'web', 'auto');
+}, 'web', 'auto', 'read');
 
 // --- Command Tools ---
 
@@ -621,7 +658,7 @@ toolRegistry.register({
   }
   // Web 模式 Mock
   return `⚠️ 命令执行请求: \`${args.command}\`\n工作目录: ${args.cwd || '(当前)'}\n\n[Web 模式下命令执行不可用，请使用 Electron 模式]`;
-}, 'command', 'dangerous');
+}, 'command', 'dangerous', 'command');
 
 // --- Worktree Tools（M2-5：按需进入隔离工作树）---
 // 默认在主工作区改文件，行为与现状一致。仅当需要把改动隔离在独立分支/工作树里
@@ -722,7 +759,7 @@ toolRegistry.register({
     duration: 5000,
   }));
   return `✅ 已创建并进入 worktree（新分支 ${createdBranch}）：\n${created.path}\n\n后续 view_file/list_dir/write_to_file/run_command 将作用于此工作树（与主工作区隔离）。改完可调 exit_worktree 退回主工作区。`;
-}, 'command', 'write');
+}, 'command', 'write', 'command');
 
 toolRegistry.register({
   type: 'function',
@@ -753,7 +790,7 @@ toolRegistry.register({
   }
   store.dispatch(exitWorktree({ contextId }));
   return `✅ 已退出 worktree，回到主工作区。后续 view_file/list_dir/write_to_file/run_command 将作用于主工作区。\n（刚才的 worktree 仍保留在磁盘与 git 中：${prev}）`;
-}, 'command', 'auto');
+}, 'command', 'auto', 'command');
 
 // --- Multi-AI Tools（M3-1a 真子代理：派发独立子代理执行任务）---
 // spawn_subagent：主 AI / 上层子代理调用，派一个独立子代理（独立上下文 + 工具循环）执行任务，
@@ -824,7 +861,9 @@ toolRegistry.register(
         role,
         model,
         systemPrompt: `你是一个「${role}」角色的子代理，独立完成主代理交给你的任务，完成后返回结构化报告。`,
-        toolPermissions: ['read', 'search', 'write', 'command'],
+        // ★ high#4：主 AI 经 spawn_subagent 工具直派的通用子代理给【全量】工具权限类别——与旧行为
+        //   （全量工具集）一致，零回归；工具闸门精细约束只作用于工作流编辑器里逐项勾选的子代理。
+        toolPermissions: ['read', 'search', 'write', 'command', 'generate'],
         maxTokens,
         maxDepth: childMaxDepth,
       },

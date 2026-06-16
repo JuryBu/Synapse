@@ -34,12 +34,17 @@ import {
 import type { WallpaperImage } from '@/store/slices/agentSettings';
 import {
   addMode,
+  removeMode,
   setActiveMode,
   setDefaultSubagentMaxTokens,
   setMaxConcurrentSubagents,
   setMultiAIEnabled,
   setSubagentDefaultModel,
+  updateMode,
 } from '@/store/slices/multiAI';
+import type { MultiAIMode, WorkflowNode } from '@/store/slices/multiAI';
+import { MULTI_AI_TRIGGER_PREFIX } from '@/services/multiAITrigger';
+import { WorkflowEditor } from './WorkflowEditor';
 import { AIClient } from '@/services/aiClient';
 import { describeCapabilities } from '@/services/modelCapabilities';
 import type { AIModelOption } from '@/types/aiModel';
@@ -47,6 +52,19 @@ import { addNotification } from '@/store/slices/notifications';
 import { isElectron, platform } from '@/platform';
 import type { PlatformInfo, WorktreeEntry } from '@/platform';
 import '@/styles/settings.css';
+
+/**
+ * ★ M3-2c#fix 唯一 id 生成（时间戳 + 模块级自增 + 随机后缀）。
+ *   旧实现用 `wf-${Date.now()}` / `agent-${Date.now()}` / `sub-${Date.now()}`：同一毫秒内两次点击
+ *   「新建模板」或「新建」紧接「复制为模板」会产出完全相同的 mode id，导致 updateMode(find by id) /
+ *   removeMode(filter by id) 命中两条、列表 React key 重复、reload 后无法区分。加自增序号 + 随机后缀
+ *   保证同毫秒多次创建仍唯一（与 WorkflowEditor.genId 同款思路）。
+ */
+let multiAiIdSeq = 0;
+function genUniqueId(prefix: string): string {
+  multiAiIdSeq += 1;
+  return `${prefix}-${Date.now().toString(36)}-${multiAiIdSeq}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 type PluginEntry = {
   name: string;
@@ -163,6 +181,14 @@ export function SettingsPanel() {
   const agentSettings = useAppSelector((s: RootState) => (s as any).agentSettings);
   const multiAI = useAppSelector((s: RootState) => (s as any).multiAI);
   const [activeTab, setActiveTab] = useState('general');
+  // ★ M3-2c：当前正在编辑的工作流模板 id（null=显示模式列表，否则显示 WorkflowEditor）。
+  const [editingModeId, setEditingModeId] = useState<string | null>(null);
+  /**
+   * ★ M3-2c#fix「新建未保存」草稿：新建/复制为模板时【不立即 addMode】（避免「新建→取消」在
+   *   列表/localStorage 留下永久空壳）。草稿仅存本地 state，进编辑器编辑；onSave 才 addMode 落库，
+   *   onCancel 直接丢弃。draftMode 非空时编辑器以它为数据源（其 id 不在 modes 里）。
+   */
+  const [draftMode, setDraftMode] = useState<MultiAIMode | null>(null);
   const [availableModels, setLocalAvailableModels] = useState<AIModelOption[]>(agentSettings.availableModels ?? []);
   const [loadingModels, setLoadingModels] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
@@ -388,23 +414,92 @@ export function SettingsPanel() {
     dispatch(addNotification({ type: 'success', title: 'Synopsis 设置已保存', message: '参数已写入本地设置' }));
   }, [dispatch]);
 
-  const createLocalMultiAIMode = useCallback(() => {
+  // ★ M3-2c：新建一个空白固定工作流模板（带一个默认 agent 节点起步），创建后直接进入编辑器。
+  // ★ M3-2c#fix：不再立即 addMode——构造为本地草稿（draftMode），onSave 才落库、onCancel 直接丢弃，
+  //   彻底消除「新建 → 取消」在列表/localStorage 残留空壳模板的问题。id 用唯一生成防同毫秒碰撞。
+  const createWorkflowTemplate = useCallback(() => {
     const nextIndex = (multiAI?.modes || []).filter((mode: any) => !mode.isBuiltIn && !mode.isBuiltin).length + 1;
-    const mode = {
-      id: `local-${Date.now()}`,
-      name: `自定义模式 ${nextIndex} (暂存本地)`,
-      description: '保存在本地的协作模式草稿，可作为后续扩展配置入口。',
+    const id = genUniqueId('wf');
+    const mode: MultiAIMode = {
+      id,
+      name: `自定义工作流 ${nextIndex}`,
+      description: '自定义固定工作流模板，可通过 @MultiAI 触发。',
       agentCount: 2,
       isBuiltin: false,
       isBuiltIn: false,
-      mainAgentRole: '你是主 Agent，负责拆解任务、整合子代理结果并向用户汇报。',
+      mainAgentRole: '你是固定工作流的协调者，按节点编排推进任务。',
       subagents: [],
-      triggerConditions: ['userRequest' as const],
+      triggerConditions: ['userRequest'],
+      workflow: [
+        {
+          id: genUniqueId('agent'),
+          type: 'agent',
+          subagent: {
+            id: genUniqueId('sub'),
+            name: '执行者',
+            role: '理解并完成任务',
+            model: '',
+            systemPrompt: '',
+            toolPermissions: ['read', 'search'],
+            maxTokens: 4096,
+          },
+          taskTemplate: '{{userInput}}',
+        },
+      ],
     };
-    dispatch(addMode(mode));
-    dispatch(setActiveMode(mode.id));
-    dispatch(addNotification({ type: 'success', title: '模式已创建', message: `${mode.name} 已保存到本地设置` }));
-  }, [dispatch, multiAI?.modes]);
+    setDraftMode(mode);
+    setEditingModeId(id);
+  }, [multiAI?.modes]);
+
+  // ★ M3-2c：把内建模式复制为一个新的可编辑自定义模板（内建只读，复制后才可改）。
+  // ★ M3-2c#fix：同样走草稿（复制也是「新建未保存」语义，取消应丢弃，不留空壳）。id 唯一生成防碰撞。
+  const duplicateModeAsTemplate = useCallback((source: MultiAIMode) => {
+    const id = genUniqueId('wf');
+    const cloned: MultiAIMode = {
+      ...JSON.parse(JSON.stringify(source)) as MultiAIMode,
+      id,
+      name: `${source.name} (副本)`,
+      isBuiltin: false,
+      isBuiltIn: false,
+    };
+    setDraftMode(cloned);
+    setEditingModeId(id);
+  }, []);
+
+  // ★ M3-2c：保存编辑器产出（落库走 persistMiddleware；workflow 是配置类字段，仍持久化）。
+  // ★ M3-2c#fix：区分「新建未保存草稿」与「编辑已存在」——草稿（id 不在 modes 里）首次保存走 addMode，
+  //   已存在走 updateMode。updates 含 subagents:[]（编辑器已归一，消除复制内建后的 subagents 僵尸数据）。
+  const saveWorkflowTemplate = useCallback((id: string, updates: { name: string; description: string; workflow: WorkflowNode[]; agentCount: number; subagents: [] }) => {
+    const exists = (multiAI?.modes || []).some((m: any) => m.id === id);
+    if (!exists && draftMode && draftMode.id === id) {
+      // 草稿首次保存：以草稿为基底，覆盖编辑器产出的字段后整条 addMode（保留 mainAgentRole/triggerConditions）。
+      dispatch(addMode({ ...draftMode, ...updates }));
+    } else {
+      dispatch(updateMode({ id, updates }));
+    }
+    setDraftMode(null);
+    setEditingModeId(null);
+    dispatch(addNotification({ type: 'success', title: '模板已保存', message: `${updates.name} 已保存到本地设置` }));
+  }, [dispatch, multiAI?.modes, draftMode]);
+
+  // ★ M3-2c#fix：取消编辑——丢弃草稿（若有）并返回列表。草稿从未落库，无需 removeMode。
+  const cancelWorkflowEdit = useCallback(() => {
+    setDraftMode(null);
+    setEditingModeId(null);
+  }, []);
+
+  // ★ M3-2c：删除自定义模板（内建不可删，removeMode reducer 已对 isBuiltIn 做保护）。
+  // ★ M3-2c#fix：草稿（未落库）删除时只丢草稿、不 dispatch removeMode（store 里本就没有它）。
+  const deleteWorkflowTemplate = useCallback((mode: MultiAIMode) => {
+    const isDraft = Boolean(draftMode && draftMode.id === mode.id && !(multiAI?.modes || []).some((m: any) => m.id === mode.id));
+    if (!window.confirm(`确定删除工作流模板「${mode.name}」吗？此操作不可恢复。`)) return;
+    if (!isDraft) {
+      dispatch(removeMode(mode.id));
+      dispatch(addNotification({ type: 'warning', title: '模板已删除', message: `${mode.name} 已删除` }));
+    }
+    setDraftMode(null);
+    setEditingModeId(null);
+  }, [dispatch, draftMode, multiAI?.modes]);
 
   const refreshStorageUsage = useCallback(async () => {
     setLoadingStorageUsage(true);
@@ -1215,37 +1310,97 @@ export function SettingsPanel() {
               ℹ️ 启用后，主 Agent 可以通过 spawn_subagent 工具创建子代理来协助工作
             </div>
 
-            <div className="settings-subsection-title">已保存模式</div>
-            <div className="multi-ai-mode-list">
-              {(multiAI?.modes || []).map((mode: any) => {
-                const active = (multiAI?.activeMode || 'solo') === mode.id;
+            {(() => {
+              const modes: MultiAIMode[] = (multiAI?.modes || []) as MultiAIMode[];
+              // ★ M3-2c#fix：草稿（新建/复制未保存，id 不在 modes 里）优先；否则按 id 找已存在的自定义模式。
+              const editingMode = editingModeId
+                ? (draftMode && draftMode.id === editingModeId ? draftMode : modes.find(m => m.id === editingModeId))
+                : undefined;
+              // ★ M3-2c：进入编辑器视图（仅自定义模板可编辑；built-in 不会被设为 editingModeId）。
+              if (editingMode && !editingMode.isBuiltIn && !(editingMode as any).isBuiltin) {
                 return (
-                  <div key={mode.id} className={`multi-ai-mode ${active ? 'active' : ''}`}>
-                    <div className="multi-ai-mode-main">
-                      <span className="multi-ai-mode-icon">📋</span>
-                      <div className="multi-ai-mode-text">
-                        <span className="multi-ai-mode-name">{mode.name}</span>
-                        <span className="multi-ai-mode-description">{mode.description}</span>
-                      </div>
-                    </div>
-                    <span className="multi-ai-agent-count">{formatAgentCount(mode.agentCount ?? ((mode.subagents?.length ?? 0) + 1))}</span>
-                    {active ? (
-                      <span className="plugin-status ok">默认</span>
-                    ) : (
-                      <button className="settings-btn compact" type="button" onClick={() => dispatch(setActiveMode(mode.id))}>
-                        选择
-                      </button>
-                    )}
-                  </div>
+                  <WorkflowEditor
+                    key={editingMode.id}
+                    mode={editingMode}
+                    availableModels={availableModels}
+                    onSave={updates => saveWorkflowTemplate(editingMode.id, updates)}
+                    onCancel={cancelWorkflowEdit}
+                    onDelete={() => deleteWorkflowTemplate(editingMode)}
+                    notify={(type, title, message) => dispatch(addNotification({ type, title, message }))}
+                    // ★ M3-2c#fix 重名校验：与现有 modes（排除本 mode 自身 id）大小写不敏感比对。
+                    isNameTaken={(trimmedName) => {
+                      const lower = trimmedName.toLowerCase();
+                      return modes.some(m => m.id !== editingMode.id && m.name.trim().toLowerCase() === lower);
+                    }}
+                  />
                 );
-              })}
-            </div>
-            <div className="setting-item">
-              <label>新建模式</label>
-              <button className="settings-btn" type="button" onClick={createLocalMultiAIMode}>
-                新建本地模式
-              </button>
-            </div>
+              }
+              // 列表视图：内建（只读 / 可复制）与自定义（可编辑 / 可删）分别给操作。
+              return (
+                <>
+                  <div className="settings-subsection-title">固定工作流模板</div>
+                  <p className="setting-hint">
+                    内建模板只读（可「复制为模板」后再改）；自定义模板可编辑 / 删除。
+                    带工作流的模板可用 <code>{MULTI_AI_TRIGGER_PREFIX}模式名 任务描述</code> 在对话中触发。
+                  </p>
+                  <div className="multi-ai-mode-list">
+                    {modes.map((mode) => {
+                      const builtIn = Boolean(mode.isBuiltIn || (mode as any).isBuiltin);
+                      const hasWorkflow = Array.isArray(mode.workflow) && mode.workflow.length > 0;
+                      const active = (multiAI?.activeMode || 'solo') === mode.id;
+                      return (
+                        <div key={mode.id} className={`multi-ai-mode ${active ? 'active' : ''}`}>
+                          <div className="multi-ai-mode-main">
+                            <span className="multi-ai-mode-icon">{hasWorkflow ? '🔀' : '📋'}</span>
+                            <div className="multi-ai-mode-text">
+                              <span className="multi-ai-mode-name">
+                                {mode.name}
+                                {' '}
+                                <span className={`workflow-mode-badge ${builtIn ? 'builtin' : 'custom'}`}>
+                                  {builtIn ? '内建' : '自定义'}
+                                </span>
+                                {hasWorkflow && <span className="workflow-mode-badge wf">工作流·{mode.workflow!.length}节点</span>}
+                              </span>
+                              <span className="multi-ai-mode-description">{mode.description}</span>
+                            </div>
+                          </div>
+                          <span className="multi-ai-agent-count">{formatAgentCount(mode.agentCount ?? ((mode.subagents?.length ?? 0) + 1))}</span>
+                          <div className="workflow-mode-actions">
+                            {active ? (
+                              <span className="plugin-status ok">默认</span>
+                            ) : (
+                              <button className="settings-btn compact" type="button" onClick={() => dispatch(setActiveMode(mode.id))}>
+                                选择
+                              </button>
+                            )}
+                            {builtIn ? (
+                              <button className="settings-btn compact" type="button" onClick={() => duplicateModeAsTemplate(mode)} title="复制为可编辑的自定义模板">
+                                复制为模板
+                              </button>
+                            ) : (
+                              <>
+                                <button className="settings-btn compact" type="button" onClick={() => setEditingModeId(mode.id)}>
+                                  编辑
+                                </button>
+                                <button className="settings-btn danger compact" type="button" onClick={() => deleteWorkflowTemplate(mode)}>
+                                  删除
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="setting-item">
+                    <label>新建工作流模板</label>
+                    <button className="settings-btn" type="button" onClick={createWorkflowTemplate}>
+                      ＋ 新建模板
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
 
             <div className="settings-subsection-title">默认 Subagent 配置</div>
             <div className="setting-item">

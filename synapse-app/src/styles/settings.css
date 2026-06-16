@@ -438,6 +438,174 @@
 
 .settings-hint { font-size: 11px; color: var(--syn-text-muted); font-style: italic; }
 
+/* ★ M3-2c 固定工作流模板编辑 UI */
+.multi-ai-mode { grid-template-columns: minmax(0, 1fr) auto auto; }
+.workflow-mode-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.workflow-mode-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+.workflow-mode-badge.builtin { background: rgba(148,163,184,0.18); color: var(--syn-text-secondary); }
+.workflow-mode-badge.custom { background: rgba(var(--syn-accent-rgb), 0.18); color: var(--syn-text-primary); }
+.workflow-mode-badge.wf { background: rgba(34,197,94,0.16); color: #22c55e; }
+
+.workflow-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--syn-bg-elevated);
+}
+.workflow-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.workflow-editor-actions { display: flex; gap: 6px; }
+
+.workflow-field-block { flex-direction: column; align-items: stretch; }
+.workflow-field-block > label { margin-bottom: 4px; }
+
+.workflow-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--syn-border);
+  background: var(--syn-bg-base);
+  color: var(--syn-text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.5;
+}
+.workflow-textarea:focus { outline: 1px solid rgba(var(--syn-accent-rgb), 0.5); }
+
+.workflow-trigger-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  border-radius: 6px;
+  border: 1px dashed rgba(var(--syn-accent-rgb), 0.35);
+  background: rgba(var(--syn-accent-rgb), 0.06);
+}
+.workflow-trigger-hint-title { font-size: 11px; font-weight: 600; color: var(--syn-text-secondary); }
+.workflow-trigger-hint code,
+.workflow-mode-badge + code,
+.setting-hint code {
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(0,0,0,0.25);
+  color: var(--syn-text-primary);
+  word-break: break-all;
+}
+
+.workflow-warning {
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  margin: 6px 0;
+  border-radius: 6px;
+  border: 1px solid rgba(245,158,11,0.3);
+  background: rgba(245,158,11,0.1);
+  color: #f59e0b;
+}
+
+.workflow-node-list { display: flex; flex-direction: column; gap: 10px; }
+.workflow-node-card {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  background: var(--syn-bg-base);
+  padding: 8px 10px;
+}
+.workflow-node-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.workflow-node-index {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--syn-text-muted);
+  flex: 0 0 auto;
+}
+.workflow-node-type {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--syn-border);
+  background: var(--syn-bg-elevated);
+  color: var(--syn-text-primary);
+  font-size: 11px;
+}
+.workflow-node-head-actions { display: flex; gap: 4px; flex: 0 0 auto; }
+.workflow-node-body { margin-top: 8px; }
+
+.workflow-subagent-form {
+  border-left: 2px solid rgba(var(--syn-accent-rgb), 0.3);
+  padding-left: 10px;
+  margin-top: 4px;
+}
+.workflow-branch {
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  background: var(--syn-bg-elevated);
+}
+.workflow-branch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.workflow-add-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.workflow-perm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--syn-border);
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--syn-text-secondary);
+  user-select: none;
+}
+.workflow-perm-chip.on {
+  border-color: rgba(var(--syn-accent-rgb), 0.5);
+  background: rgba(var(--syn-accent-rgb), 0.12);
+  color: var(--syn-text-primary);
+}
+.workflow-perm-chip input { margin: 0; }
+
 .about-card {
   text-align: center; padding: 24px;
   display: flex; flex-direction: column; align-items: center; gap: 8px;

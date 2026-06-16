@@ -34,7 +34,7 @@ import {
   type RunningSubagent,
 } from '@/store/slices/multiAI';
 import { addNotification } from '@/store/slices/notifications';
-import { toolRegistry } from './toolRegistry';
+import { toolRegistry, type ToolPermissionCategory } from './toolRegistry';
 import { saveConversationSnapshot, createConversationId } from './conversationPersistence';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 import type { Message } from '@/store/slices/conversation';
@@ -229,15 +229,28 @@ export class AgentOrchestrator {
   }
 
   /**
-   * 解析本子代理可用的工具集（schemas）：
-   *   - maxDepth > 1 → 【含】spawn_subagent（允许其派孙代理，孙代理 maxDepth-1）；
-   *   - maxDepth <= 1 → 【剔除】spawn_subagent（不能再派）。
-   * 其它工具一律不限（Plan_4_M3 四：子代理除「是否能继续派」外工具不受限）。
+   * 解析本子代理可用的工具集（schemas）。两道闸门：
+   *   1. ★ high#4（M3-2c 审查）工具权限闸门——按 toolPermissions 过滤带权限类别的工具
+   *      （read/write/command/search/generate），使「编辑器勾选的权限」真正在运行时生效：
+   *      未勾选 write 的子代理拿不到 write_to_file，未勾选 command 的拿不到 run_command 等。
+   *      这是契约对齐：编辑承诺 = 运行消费，不再呈现一个被静默忽略的权限闸门。
+   *      未传 toolPermissions（如旧调用方）→ undefined → 回退给全量带类别工具（向后兼容，零回归）。
+   *   2. maxDepth 派发闸门——maxDepth>1 才补回 spawn_subagent（允许派孙代理，孙代理 maxDepth-1）；
+   *      <=1 则不补（不能再派）。spawn_subagent 不归任何权限类别，故不受 toolPermissions 影响，
+   *      其可用性只由 maxDepth 单独决定。
    */
-  private buildSubagentTools(maxDepth: number): any[] {
-    const all = toolRegistry.getSchemas() as any[];
-    if (maxDepth > 1) return all;
-    return all.filter(t => t?.function?.name !== 'spawn_subagent');
+  private buildSubagentTools(maxDepth: number, toolPermissions?: ReadonlyArray<ToolPermissionCategory>): any[] {
+    // 第一道：按权限类别取允许的工具（未传权限 → 全量带类别工具，向后兼容）。
+    const permissioned = toolPermissions
+      ? (toolRegistry.getSchemasForPermissions(toolPermissions) as any[])
+      : (toolRegistry.getSchemas() as any[]).filter(t => t?.function?.name !== 'spawn_subagent');
+    // 第二道：maxDepth>1 时补回 spawn_subagent（不参与权限过滤，由派发深度单独控制）。
+    if (maxDepth > 1) {
+      const spawnTool = (toolRegistry.getUncategorizedSchemas() as any[])
+        .find(t => t?.function?.name === 'spawn_subagent');
+      return spawnTool ? [...permissioned, spawnTool] : permissioned;
+    }
+    return permissioned;
   }
 
   /**
@@ -369,7 +382,9 @@ export class AgentOrchestrator {
         },
       ];
 
-      const tools = this.buildSubagentTools(maxDepth);
+      // ★ high#4：传子代理配置的工具权限——编辑器勾选的 read/write/command/search/generate 在此真正生效。
+      //   config.toolPermissions 缺省（旧数据/未配）时回退全量带类别工具（buildSubagentTools 内向后兼容）。
+      const tools = this.buildSubagentTools(maxDepth, task.config.toolPermissions);
       const useTools = tools.length > 0;
       let report = '';
 
