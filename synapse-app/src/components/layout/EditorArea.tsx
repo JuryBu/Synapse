@@ -17,17 +17,107 @@ import { ReviewChangesView } from '@/components/editor/ReviewChangesView';
 import { WorkflowView } from '@/components/editor/WorkflowView';
 import { fileSystem } from '@/services/fileSystem';
 import { applyBlockReview, applyDiffReview, applyHunkReview } from '@/services/fileRollback';
-import { markTabSaved, setTabContent } from '@/store/slices/editorTabs';
+import { markTabSaved, setTabContent, closeAllTabs, closeSavedTabs } from '@/store/slices/editorTabs';
 import { updateDiffBlockStatus, updateDiffStatus, updateHunkStatus } from '@/store/slices/conversation';
 import { addNotification } from '@/store/slices/notifications';
-import { useEffect, useState } from 'react';
+import { resolveUnsavedTabs } from '@/services/unsavedChanges';
+import { useEffect, useRef, useState } from 'react';
 
 export function EditorArea() {
   const dispatch = useAppDispatch();
   const tabs = useAppSelector((s: RootState) => s.editorTabs.tabs);
   const activeTabId = useAppSelector((s: RootState) => s.editorTabs.activeTabId);
+  const groupLocked = useAppSelector((s: RootState) => s.editorTabs.groupLocked);
   const conversation = useAppSelector((s: RootState) => s.conversation);
   const activeTab = tabs.find((t: { id: string }) => t.id === activeTabId);
+
+  // ★ M4-3-S8：EditorArea 自管 Ctrl+K 和弦快捷键（主人决议）。
+  //   Ctrl+K W = Close All；Ctrl+K U = Close Saved。仅在编辑器区域内聚焦时生效，
+  //   按下 Ctrl+K 后进入「等待第二键」状态（chord），1.2s 内未补键则超时取消。
+  //   用 ref 持最新 tabs/groupLocked，避免 effect 因依赖频繁重挂、且回调读到陈旧值。
+  const editorRef = useRef<HTMLDivElement>(null);
+  const chordPendingRef = useRef(false);
+  const chordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tabsRef = useRef(tabs);
+  const lockedRef = useRef(groupLocked);
+  tabsRef.current = tabs;
+  lockedRef.current = groupLocked;
+
+  const closeAllWithConfirm = async () => {
+    if (lockedRef.current) {
+      dispatch(addNotification({ type: 'info', title: '编辑器组已锁定', message: '请先解锁分组再关闭全部标签' }));
+      return;
+    }
+    const dirtyTabs = tabsRef.current.filter(t => t.isDirty);
+    if (dirtyTabs.length > 0) {
+      const ok = await resolveUnsavedTabs(dirtyTabs, '关闭全部标签');
+      if (!ok) return;
+      dirtyTabs.forEach(t => dispatch(markTabSaved({ id: t.id, content: t.content })));
+    }
+    dispatch(closeAllTabs());
+  };
+
+  const closeSavedWithConfirm = () => {
+    if (lockedRef.current) {
+      dispatch(addNotification({ type: 'info', title: '编辑器组已锁定', message: '请先解锁分组再关闭已保存标签' }));
+      return;
+    }
+    dispatch(closeSavedTabs());
+  };
+
+  useEffect(() => {
+    const clearChord = () => {
+      chordPendingRef.current = false;
+      if (chordTimerRef.current) {
+        clearTimeout(chordTimerRef.current);
+        chordTimerRef.current = null;
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // 仅当焦点落在编辑器区内才接管，避免与输入框 / 全局快捷键冲突。
+      const root = editorRef.current;
+      const target = e.target as Node | null;
+      if (!root || !target || !root.contains(target)) {
+        if (chordPendingRef.current) clearChord();
+        return;
+      }
+
+      if (chordPendingRef.current) {
+        // 已进入和弦——等待第二键。
+        const key = e.key.toLowerCase();
+        if (key === 'w') {
+          e.preventDefault();
+          clearChord();
+          void closeAllWithConfirm();
+          return;
+        }
+        if (key === 'u') {
+          e.preventDefault();
+          clearChord();
+          closeSavedWithConfirm();
+          return;
+        }
+        // 其它键 → 取消和弦（不吞）。
+        clearChord();
+        return;
+      }
+
+      // 起始键 Ctrl+K（mac 兼容 metaKey）。
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        chordPendingRef.current = true;
+        chordTimerRef.current = setTimeout(clearChord, 1200);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      clearChord();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const renderContent = () => {
     if (!activeTab || activeTab.type === 'welcome') {
@@ -216,6 +306,17 @@ export function EditorArea() {
           />
         );
 
+      // ★ M4-3-S3：已发消息附件（非图片）专用 viewer——filePath 已是 objectUrl（AgentPanel 解析），
+      //   按 mimeType 选渲染方式，不复用现有 fileSystem viewer（它们依赖工作区路径，吃不下 objectUrl）。
+      case 'attachment':
+        return (
+          <AttachmentTabViewer
+            objectUrl={activeTab.filePath}
+            fileName={activeTab.fileName}
+            mimeType={activeTab.mimeType}
+          />
+        );
+
       case 'unsupported':
         return (
           <UnsupportedViewer
@@ -238,7 +339,7 @@ export function EditorArea() {
   };
 
   return (
-    <div className="editor-area glass-panel">
+    <div className="editor-area glass-panel" ref={editorRef} tabIndex={-1}>
       <TabBar />
       <div className="editor-content">
         {renderContent()}
@@ -293,6 +394,84 @@ function UnsupportedViewer({ fileName, filePath }: { fileName: string; filePath:
         <p>{fileName}</p>
         <p className="placeholder-hint">当前版本暂不支持内置预览，请用系统应用打开。</p>
         <p className="placeholder-hint">{filePath}</p>
+      </div>
+    </div>
+  );
+}
+
+// ★ M4-3-S3：已发消息附件专用 viewer。objectUrl 已由 AgentPanel 用 attachment.get → blob → createObjectURL 解析；
+//   本组件只按 mime 选渲染方式，绝不碰 fileSystem（附件无工作区路径）。不认识的 mime 给「下载 / 系统打开」兜底。
+function AttachmentTabViewer({ objectUrl, fileName, mimeType }: { objectUrl: string; fileName: string; mimeType?: string }) {
+  const mime = (mimeType || '').toLowerCase();
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
+  const isImage = mime.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico'].includes(ext);
+  const isPdf = mime === 'application/pdf' || ext === 'pdf';
+  const isText = mime.startsWith('text/')
+    || mime === 'application/json'
+    || mime === 'application/xml'
+    || ['txt', 'md', 'json', 'csv', 'xml', 'log', 'yml', 'yaml', 'ts', 'tsx', 'js', 'jsx', 'py', 'java', 'c', 'cpp', 'h', 'css', 'html'].includes(ext);
+
+  const [text, setText] = useState<string | null>(null);
+  const [textError, setTextError] = useState('');
+
+  useEffect(() => {
+    if (!isText) return;
+    let cancelled = false;
+    setText(null);
+    setTextError('');
+    (async () => {
+      try {
+        const resp = await fetch(objectUrl);
+        const body = await resp.text();
+        if (!cancelled) setText(body);
+      } catch (err: any) {
+        if (!cancelled) setTextError(err?.message || '文本读取失败');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [objectUrl, isText]);
+
+  if (isImage) {
+    return <ImageViewer src={objectUrl} fileName={fileName} />;
+  }
+
+  if (isPdf) {
+    return (
+      <iframe
+        className="attachment-tab-frame"
+        src={objectUrl}
+        title={fileName}
+        style={{ width: '100%', height: '100%', border: 'none', background: '#fff' }}
+      />
+    );
+  }
+
+  if (isText) {
+    if (textError) {
+      return (
+        <div className="editor-placeholder">
+          <div className="placeholder-content">
+            <span style={{ fontSize: 32, opacity: 0.5 }}>📄</span>
+            <p>{fileName}</p>
+            <p className="placeholder-hint">⚠️ {textError}</p>
+          </div>
+        </div>
+      );
+    }
+    if (text === null) {
+      return <div className="editor-placeholder"><div className="placeholder-content"><p>📄 加载中...</p></div></div>;
+    }
+    return <pre className="attachment-tab-text">{text}</pre>;
+  }
+
+  // 不认识的 mime（office / 二进制等）：不硬塞渲染，给下载链接兜底。
+  return (
+    <div className="editor-placeholder">
+      <div className="placeholder-content unsupported-viewer">
+        <span style={{ fontSize: 32, opacity: 0.5 }}>📎</span>
+        <p>{fileName}</p>
+        <p className="placeholder-hint">{mimeType || '未知类型'} 暂不支持内置预览。</p>
+        <a className="attachment-tab-download" href={objectUrl} download={fileName}>下载附件</a>
       </div>
     </div>
   );

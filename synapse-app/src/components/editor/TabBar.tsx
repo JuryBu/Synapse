@@ -1,9 +1,16 @@
-import { X, FileCode, FileText, Image, Film, Presentation, BookOpen, Globe, Home, Settings, ListChecks, Network, ChevronLeft, ChevronRight } from 'lucide-react';
+import { X, FileCode, FileText, Image, Film, Presentation, BookOpen, Globe, Home, Settings, ListChecks, Network, ChevronLeft, ChevronRight, MoreHorizontal, Check, ListOrdered, XSquare, Save, Eye, Lock, SlidersHorizontal } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
-import { closeTab, markTabSaved, setActiveTab } from '@/store/slices/editorTabs';
+import {
+  closeTab, markTabSaved, setActiveTab, pinTab,
+  togglePreviewEnabled, lockGroup, closeSavedTabs, closeAllTabs,
+} from '@/store/slices/editorTabs';
+import { addNotification } from '@/store/slices/notifications';
+import { setActiveView } from '@/store/slices/sidebar';
+import { setSidebarVisible } from '@/store/slices/layout';
 import type { RootState } from '@/store';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { resolveUnsavedTabs } from '@/services/unsavedChanges';
+import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
 
 const tabIcons: Record<string, React.ElementType> = {
   code: FileCode,
@@ -20,6 +27,7 @@ const tabIcons: Record<string, React.ElementType> = {
   settings: Settings,
   review: ListChecks,
   workflow: Network, // ★ M3-3b 子代理中间视图 tab
+  attachment: FileText, // ★ M4-3-S3 已发消息附件 tab
   unsupported: FileText,
 };
 
@@ -27,8 +35,12 @@ export function TabBar() {
   const dispatch = useAppDispatch();
   const tabs = useAppSelector((s: RootState) => s.editorTabs.tabs);
   const activeTabId = useAppSelector((s: RootState) => s.editorTabs.activeTabId);
+  const previewEnabled = useAppSelector((s: RootState) => s.editorTabs.previewEnabled);
+  const groupLocked = useAppSelector((s: RootState) => s.editorTabs.groupLocked);
   const scrollRef = useRef<HTMLDivElement>(null);
   const activeTabRef = useRef<HTMLDivElement>(null);
+  const moreBtnRef = useRef<HTMLButtonElement>(null);
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
 
   const handleClose = useCallback(async (e: React.MouseEvent, tabId: string) => {
     e.stopPropagation();
@@ -54,6 +66,11 @@ export function TabBar() {
     }
   }, [dispatch, tabs]);
 
+  // ★ M4-3-S8：双击 tab → 固定（去斜体临时态），符合 VS Code 双击固定预览 tab。
+  const handleDoubleClick = useCallback((tabId: string) => {
+    dispatch(pinTab(tabId));
+  }, [dispatch]);
+
   const handleWheel = useCallback((e: React.WheelEvent) => {
     if (scrollRef.current) {
       scrollRef.current.scrollLeft += e.deltaY;
@@ -66,6 +83,75 @@ export function TabBar() {
       behavior: 'smooth',
     });
   }, []);
+
+  // ★ M4-3-S8：Close All——逐 tab 走 dirty 确认链，确认后清空（非 welcome）。
+  //   Lock Group 锁定时阻断并提示（轻量版语义：锁组不被 Close All 误关）。
+  const closeAllWithConfirm = useCallback(async () => {
+    if (groupLocked) {
+      dispatch(addNotification({ type: 'info', title: '编辑器组已锁定', message: '请先解锁分组再关闭全部标签' }));
+      return;
+    }
+    const dirtyTabs = tabs.filter(t => t.isDirty);
+    if (dirtyTabs.length > 0) {
+      const ok = await resolveUnsavedTabs(dirtyTabs, '关闭全部标签');
+      if (!ok) return;
+      dirtyTabs.forEach(t => dispatch(markTabSaved({ id: t.id, content: t.content })));
+    }
+    dispatch(closeAllTabs());
+  }, [dispatch, groupLocked, tabs]);
+
+  // ★ M4-3-S8：Close Saved——关闭所有非脏 tab（已保存的本就无须确认）。welcome 保留。
+  const closeSavedWithConfirm = useCallback(() => {
+    if (groupLocked) {
+      dispatch(addNotification({ type: 'info', title: '编辑器组已锁定', message: '请先解锁分组再关闭已保存标签' }));
+      return;
+    }
+    dispatch(closeSavedTabs());
+  }, [dispatch, groupLocked]);
+
+  const openMoreMenu = useCallback(() => {
+    const rect = moreBtnRef.current?.getBoundingClientRect();
+    if (rect) {
+      setMenuPos({ x: rect.right - 8, y: rect.bottom + 4 });
+    }
+  }, []);
+
+  const buildMenuItems = useCallback((): MenuItem[] => {
+    // Show Opened Editors：轻量版——首行作不可点的分组标题，其下逐 tab 列出，点击跳转激活
+    //   （不做 VS Code 侧栏式 OPEN EDITORS 面板，主人决议取轻量版）。
+    const openedItems: MenuItem[] = tabs.map(tab => ({
+      label: `${tab.fileName}${tab.isDirty ? ' ●' : ''}`,
+      onClick: () => dispatch(setActiveTab(tab.id)),
+    }));
+
+    return [
+      { label: 'Show Opened Editors', icon: <ListOrdered size={14} />, onClick: () => { }, disabled: true },
+      ...openedItems,
+      { label: '', onClick: () => { }, separator: true },
+      { label: 'Close All', icon: <XSquare size={14} />, shortcut: 'Ctrl+K W', onClick: () => { void closeAllWithConfirm(); } },
+      { label: 'Close Saved', icon: <Save size={14} />, shortcut: 'Ctrl+K U', onClick: () => closeSavedWithConfirm() },
+      { label: '', onClick: () => { }, separator: true },
+      {
+        label: 'Enable Preview Editors',
+        icon: previewEnabled ? <Check size={14} /> : <Eye size={14} />,
+        onClick: () => dispatch(togglePreviewEnabled(undefined)),
+      },
+      {
+        label: 'Lock Group',
+        icon: groupLocked ? <Check size={14} /> : <Lock size={14} />,
+        onClick: () => dispatch(lockGroup(undefined)),
+      },
+      { label: '', onClick: () => { }, separator: true },
+      {
+        label: 'Configure',
+        icon: <SlidersHorizontal size={14} />,
+        onClick: () => {
+          dispatch(setSidebarVisible(true));
+          dispatch(setActiveView('settings'));
+        },
+      },
+    ];
+  }, [closeAllWithConfirm, closeSavedWithConfirm, dispatch, groupLocked, previewEnabled, tabs]);
 
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({
@@ -90,6 +176,7 @@ export function TabBar() {
               ref={isActive ? activeTabRef : undefined}
               className={`tab-item ${isActive ? 'active' : ''} ${tab.isPreview ? 'preview' : ''}`}
               onClick={() => dispatch(setActiveTab(tab.id))}
+              onDoubleClick={() => handleDoubleClick(tab.id)}
               onMouseDown={(e) => handleMiddleClick(e, tab.id)}
               title={tab.filePath || tab.fileName}
             >
@@ -114,6 +201,23 @@ export function TabBar() {
       <button className="tab-scroll-btn" type="button" onClick={() => scrollTabs('right')} title="向右滚动标签" aria-label="向右滚动标签">
         <ChevronRight size={14} />
       </button>
+      <button
+        ref={moreBtnRef}
+        className="tab-more-btn"
+        type="button"
+        onClick={openMoreMenu}
+        title="更多操作"
+        aria-label="更多操作"
+      >
+        <MoreHorizontal size={16} />
+      </button>
+      {menuPos && (
+        <ContextMenu
+          items={buildMenuItems()}
+          position={menuPos}
+          onClose={() => setMenuPos(null)}
+        />
+      )}
     </div>
   );
 }

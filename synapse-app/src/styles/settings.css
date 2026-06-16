@@ -281,52 +281,13 @@
   min-width: 0;
 }
 
-.settings-audit-matrix {
-  display: grid;
-  grid-template-columns: minmax(110px, 1.1fr) minmax(78px, 0.7fr) minmax(120px, 1fr) minmax(160px, 1.4fr) minmax(150px, 1.3fr);
-  gap: 1px;
-  margin: 0 0 14px;
+/* ★ M4-3-S4：宽内容（长路径，如 userDataPath / repoRoot / mcp source）横向滚动兜底，
+   防止撑破侧栏（.settings-content 为 overflow-x:hidden）。 */
+.settings-wide-scroll {
+  max-width: 100%;
   overflow-x: auto;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 6px;
-  background: rgba(255,255,255,0.06);
+  white-space: nowrap;
 }
-
-.settings-audit-header,
-.settings-audit-row {
-  display: contents;
-}
-
-.settings-audit-header span,
-.settings-audit-row span {
-  min-width: 0;
-  padding: 7px 8px;
-  background: var(--syn-bg-elevated);
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--syn-text-secondary);
-  overflow-wrap: anywhere;
-}
-
-.settings-audit-header span {
-  color: var(--syn-text-primary);
-  font-weight: 600;
-  background: rgba(var(--syn-accent-rgb), 0.12);
-}
-
-.settings-audit-item {
-  color: var(--syn-text-primary) !important;
-  font-weight: 500;
-}
-
-.settings-audit-status {
-  font-weight: 600;
-}
-
-.settings-audit-status.ok { color: #86efac !important; }
-.settings-audit-status.warn { color: #fde68a !important; }
-.settings-audit-status.danger { color: #fca5a5 !important; }
-.settings-audit-status.muted { color: var(--syn-text-muted) !important; }
 
 .about-details {
   width: 100%;

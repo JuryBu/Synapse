@@ -6,9 +6,14 @@ interface EditorTab {
   fileName: string;
   isDirty: boolean;
   isPreview: boolean;
-  type: 'code' | 'pdf' | 'pptx' | 'docx' | 'office' | 'markdown' | 'html' | 'image' | 'video' | 'welcome' | 'showcase' | 'settings' | 'review' | 'workflow' | 'unsupported';
+  type: 'code' | 'pdf' | 'pptx' | 'docx' | 'office' | 'markdown' | 'html' | 'image' | 'video' | 'welcome' | 'showcase' | 'settings' | 'review' | 'workflow' | 'attachment' | 'unsupported';
   content?: string;
   savedContent?: string;
+  /**
+   * ★ M4-3-S3：type==='attachment' 专属——已发消息附件的 MIME，AttachmentTabViewer 据此选渲染方式
+   *   （image/* → img、application/pdf → iframe、文本类 → pre、其它 → 下载提示）。其它类型 tab 无此字段。
+   */
+  mimeType?: string;
   /**
    * ★ M3-3b 子代理中间视图 tab（type==='workflow'）专属：关联的 Multi-AI 工作流运行实例 id
    *   （multiAI.workflowRuns[runId]）。EditorArea 据此渲染 <WorkflowView runId=... />。其它类型 tab 无此字段。
@@ -28,11 +33,23 @@ const welcomeTab: EditorTab = {
 interface EditorTabsState {
   tabs: EditorTab[];
   activeTabId: string | null;
+  /**
+   * ★ M4-3-S7：Enable Preview Editors 开关（VS Code「单击文件=临时斜体 tab」总闸）。
+   *   true（默认）→ 单击文件复用同一个临时 preview tab；false → 每次打开都是固定 tab。
+   */
+  previewEnabled: boolean;
+  /**
+   * ★ M4-3-S7：Lock Group（轻量版，单 group 架构）。锁定后：openTab 不再复用 preview 位
+   *   （强制新固定 tab）、closeAllTabs / closeSavedTabs 不误关本组 tab（由调用方判定阻断）。
+   */
+  groupLocked: boolean;
 }
 
 const initialState: EditorTabsState = {
   tabs: [welcomeTab],
   activeTabId: 'welcome',
+  previewEnabled: true,
+  groupLocked: false,
 };
 
 export const editorTabsSlice = createSlice({
@@ -40,12 +57,69 @@ export const editorTabsSlice = createSlice({
   initialState,
   reducers: {
     openTab(state, action: PayloadAction<EditorTab>) {
-      const existing = state.tabs.find(t => t.filePath === action.payload.filePath);
+      const incoming = action.payload;
+
+      // 同 filePath 已开 → 仅激活（保留原有去重语义；空 filePath 的 review/workflow 等 tab 不会误命中）。
+      const existing = incoming.filePath
+        ? state.tabs.find(t => t.filePath === incoming.filePath)
+        : undefined;
       if (existing) {
         state.activeTabId = existing.id;
-      } else {
-        state.tabs.push(action.payload);
-        state.activeTabId = action.payload.id;
+        return;
+      }
+
+      // ★ M4-3-S7：预览 tab 替换语义（VS Code「单击文件复用同一个临时 tab」）。
+      //   仅当：previewEnabled 开 + 未锁组 + 本次确为 preview 打开（incoming.isPreview）时，
+      //   才把上一个临时 preview tab 原位替换；否则正常新增。
+      //   previewEnabled=false 时强制固定（isPreview:false），保护 review/workflow 等非文件 tab。
+      const wantPreview = incoming.isPreview && state.previewEnabled && !state.groupLocked;
+      const finalTab: EditorTab = { ...incoming, isPreview: wantPreview };
+
+      if (wantPreview) {
+        const previewIdx = state.tabs.findIndex(t => t.isPreview);
+        if (previewIdx >= 0) {
+          // 原位替换旧 preview tab（同位置，避免标签栏跳动）。
+          state.tabs[previewIdx] = finalTab;
+          state.activeTabId = finalTab.id;
+          return;
+        }
+      }
+
+      state.tabs.push(finalTab);
+      state.activeTabId = finalTab.id;
+    },
+    /**
+     * ★ M4-3-S7：固定 tab（双击或编辑触发）——去 preview 斜体态，转为常驻 tab。
+     */
+    pinTab(state, action: PayloadAction<string>) {
+      const tab = state.tabs.find(t => t.id === action.payload);
+      if (tab) tab.isPreview = false;
+    },
+    /**
+     * ★ M4-3-S7：Enable Preview Editors 开关。关闭时把当前已存在的 preview tab 一并固定，
+     *   避免「关了开关但旧斜体 tab 还在临时态」的语义错位。
+     */
+    togglePreviewEnabled(state, action: PayloadAction<boolean | undefined>) {
+      state.previewEnabled = action.payload ?? !state.previewEnabled;
+      if (!state.previewEnabled) {
+        for (const tab of state.tabs) tab.isPreview = false;
+      }
+    },
+    /**
+     * ★ M4-3-S7：Lock Group（轻量版）。仅维护开关状态；closeAll/closeSaved 的阻断由
+     *   调用方（TabBar）依据此状态判定，reducer 不强行改 tab。
+     */
+    lockGroup(state, action: PayloadAction<boolean | undefined>) {
+      state.groupLocked = action.payload ?? !state.groupLocked;
+    },
+    /**
+     * ★ M4-3-S7：Close Saved——关闭所有「非 dirty 且非 welcome」的 tab（dirty 与 welcome 保留）。
+     *   dirty 确认链不在此处理（这些本就未脏，无须确认）。
+     */
+    closeSavedTabs(state) {
+      state.tabs = state.tabs.filter(t => t.isDirty || t.type === 'welcome');
+      if (!state.tabs.some(t => t.id === state.activeTabId)) {
+        state.activeTabId = state.tabs[state.tabs.length - 1]?.id ?? null;
       }
     },
     /**
@@ -82,7 +156,10 @@ export const editorTabsSlice = createSlice({
     },
     setTabDirty(state, action: PayloadAction<{ id: string; dirty: boolean }>) {
       const tab = state.tabs.find(t => t.id === action.payload.id);
-      if (tab) tab.isDirty = action.payload.dirty;
+      if (!tab) return;
+      tab.isDirty = action.payload.dirty;
+      // ★ M4-3-S7：编辑即固定——一旦标脏，自动退出 preview 临时态（符合 VS Code）。
+      if (action.payload.dirty) tab.isPreview = false;
     },
     setTabContent(state, action: PayloadAction<{ id: string; content: string; dirty?: boolean; markSaved?: boolean }>) {
       const tab = state.tabs.find(t => t.id === action.payload.id);
@@ -96,6 +173,8 @@ export const editorTabsSlice = createSlice({
       } else {
         tab.isDirty = action.payload.content !== (tab.savedContent ?? '');
       }
+      // ★ M4-3-S7：编辑即固定——内容变脏即转固定 tab（markSaved/初次加载置 saved 不触发）。
+      if (tab.isDirty) tab.isPreview = false;
     },
     markTabSaved(state, action: PayloadAction<{ id: string; content?: string }>) {
       const tab = state.tabs.find(t => t.id === action.payload.id);
@@ -121,6 +200,7 @@ export const editorTabsSlice = createSlice({
 
 export const {
   openTab, openWorkflowTab, closeTab, setActiveTab, setTabDirty, setTabContent, markTabSaved, closeAllTabs, resetTabsToWelcome,
+  pinTab, togglePreviewEnabled, lockGroup, closeSavedTabs,
 } = editorTabsSlice.actions;
 
 export type { EditorTab };

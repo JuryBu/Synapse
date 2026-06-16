@@ -91,16 +91,6 @@ type StorageUsageSnapshot = {
   measuredAt: number;
 };
 
-type SettingAuditStatus = '已实装' | '部分实装' | '未实装' | '待确认扩展';
-
-type SettingAuditRow = {
-  item: string;
-  status: SettingAuditStatus;
-  persistence: string;
-  effect: string;
-  verify: string;
-};
-
 const mcpEntries: PluginEntry[] = [
   {
     name: 'sandbox',
@@ -124,55 +114,6 @@ const mcpEntries: PluginEntry[] = [
     icon: '🧠',
   },
 ];
-
-const settingAuditRows: Record<string, SettingAuditRow[]> = {
-  general: [
-    { item: '语言', status: '部分实装', persistence: 'Redux / 本地持久化', effect: '当前仅保存偏好，界面文案未完整国际化', verify: '切换后刷新确认值保留' },
-    { item: '字号', status: '已实装', persistence: 'settings.fontSize', effect: '映射到 --app-font-size', verify: '调整滑块后检查根 CSS 变量' },
-    { item: '主题 / 强调色', status: '已实装', persistence: 'theme slice', effect: '映射 data-theme 与强调色 CSS 变量', verify: '切换深浅色与颜色后观察界面变化' },
-    { item: '壁纸 / 磨砂 / 面板透明度', status: '已实装', persistence: 'agentSettings.backgroundSettings', effect: '映射 .app-background 与面板透明度', verify: '上传高对比壁纸并检查背景、模糊和透明度' },
-  ],
-  ai: [
-    { item: 'API Key / Endpoint / 测试连接', status: '已实装', persistence: 'settings.apiKeys / apiEndpoints', effect: 'AIClient 使用同一配置获取模型和请求对话', verify: '测试连接返回模型列表或明确错误' },
-    { item: '默认模型 / 模型能力标签', status: '已实装', persistence: 'agentSettings.currentModel / availableModels', effect: '输入区与请求模型同步，能力由接口和推断合并', verify: '获取模型后切换默认模型，检查输入区能力标签' },
-    { item: 'Top P / Reasoning Effort / Speed Tier', status: '部分实装', persistence: 'agentSettings', effect: '请求体已接入；输入区参数弹层正在补齐图示交互', verify: 'mock 请求体检查参数，并在输入区直接调整' },
-    { item: '多模型位', status: '未实装', persistence: '无', effect: 'thinking / fast / synopsis / vision 等专用模型位未拆分', verify: '保留在后续模型体系任务' },
-  ],
-  conversation: [
-    { item: '最大历史 / 自动归档', status: '部分实装', persistence: 'settings slice', effect: '值已保存，但归档执行链路尚未完整验证', verify: '刷新后保留；归档链路需单独端到端验证' },
-    { item: 'Temperature / Max Tokens', status: '部分实装', persistence: 'agentSettings', effect: '请求体已接入；正在并入模型参数弹层，按模型能力禁用', verify: 'mock 请求体检查参数，输入区调整后刷新保留' },
-    { item: '流式输出 / Thinking 展示', status: '已实装', persistence: 'agentSettings.outputStrategy / pseudoStreamSpeed / showThinking', effect: '自动 / 真流式 / 伪流式 / 关闭流式进入请求与显示链路', verify: '真流式、伪流式、关闭流式 mock 烟测' },
-    { item: '上下文压缩策略细项', status: '部分实装', persistence: '静态策略', effect: '有压缩入口，但阈值/保留轮数仍是固定说明', verify: '超过阈值时观察 compressContext 调用' },
-  ],
-  safety: [
-    { item: '自动批准读取 / 写入 / 命令 / 全部', status: '已实装', persistence: 'settings.safety', effect: 'toolRegistry 审批判断读取这些开关', verify: '切换后执行 read/write/command 工具审批路径' },
-    { item: '命令超时 / 内存限制', status: '部分实装', persistence: '无', effect: '当前是固定默认展示，未开放可编辑配置', verify: 'UI 标记固定默认，不作为完成态控制项' },
-    { item: '系统提示注入', status: '已实装', persistence: 'settings.promptInjection', effect: 'systemPrompt 按开关注入身份、规则、Skill、Workflow、上下文；AgentLoop 按工具定义开关决定是否向 API 传 tools', verify: '动态导入 promptBuilder 构造 prompt，mock 请求体检查 tools' },
-  ],
-  synopsis: [
-    { item: 'TEXT MODE / chunk / 并发 / 自动索引', status: '部分实装', persistence: 'agentSettings.synopsisSettings', effect: '设置已保存，生成管线是否完全消费仍需 Synopsis 专项验证', verify: '刷新保留；索引与生成链路另测' },
-    { item: '缓存策略', status: '部分实装', persistence: '本地缓存键', effect: '数据页能清理 synopsis 缓存，细粒度策略未开放', verify: '写入 synapse:synopsis:* 后清缓存' },
-  ],
-  multiAI: [
-    { item: '启用 / 模式选择 / 默认子代理参数', status: '部分实装', persistence: 'multiAI slice', effect: 'agentOrchestrator 读取 enabled、activeMode、并发和模型', verify: '开启后触发 orchestrator 获取当前模式' },
-    { item: '模式编辑器 / Mode.md 两级覆盖', status: '未实装', persistence: '无', effect: '仅本地草稿模式，未读写 Mode.md', verify: '保留为后续 Multi-AI 配置任务' },
-  ],
-  plugins: [
-    { item: 'MCP 状态 / 启动 / 重启', status: '已实装', persistence: 'mcp_config.json + 进程 Map', effect: 'Electron IPC 读取配置与真实进程状态', verify: 'stage9-smoke stopped/running/stopped 烟测' },
-    { item: 'SKILL / WORKFLOW / RULES 来源展示', status: '部分实装', persistence: 'extensionManager 清单', effect: '内置与规则文件状态可见，完整目录扫描/禁用未完成', verify: '插件页查看 sourceType 与规则缺失状态' },
-    { item: 'Codex / Antigravity 特化插件源', status: '待确认扩展', persistence: '无', effect: '未混入通用插件页完成项', verify: '等待单独确认边界' },
-  ],
-  data: [
-    { item: '导出对话 / 清除历史', status: '已实装', persistence: 'conversationPersistence', effect: 'Electron 数据库与 Web 降级存储均走统一服务', verify: '创建历史后导出、清除、刷新确认' },
-    { item: '清除缓存 / 存储估算', status: '部分实装', persistence: 'localStorage + navigator.storage', effect: '清理本地 synopsis/temp/cache 键；显示 localStorage 与浏览器估算，不再显示固定 5 MB 限额', verify: '写入缓存键后清理并刷新用量' },
-    { item: '导入 / 导出设置', status: '部分实装', persistence: 'localStorage 设置键', effect: '导入 JSON 写回本地设置；不含 Electron 数据库完整备份', verify: '导出后修改再导入回滚' },
-    { item: 'Markdown / PDF 导出格式', status: '未实装', persistence: '无', effect: '当前只提供 JSON', verify: '后续导出格式任务' },
-  ],
-  about: [
-    { item: '版本 / 运行模式', status: '已实装', persistence: 'platform.info', effect: '显示 Web/Electron、平台、版本', verify: 'Electron 和 Web 分别打开关于页' },
-    { item: '数据库位置 / 配置路径', status: '部分实装', persistence: 'platform.info.userDataPath', effect: '显示用户数据目录；具体 DB / config 文件路径未逐项列出', verify: 'Electron 关于页查看 userDataPath' },
-  ],
-};
 
 export function SettingsPanel() {
   const dispatch = useAppDispatch();
@@ -787,7 +728,6 @@ export function SettingsPanel() {
         {activeTab === 'general' && (
           <div className="settings-section">
             <h3>通用设置</h3>
-            <SettingsAuditMatrix rows={settingAuditRows.general} />
             <div className="setting-item">
               <label>语言</label>
               <select value={settings.language} onChange={e => {
@@ -920,7 +860,6 @@ export function SettingsPanel() {
         {activeTab === 'ai' && (
           <div className="settings-section">
             <h3>AI 设置</h3>
-            <SettingsAuditMatrix rows={settingAuditRows.ai} />
             <div className="setting-item">
               <label>API Key</label>
               <input type="password" placeholder="sk-..."
@@ -1110,7 +1049,6 @@ export function SettingsPanel() {
         {activeTab === 'conversation' && (
           <div className="settings-section">
             <h3>💬 对话管理</h3>
-            <SettingsAuditMatrix rows={settingAuditRows.conversation} />
             <div className="setting-item">
               <label>最大对话历史</label>
               <input type="range" min="10" max="500" step="10" value={settings.maxConversationHistory}
@@ -1151,7 +1089,6 @@ export function SettingsPanel() {
         {activeTab === 'safety' && (
           <div className="settings-section">
             <h3>🛡 安全与审批</h3>
-            <SettingsAuditMatrix rows={settingAuditRows.safety} />
             <ToggleItem label="自动批准读取" checked={settings.safety?.autoApproveRead ?? true}
               onChange={v => dispatch(setSafety({ autoApproveRead: v }))} />
             <ToggleItem label="自动批准写入" checked={settings.safety?.autoApproveWrite ?? false}
@@ -1165,12 +1102,12 @@ export function SettingsPanel() {
             <div className="setting-item">
               <label>命令超时</label>
               <span>30 秒</span>
-              <span className="setting-hint">固定默认，暂未开放调整</span>
+              <span className="setting-hint">当前为内置默认值</span>
             </div>
             <div className="setting-item">
               <label>内存限制</label>
               <span>256 MB</span>
-              <span className="setting-hint">固定默认，暂未开放调整</span>
+              <span className="setting-hint">当前为内置默认值</span>
             </div>
 
             <h3 style={{ marginTop: 24 }}>📌 系统提示注入</h3>
@@ -1192,7 +1129,6 @@ export function SettingsPanel() {
         {activeTab === 'synopsis' && (
           <div className="settings-section">
             <h3>📊 Synopsis 引擎</h3>
-            <SettingsAuditMatrix rows={settingAuditRows.synopsis} />
             <p className="setting-hint">文档解析与 RAG 生成管线参数，修改后会写入本地设置。</p>
             <ToggleItem label="TEXT MODE (纯文本模式)" checked={synopsisSettings.textModeEnabled}
               onChange={v => updateSynopsisSettings({ textModeEnabled: v })} />
@@ -1225,7 +1161,6 @@ export function SettingsPanel() {
         {activeTab === 'plugins' && (
           <div className="settings-section">
             <h3>🧩 插件管理</h3>
-            <SettingsAuditMatrix rows={settingAuditRows.plugins} />
             <p className="setting-hint">MCP 在 Electron 模式下读取真实进程状态；扩展条目保留来源信息并支持打开目录。</p>
             <div className="plugin-section">
               <div className="plugin-section-heading">
@@ -1302,7 +1237,6 @@ export function SettingsPanel() {
         {activeTab === 'multiAI' && (
           <div className="settings-section">
             <h3>🤝 Multi-AI 协作</h3>
-            <SettingsAuditMatrix rows={settingAuditRows.multiAI} />
             <p className="setting-hint">启用后，主 Agent 可按当前模式创建子代理协助工作，设置会写入本地持久化。</p>
             <ToggleItem label="启用 Multi-AI" checked={multiAI?.enabled ?? false}
               onChange={v => dispatch(setMultiAIEnabled(v))} />
@@ -1521,7 +1455,7 @@ export function SettingsPanel() {
                                 {wt.head && <span className="plugin-status muted">{wt.head.slice(0, 8)}</span>}
                                 {isMain && <span className="plugin-status ok">主工作树</span>}
                                 {wt.locked && <span className="plugin-status warn">已锁定</span>}
-                                <span className="plugin-source">{wt.path}</span>
+                                <span className="plugin-source settings-wide-scroll">{wt.path}</span>
                               </div>
                             </div>
                             {!isMain && !wt.bare && (
@@ -1548,7 +1482,6 @@ export function SettingsPanel() {
         {activeTab === 'data' && (
           <div className="settings-section">
             <h3>📤 数据管理</h3>
-            <SettingsAuditMatrix rows={settingAuditRows.data} />
             <p className="setting-hint">
               当前按钮只处理本地可访问的数据源：对话导出/清除覆盖持久化对话快照和旧 localStorage 对话键；设置导入/导出只覆盖 Synapse 设置键，不包含 Electron 数据库、用户目录文件或完整备份。
             </p>
@@ -1587,7 +1520,7 @@ export function SettingsPanel() {
               <button className="settings-btn" onClick={clearCache}>
                 🧹 清理
               </button>
-              <p className="setting-hint">仅清理 localStorage 中的 Synopsis / temp / tmp 缓存键；Electron 文件缓存与数据库缓存暂列待确认扩展。</p>
+              <p className="setting-hint">当前清理 localStorage 中的 Synopsis / temp / tmp 缓存键；Electron 文件缓存与数据库缓存由系统自行管理。</p>
             </div>
             <div className="settings-subsection-title">设置导入导出</div>
             <div className="setting-item">
@@ -1624,12 +1557,11 @@ export function SettingsPanel() {
             <h2>Synapse</h2>
             <p>AI 驱动的交互式学习平台</p>
             <p className="about-version">v0.1.0 (Preview)</p>
-            <SettingsAuditMatrix rows={settingAuditRows.about} />
             <div className="about-details">
               <div><span>运行模式</span><strong>{platformInfo?.isElectron ? 'Electron' : 'Web'}</strong></div>
               <div><span>平台</span><strong>{platformInfo?.platform ?? (isElectron ? 'electron' : 'web')}</strong></div>
               <div><span>版本</span><strong>{platformInfo?.version ?? '0.1.0'}</strong></div>
-              <div><span>用户数据目录</span><strong>{platformInfo?.userDataPath ?? (isElectron ? '读取中' : '/virtual')}</strong></div>
+              <div><span>用户数据目录</span><strong className="settings-wide-scroll">{platformInfo?.userDataPath ?? (isElectron ? '读取中' : '/virtual')}</strong></div>
             </div>
           </div>
         )}
@@ -1664,7 +1596,7 @@ function PluginItem({
         <div className="plugin-meta">
           <span className={`plugin-status ${statusTone}`}>{status}</span>
           {sourceType && <span className="plugin-status muted">{sourceType}</span>}
-          <span className="plugin-source">{source}</span>
+          <span className="plugin-source settings-wide-scroll">{source}</span>
         </div>
       </div>
       {actionLabel && (
@@ -1674,36 +1606,6 @@ function PluginItem({
       )}
     </div>
   );
-}
-
-function SettingsAuditMatrix({ rows }: { rows: SettingAuditRow[] }) {
-  return (
-    <div className="settings-audit-matrix">
-      <div className="settings-audit-header">
-        <span>设置项</span>
-        <span>状态</span>
-        <span>持久化</span>
-        <span>实际生效</span>
-        <span>验证方式</span>
-      </div>
-      {rows.map(row => (
-        <div className="settings-audit-row" key={row.item}>
-          <span className="settings-audit-item">{row.item}</span>
-          <span className={`settings-audit-status ${auditStatusClass(row.status)}`}>{row.status}</span>
-          <span>{row.persistence}</span>
-          <span>{row.effect}</span>
-          <span>{row.verify}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function auditStatusClass(status: SettingAuditStatus) {
-  if (status === '已实装') return 'ok';
-  if (status === '部分实装') return 'warn';
-  if (status === '待确认扩展') return 'muted';
-  return 'danger';
 }
 
 function getMcpStatus(server?: McpServerInfo): { label: string; tone: 'ok' | 'warn' | 'danger' | 'muted' } {

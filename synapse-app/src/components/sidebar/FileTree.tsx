@@ -1,7 +1,8 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useMemo } from 'react';
 import { ChevronRight, ChevronDown, Copy, FolderOpen, Edit, Trash2, FilePlus, FolderPlus } from 'lucide-react';
 import type { FileNode } from '@/services/fileSystem';
 import { fileSystem } from '@/services/fileSystem';
+import { getFileIcon, getFolderIcon } from '@/services/fileIcons';
 import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
 import { useAppDispatch } from '@/store/hooks';
 import { useAppSelector } from '@/store/hooks';
@@ -34,6 +35,19 @@ function collectDescendantFilePaths(node: FileNode): string[] {
     paths.push(...collectDescendantFilePaths(child));
   }
   return paths;
+}
+
+/**
+ * ★ M4-3-S5：文件夹优先排序（主人决策）。
+ *   规则：目录排在文件之前（type: directory < file）；组内按名称做 zh localeCompare
+ *   （numeric=true 让 file2 < file10 自然序、sensitivity=base 忽略大小写差异）。
+ *   返回新数组副本，绝不原地 mutate 传入的 FileNode[]（避免污染 store / fileSystem 原始结构）。
+ */
+function sortNodes(nodes: FileNode[]): FileNode[] {
+  return [...nodes].sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+    return a.name.localeCompare(b.name, 'zh', { numeric: true, sensitivity: 'base' });
+  });
 }
 
 interface FileTreeItemProps {
@@ -84,9 +98,12 @@ function FileTreeItem({ node, depth, onFileClick, onContextMenu, editingPath, ed
             <span style={{ width: 14 }} />
           )}
         </span>
-        <span className="tree-icon">
-          {isDir ? (expanded ? '📂' : '📁') : fileSystem.getFileIcon(node.extension)}
-        </span>
+        <span
+          className="tree-icon"
+          dangerouslySetInnerHTML={{
+            __html: isDir ? getFolderIcon(expanded) : getFileIcon(node.extension),
+          }}
+        />
         {isEditing ? (
           <input
             ref={inputRef}
@@ -110,7 +127,7 @@ function FileTreeItem({ node, depth, onFileClick, onContextMenu, editingPath, ed
       </div>
       {isDir && expanded && node.children && (
         <div className="tree-children">
-          {node.children.map((child) => (
+          {sortNodes(node.children).map((child) => (
             <FileTreeItem
               key={child.path}
               node={child}
@@ -144,6 +161,8 @@ export function FileTree({ root, onFileClick, onRefresh, onOpenWorkspace, onClea
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [editingPath, setEditingPath] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  // ★ M4-3-S5：root 顶层 children 也走文件夹优先排序（不原地 mutate root.children）。
+  const sortedRootChildren = useMemo(() => sortNodes(root.children ?? []), [root.children]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, node: FileNode) => {
     setContextMenu({ x: e.clientX, y: e.clientY, mode: 'node', node });
@@ -455,7 +474,7 @@ export function FileTree({ root, onFileClick, onRefresh, onOpenWorkspace, onClea
       onDrop={handleDrop}
       onDragOver={handleDragOver}
     >
-      {root.children?.map((child) => (
+      {sortedRootChildren.map((child) => (
         <FileTreeItem
           key={child.path}
           node={child}

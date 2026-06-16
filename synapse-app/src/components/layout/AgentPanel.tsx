@@ -17,7 +17,7 @@ import {
 } from '@/store/slices/agentSettings';
 import { toggleAgentPanel } from '@/store/slices/layout';
 import { MessageBubble } from '@/components/chat/MessageBubble';
-import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { toolRegistry } from '@/services/toolRegistry';
@@ -36,13 +36,17 @@ import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, save
 import { platform } from '@/platform';
 import { releaseMessageAttachments, resolveAttachmentDataUrl, sanitizeMessagesForPersistence } from '@/services/attachmentRefs';
 import { setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
-import { openTab } from '@/store/slices/editorTabs';
+import { openTab, setActiveTab as setActiveEditorTab } from '@/store/slices/editorTabs';
 import type { RootState } from '@/store';
 import { rollbackFileDiff } from '@/services/fileRollback';
 import { describeCapabilities } from '@/services/modelCapabilities';
 import { getRecord, clampToBatch } from '@/services/recordStore';
 
 const MAX_IMAGE_PAYLOAD_BYTES = 8 * 1024 * 1024;
+// M4-3-S3：非图片（文档/文本/压缩包等）附件也走 sha256 内容寻址落地，与图片同一契约，
+// 否则 sha256/payloadUrl 全空 → MessageBubble openable 恒 false、handleOpenAttachment 必然降级。
+// 内容会读成 dataUrl 进 IndexedDB/文件实体，过大文件内存/存储成本高，设上限兜底（与图片对称）。
+const MAX_FILE_PAYLOAD_BYTES = 25 * 1024 * 1024;
 
 function generateAttachmentId(): string {
   return `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -58,6 +62,15 @@ function formatBytes(bytes?: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${bytes} B`;
+}
+
+// ★ M4-3-S1：输入框 auto-resize —— 高度先归 0 再贴合 scrollHeight（封顶 120px，与 .agent-input max-height 一致）。
+//   超过 120px 由 CSS overflow-y:auto 出滚动条，不裁切。el 为空（未挂载）时安全跳过。
+const AGENT_INPUT_MAX_HEIGHT = 120;
+function autoResizeTextarea(el: HTMLTextAreaElement | null): void {
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = `${Math.min(el.scrollHeight, AGENT_INPUT_MAX_HEIGHT)}px`;
 }
 
 function getAttachmentKind(file: File): AttachmentRef['kind'] {
@@ -163,6 +176,12 @@ export function AgentPanel() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const agentLoopRef = useRef<AgentLoop | null>(null);
+
+  // ★ M4-3-S1：input 变化（含外部置空——发送后 setInput('')、suggestion-chip、event 注入、切换对话）后
+  //   同步在 paint 前重算高度，避免「发送后仍停在多行高度」「程序化填值不撑高」。useLayoutEffect 防闪烁。
+  useLayoutEffect(() => {
+    autoResizeTextarea(inputRef.current);
+  }, [input]);
   const hasApiKey = !!settings.apiKeys?.openai;
   const hasModel = !!model;
   const availableModels = useMemo(() => agentSettings.availableModels ?? [], [agentSettings.availableModels]);
@@ -1005,7 +1024,42 @@ export function AgentPanel() {
           });
         }
       } else {
-        nextAttachments.push(base);
+        // M4-3-S3：非图片附件（文档/文本/压缩包/其它）也走 sha256 内容寻址落地，
+        // 与图片同一契约——回填 sha256 后 MessageBubble openable 判定为真、handleOpenAttachment
+        // 能 platform.attachment.get → objectUrl → 在编辑器 attachment tab 打开，不再恒走降级提示。
+        if (file.size > MAX_FILE_PAYLOAD_BYTES) {
+          nextAttachments.push({
+            ...base,
+            status: 'error',
+            error: `文件超过 ${formatBytes(MAX_FILE_PAYLOAD_BYTES)}，暂不发送`,
+          });
+          continue;
+        }
+        try {
+          const dataUrl = await readAsDataUrl(file);
+          const ref = await platform.attachment.put({
+            data: dataUrl,
+            mime: file.type || undefined,
+            name: file.name,
+            kind: base.kind, // 沿用 getAttachmentKind 推断的 document/text/archive/other 标签
+          });
+          if ('error' in ref) {
+            nextAttachments.push({ ...base, status: 'error', error: ref.message || '附件存储失败' });
+          } else {
+            nextAttachments.push({
+              ...base,
+              sha256: ref.sha256,
+              size: ref.size || file.size,
+              mimeType: ref.mime || base.mimeType,
+            });
+          }
+        } catch (err: any) {
+          nextAttachments.push({
+            ...base,
+            status: 'error',
+            error: err?.message || '文件读取失败',
+          });
+        }
       }
     }
 
@@ -1073,6 +1127,106 @@ export function AgentPanel() {
     });
     return touched ? next : atts;
   }, [resolvedPreviews]);
+
+  // ★ M4-3-S3：已发附件 → 编辑器 attachment tab 的 objectUrl 生命周期管理。
+  //   tabId → objectUrl。tab 关闭后该 objectUrl 不再被任何 tab 引用，需 revoke 防内存泄漏。
+  const attachmentObjectUrls = useRef<Map<string, string>>(new Map());
+  const editorTabs = useAppSelector((s: RootState) => s.editorTabs.tabs);
+
+  // tab 列表变化时，revoke 已不存在 tab 对应的 objectUrl（参考 fileSystem.memoryFileUrls revoke 模式）。
+  useEffect(() => {
+    const liveIds = new Set(editorTabs.map((t: { id: string }) => t.id));
+    for (const [tabId, url] of attachmentObjectUrls.current) {
+      if (!liveIds.has(tabId)) {
+        URL.revokeObjectURL(url);
+        attachmentObjectUrls.current.delete(tabId);
+      }
+    }
+  }, [editorTabs]);
+
+  // 组件卸载时兜底 revoke 全部 objectUrl。
+  useEffect(() => {
+    const map = attachmentObjectUrls.current;
+    return () => {
+      for (const url of map.values()) URL.revokeObjectURL(url);
+      map.clear();
+    };
+  }, []);
+
+  // ★ M4-3-S3：点击已发附件——图片走预览模态、文档/其它走编辑器 attachment tab。
+  const handleOpenAttachment = useCallback((att: {
+    id: string; name: string; kind: string; mimeType?: string; size?: number;
+    previewUrl?: string; payloadUrl?: string; sha256?: string;
+  }) => {
+    // 图片：复用 previewAttachment 轻量预览模态（主人决策）。
+    if (att.kind === 'image' && att.previewUrl) {
+      setPreviewAttachment({
+        id: att.id,
+        name: att.name,
+        kind: 'image',
+        mimeType: att.mimeType,
+        size: att.size,
+        previewUrl: att.previewUrl,
+        status: 'sent',
+      });
+      return;
+    }
+
+    // 文档/其它：解析为 objectUrl 后开 attachment tab。
+    void (async () => {
+      try {
+        const tabId = `att:${att.sha256 || att.id}`;
+        // 已开同一附件 tab → 直接激活（openTab 按 filePath 去重，但 objectUrl 每次不同，故先查已存在的 tab id）。
+        const existing = editorTabs.find((t: { id: string }) => t.id === tabId);
+        if (existing) {
+          dispatch(setActiveEditorTab(tabId));
+          return;
+        }
+
+        let objectUrl: string | null = null;
+        // 内存态可用 URL（http/blob/object，非 data:）直接用，不进 Map（非本组件创建，不负责 revoke）。
+        const memUrl = att.payloadUrl;
+        const isUsableMemUrl = !!memUrl && !memUrl.startsWith('data:');
+        if (isUsableMemUrl) {
+          objectUrl = memUrl!;
+        } else if (att.sha256) {
+          // sha256 内容寻址 → dataUrl → blob → objectUrl（创建者负责 revoke）。
+          const got = await platform.attachment.get(att.sha256).catch(() => null);
+          if (got?.dataUrl) {
+            const resp = await fetch(got.dataUrl);
+            const blob = await resp.blob();
+            objectUrl = URL.createObjectURL(blob);
+            attachmentObjectUrls.current.set(tabId, objectUrl);
+          }
+        }
+
+        if (!objectUrl) {
+          dispatch(addNotification({
+            type: 'warning',
+            title: '附件无法打开',
+            message: `${att.name} 缺少可解析的内容，无法在编辑器打开`,
+          }));
+          return;
+        }
+
+        dispatch(openTab({
+          id: tabId,
+          filePath: objectUrl,
+          fileName: att.name,
+          isDirty: false,
+          isPreview: true,
+          type: 'attachment',
+          mimeType: att.mimeType,
+        }));
+      } catch (err: any) {
+        dispatch(addNotification({
+          type: 'error',
+          title: '附件打开失败',
+          message: err?.message || att.name,
+        }));
+      }
+    })();
+  }, [dispatch, editorTabs]);
 
   return (
     <div className="agent-panel glass-panel">
@@ -1195,6 +1349,7 @@ export function AgentPanel() {
                     workflowRunId={(msg as any).workflowRunId}
                     onReviewChanges={openReviewChanges}
                     onOpenDiff={openDiffTarget}
+                    onOpenAttachment={handleOpenAttachment}
                     onUndoToMessage={handleUndoToMessage}
                     onEdit={handleEdit}
                     onRetry={handleRetry}
@@ -1354,7 +1509,7 @@ export function AgentPanel() {
             placeholder={!hasApiKey ? "请先配置 API Key..." : !hasModel ? "请先选择模型..." : "输入消息... (Ctrl+Enter 发送；@MultiAI:模式名 触发工作流)"}
             rows={1}
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={e => { setInput(e.target.value); autoResizeTextarea(e.target); }}
             onKeyDown={handleKeyDown}
           />
           {isStreaming ? (
@@ -1594,7 +1749,12 @@ export function AgentPanel() {
               )}
               <div className="attachment-preview-actions">
                 <span>{formatBytes(previewAttachment.size)} · {previewAttachment.mimeType || 'image'}</span>
-                <button className="settings-btn danger" onClick={() => removePendingAttachment(previewAttachment.id)}>移除</button>
+                {/* M4-3-S3 修复：「移除」只对【草稿态】附件有意义（removePendingAttachment 在 pendingAttachments
+                    草稿区 filter 并 release 实体）。已发送(sent)图片走只读查看，不渲染移除按钮——否则语义错位
+                    （误导可从消息移除，实为 no-op），且边缘情况下可能误删草稿区同 id 的 pending 附件。 */}
+                {previewAttachment.status !== 'sent' && (
+                  <button className="settings-btn danger" onClick={() => removePendingAttachment(previewAttachment.id)}>移除</button>
+                )}
               </div>
             </div>
           </div>

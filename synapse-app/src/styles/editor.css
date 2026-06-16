@@ -263,6 +263,40 @@
   background: rgba(255, 255, 255, 0.07);
 }
 
+/* ★ M4-3-S8：标签栏右侧「...」更多操作按钮（VS Code 式 tab actions 入口）。 */
+.tab-more-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  min-width: 30px;
+  height: 100%;
+  border: 0;
+  border-left: 1px solid var(--syn-border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--syn-text-muted);
+  cursor: pointer;
+  transition: color 120ms, background 120ms;
+}
+
+.tab-more-btn:hover,
+.tab-more-btn:focus-visible {
+  color: var(--syn-text-primary);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* 菜单内禁用项（如 Show Opened Editors 分组标题）：弱化为非交互标题样式。 */
+.context-menu-item.disabled {
+  opacity: 0.55;
+  cursor: default;
+  font-weight: 600;
+  text-transform: none;
+}
+
+.context-menu-item.disabled:hover {
+  background: transparent;
+}
+
 .tab-bar::-webkit-scrollbar {
   display: none;
 }
@@ -742,6 +776,42 @@
 .unsupported-viewer {
   max-width: 520px;
   padding: 0 20px;
+}
+
+/* ★ M4-3-S3：已发附件 attachment tab viewer。 */
+.attachment-tab-frame {
+  display: block;
+}
+
+.attachment-tab-text {
+  margin: 0;
+  padding: 16px;
+  height: 100%;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--syn-font-mono, monospace);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--syn-text-primary);
+  background: var(--syn-bg-base, transparent);
+}
+
+.attachment-tab-download {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--syn-border);
+  color: var(--syn-accent, #8b5cf6);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.attachment-tab-download:hover {
+  background: var(--syn-bg-hover, rgba(255, 255, 255, 0.06));
 }
 
 /* ============================================

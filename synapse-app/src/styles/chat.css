@@ -209,6 +209,22 @@
   font-size: 12px;
 }
 
+/* ★ M4-3-S3：可点开的已发附件——指针 + hover 高亮 + 键盘聚焦环。 */
+.message-attachment.clickable {
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.message-attachment.clickable:hover {
+  border-color: var(--syn-accent, #8b5cf6);
+  background: var(--syn-bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.message-attachment.clickable:focus-visible {
+  outline: 2px solid var(--syn-accent, #8b5cf6);
+  outline-offset: 1px;
+}
+
 .message-attachment img {
   width: 28px;
   height: 28px;

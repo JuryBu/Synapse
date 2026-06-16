@@ -42,6 +42,10 @@ interface AttachmentInfo {
   size?: number;
   kind: 'image' | 'document' | 'text' | 'archive' | 'other';
   previewUrl?: string;
+  // ★ M4-3-S3：打开已发附件需要这两个字段——sha256 用于按内容寻址 platform.attachment.get 解析 blob，
+  //   payloadUrl 是内存态即时可用 URL（http/blob/object，非 data:）。运行时由 AttachmentRef 透传齐全。
+  payloadUrl?: string;
+  sha256?: string;
   status: 'pending' | 'ready' | 'error' | 'sent';
   error?: string;
 }
@@ -68,6 +72,8 @@ interface MessageProps {
   workflowRunId?: string;
   onReviewChanges?: () => void;
   onOpenDiff?: (diff: FileDiffInfo) => void;
+  // ★ M4-3-S3：点击已发附件——图片走预览模态、文档走编辑器 attachment tab（由 AgentPanel 实装）。
+  onOpenAttachment?: (att: AttachmentInfo) => void;
   onUndoToMessage?: (id: string) => void;
   onEdit?: (id: string, newContent: string) => void;
   onRetry?: (id: string) => void;
@@ -157,7 +163,7 @@ function formatBytes(bytes?: number): string {
   return `${bytes} B`;
 }
 
-export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, thinking, attachments, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
+export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, thinking, attachments, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onOpenAttachment, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
   const [copied, setCopied] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -338,6 +344,18 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
             )}
           </div>
         </div>
+        {/* ★ M4-3-S2：思考块移到正文之前（原在正文之后导致「思考显示在回答下方」）。折叠逻辑不变。 */}
+        {!isUser && thinking?.content && (
+          <div className="thinking-block">
+            <button className="thinking-toggle" onClick={() => setThinkingOpen(open => !open)}>
+              {thinkingOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              <span>Thought for {formatDuration(thinking.durationMs ?? elapsedMs)}</span>
+            </button>
+            {thinkingOpen && (
+              <pre className="thinking-content">{thinking.content}</pre>
+            )}
+          </div>
+        )}
         <div className={`message-content ${isStreaming ? 'streaming' : ''}`}>
           {isUser ? (
             isEditing ? (
@@ -432,29 +450,33 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
 
         {attachments && attachments.length > 0 && (
           <div className="message-attachments">
-            {attachments.map(att => (
-              <div key={att.id} className={`message-attachment kind-${att.kind} status-${att.status}`} title={att.error || att.name}>
-                {att.kind === 'image' && att.previewUrl ? (
-                  <img src={att.previewUrl} alt={att.name} />
-                ) : (
-                  <span className="message-attachment-icon">{att.kind === 'document' ? '📄' : att.kind === 'archive' ? '🗜' : '📎'}</span>
-                )}
-                <span className="message-attachment-name">{att.name}</span>
-                <small>{att.error || formatBytes(att.size)}</small>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {!isUser && thinking?.content && (
-          <div className="thinking-block">
-            <button className="thinking-toggle" onClick={() => setThinkingOpen(open => !open)}>
-              {thinkingOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              <span>Thought for {formatDuration(thinking.durationMs ?? elapsedMs)}</span>
-            </button>
-            {thinkingOpen && (
-              <pre className="thinking-content">{thinking.content}</pre>
-            )}
+            {attachments.map(att => {
+              // ★ M4-3-S3：可点开判定——非 error 且有解析途径（sha256 内容寻址 / 内存态 payloadUrl / 图片预览）。
+              const openable = !!onOpenAttachment && att.status !== 'error'
+                && !att.error && !!(att.sha256 || att.payloadUrl || att.previewUrl);
+              const handleOpen = () => { if (openable) onOpenAttachment?.(att); };
+              return (
+                <div
+                  key={att.id}
+                  className={`message-attachment kind-${att.kind} status-${att.status}${openable ? ' clickable' : ''}`}
+                  title={att.error || att.name}
+                  role={openable ? 'button' : undefined}
+                  tabIndex={openable ? 0 : undefined}
+                  onClick={openable ? handleOpen : undefined}
+                  onKeyDown={openable ? (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleOpen(); }
+                  } : undefined}
+                >
+                  {att.kind === 'image' && att.previewUrl ? (
+                    <img src={att.previewUrl} alt={att.name} />
+                  ) : (
+                    <span className="message-attachment-icon">{att.kind === 'document' ? '📄' : att.kind === 'archive' ? '🗜' : '📎'}</span>
+                  )}
+                  <span className="message-attachment-name">{att.name}</span>
+                  <small>{att.error || formatBytes(att.size)}</small>
+                </div>
+              );
+            })}
           </div>
         )}
 

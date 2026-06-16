@@ -49,17 +49,16 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - 目标：修问题1/5a/5b/8 + 文件图标/文件夹排序/编辑器 tab 增强。
 - 依据：`Plan_5_M4-3_UI修复与美化.md`
 - 执行清单：
-  - [ ] **S1**(S) 问题1 输入框 auto-resize：`autoResize`(height auto→min(scrollHeight,120)) 接 onChange+useLayoutEffect+发送复位；CSS `.agent-input` 加 `overflow-y:auto`
-  - [ ] **S2**(S) 问题5a 思考块上移：MessageBubble thinking-block JSX(449-459) 移到 message-content(341) 之前
-  - [ ] **S3**(L) 问题5b 附件可点开：新 tab type `'attachment'` + `AttachmentTabViewer`(按 mime)；图片走 previewAttachment 模态；objectUrl revoke 生命周期（`Map<tabId,url>`）
-  - [ ] **S4**(M) 删自检表：删 `settingAuditRows/SettingsAuditMatrix/auditStatusClass` + 类型 + 10 处调用；safety/data 措辞中性化；删 css；宽内容加 `.settings-wide-scroll`
-  - [ ] **S5**(S) 文件夹优先排序：FileTree `sortNodes`（目录优先 + 组内 localeCompare numeric），不原地 mutate
-  - [ ] **S6**(M) 彩色图标主题：内置 `services/fileIcons.ts`（material 风格 SVG 子集 ~40 扩展 + 默认 + 文件夹 open/closed），tree-icon 改 ext 映射；不引 npm 包；只动 FileTree
-  - [ ] **S7**(M) 预览 tab reducer 语义：editorTabs `openTab` 支持 `isPreview` 替换 + `pinTab`/`togglePreviewEnabled`/`closeSavedTabs`/`lockGroup`；编辑即固定（dirty→isPreview=false）
-  - [ ] **S8**(L) TabBar 交互 + `...` 菜单 + 快捷键：双击→pin；`...` 菜单（Show Opened Editors/Close All=Ctrl+K W/Close Saved=Ctrl+K U/Enable Preview/Lock Group/Configure）；EditorArea 自管 Ctrl+K 和弦
-- 验收：输入框封顶滚动；thinking 在正文上方；已发附件可打开；设置页无自检表不挤；文件树彩色图标+文件夹优先；编辑器 tab 有预览+菜单+快捷键。
-- ⚠️ S4 完成后全量 grep 确认无残留引用防 TS 失败。
-- 证据/产物：
+  - [x] **S1**(S) 问题1 输入框 auto-resize：`autoResize`(height auto→min(scrollHeight,120)) onChange+useLayoutEffect+置空复位；`.agent-input` 加 `overflow-y:auto`
+  - [x] **S2**(S) 问题5a 思考块上移：thinking-block JSX 移到 message-content 之前，折叠逻辑不变
+  - [x] **S3**(L) 问题5b 附件可点开：新 tab type `'attachment'` + `AttachmentTabViewer`(img/pdf/text/兜底)；图片走 previewAttachment 模态；objectUrl `Map<tabId,url>` revoke 防泄漏；**fix 补：非图片附件 addPendingFiles 落地 sha256 内容，文档打开链路真可达**
+  - [x] **S4**(M) 删自检表：删 settingAuditRows/SettingsAuditMatrix/auditStatusClass + 9 处调用；safety/data 措辞中性化；删 css；长内容 `.settings-wide-scroll`；grep 0 残留
+  - [x] **S5**(S) 文件夹优先排序：FileTree `sortNodes`（目录优先 + localeCompare numeric），副本不 mutate
+  - [x] **S6**(M) 彩色图标主题：内置 `services/fileIcons.ts`（SVG 子集 ~40 扩展 + 默认 + 文件夹 open/closed）；只动 FileTree
+  - [x] **S7**(M) 预览 tab reducer：`openTab` isPreview 原位替换 + `pinTab`/`togglePreviewEnabled`/`closeSavedTabs`/`lockGroup`；编辑即固定
+  - [x] **S8**(L) TabBar：双击 pin；`...` 菜单(Show Opened Editors/Close All Ctrl+K W/Close Saved Ctrl+K U/Enable Preview/Lock Group/Configure)；EditorArea 自管 Ctrl+K 和弦(1.2s 超时)
+- 验收：✅ 8 stage 全实现，build+electron:build 双过；✅ 3 路对抗审查→2 medium 已修(文档附件内容落地 + 已发图模态移除按钮隐藏)；删自检表 grep 0 残留。
+- 证据/产物：commit `feat(M4-3)`；改 AgentPanel/MessageBubble/EditorArea/editorTabs/SettingsPanel/TabBar/FileTree + 新建 AttachmentTabViewer/fileIcons.ts + 多 css。
 
 ---
 

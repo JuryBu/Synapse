@@ -830,6 +830,8 @@ html[data-wallpaper="enabled"] .settings-panel {
   resize: none;
   min-height: 20px;
   max-height: 120px;
+  /* ★ M4-3-S1：超过 120px 时出现纵向滚动条，避免 JS auto-resize 封顶后内容被裁切不可滚。 */
+  overflow-y: auto;
   line-height: 1.5;
 }
 

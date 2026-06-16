@@ -39,8 +39,19 @@
 
 .tree-icon {
   flex-shrink: 0;
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   line-height: 1;
+}
+
+/* ★ M4-3-S6：彩色 SVG 图标统一尺寸与垂直对齐（内置 material-icon-theme 风格子集）。 */
+.tree-icon svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 .tree-name {
