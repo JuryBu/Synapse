@@ -21,6 +21,53 @@ export interface SubagentConfig {
   maxDepth?: number;
 }
 
+/**
+ * ★ M3-2a 固定工作流节点（方案见 Plan_4_M3 §三）。
+ * MultiAIMode 从「subagents 列表」升级为「节点编排的固定工作流」——一个 mode 可挂一串 WorkflowNode，
+ * 由 runWorkflow 按【数组顺序串行推进】。三类节点覆盖串行 / 并行 / 条件分支：
+ *   - agent     ：单子代理节点（串行执行的一步），复用 M3-1a spawnSubagent。
+ *   - parallel  ：并行节点（多子代理同时跑），复用 M3-1a spawnMultiple（内部按 maxConcurrent 分批）。
+ *   - condition ：判断节点——手动设的清晰语义判断（如「上一步是否发现问题」），由一次轻量 LLM 判断
+ *                  基于前序结果得真假；为假按 onFalse：abort=中止整工作流并反馈「无法推进」、continue=跳过继续。
+ * 每节点产出汇入「工作流上下文」（前序所有节点 SubagentResult 摘要），作为后续节点 taskTemplate 的可用上下文。
+ *
+ * 向后兼容：workflow 为可选字段。未填 workflow 的 mode 走旧 subagents[] 语义（solo / 现有预设不破坏）。
+ */
+export type WorkflowNode =
+  | {
+      /** 节点唯一 id（节点结果在工作流上下文中的标识 + 卡片/调试溯源）。 */
+      id: string;
+      type: 'agent';
+      /** 本步的子代理配置（model/systemPrompt/工具权限/maxDepth 等，复用 SubagentConfig）。 */
+      subagent: SubagentConfig;
+      /**
+       * 任务模板（可选）。支持占位符 `{{userInput}}`（原始用户输入）与 `{{context}}`（前序节点结果摘要）。
+       * 不填时由运行器用默认模板组合 userInput + 上下文。
+       */
+      taskTemplate?: string;
+    }
+  | {
+      id: string;
+      type: 'parallel';
+      /** 并行分支：每个分支一个子代理，运行器用 spawnMultiple 同时跑（按 maxConcurrent 分批）。 */
+      branches: SubagentConfig[];
+      /** 各分支共用的任务模板（可选，占位符同 agent 节点）。每个分支以自身角色独立执行。 */
+      taskTemplate?: string;
+    }
+  | {
+      id: string;
+      type: 'condition';
+      /**
+       * 判断语义（手动设的清晰自然语言判断），如「上一步是否发现了需要修复的问题」。
+       * 运行器据此 + 前序结果做一次轻量 LLM 判断（true/false）。
+       */
+      expr: string;
+      /** 判断为假时的处理：abort=中止整工作流并反馈「无法推进」；continue=跳过本判断继续后续节点。 */
+      onFalse: 'abort' | 'continue';
+      /** 中止/跳过时反馈给用户的说明（abort 时拼进「无法推进」原因）。 */
+      message?: string;
+    };
+
 export interface MultiAIMode {
   id: string;
   name: string;
@@ -31,6 +78,11 @@ export interface MultiAIMode {
   mainAgentRole: string; // 主 Agent 角色描述
   subagents: SubagentConfig[];
   triggerConditions: ('stageComplete' | 'reviewPhase' | 'userRequest' | 'error')[];
+  /**
+   * ★ M3-2a 固定工作流节点编排（可选）。填了 workflow 的 mode 由 runWorkflow 按节点顺序执行；
+   * 未填则走旧 subagents[] 语义。向后兼容：现有预设/solo 不受影响。
+   */
+  workflow?: WorkflowNode[];
 }
 
 /**
@@ -143,6 +195,96 @@ export const BUILT_IN_MODES: MultiAIMode[] = [
       maxTokens: 4096,
     }],
     triggerConditions: ['userRequest'],
+  },
+  // ★ M3-2a 示例固定工作流（方案见 Plan_4_M3 §三）：找茬模式。
+  //   演示串行 / 并行 / 判断三类节点完整链路，便于 M3-2b @触发 与运行器测试：
+  //     节点1（agent，串行）：推进子代理——先理解/推进任务产出初版方案。
+  //     节点2（parallel，并行）：3 个找茬子代理同时审查，从不同角度挑问题（spawnMultiple）。
+  //     节点3（condition，判断）：基于前序结果判断「是否发现需修复的问题」——
+  //                              为真→继续修复；为假→onFalse=abort 中止并反馈「无可推进的修复项」。
+  //     节点4（agent，串行）：修复子代理——综合找茬意见修复并给出最终方案。
+  {
+    id: 'fault-finding-workflow',
+    name: '找茬模式',
+    description: '固定工作流：推进 → 3 子代理并行找茬 → 判断有无问题 → 修复。演示串行/并行/判断节点。',
+    agentCount: 5,
+    isBuiltin: true,
+    isBuiltIn: true,
+    mainAgentRole: '你是固定工作流「找茬模式」的协调者，按节点编排推进任务。',
+    // 旧 subagents[] 留空——本 mode 走 workflow 节点编排。
+    subagents: [],
+    triggerConditions: ['userRequest'],
+    workflow: [
+      {
+        id: 'advance',
+        type: 'agent',
+        subagent: {
+          id: 'advancer',
+          name: '推进者',
+          role: '理解任务并产出初版方案',
+          model: '',
+          systemPrompt: '你是推进者子代理。理解用户任务，产出一份清晰、结构化的初版方案/答案，作为后续找茬与修复的基础。',
+          toolPermissions: ['read', 'search'],
+          maxTokens: 4096,
+        },
+        taskTemplate: '请针对以下任务产出初版方案：\n{{userInput}}',
+      },
+      {
+        id: 'nitpick',
+        type: 'parallel',
+        taskTemplate: '请审查前序节点产出的初版方案，从你的专长角度找出具体问题。\n\n## 用户原始任务\n{{userInput}}\n\n## 前序结果\n{{context}}',
+        branches: [
+          {
+            id: 'nitpick-logic',
+            name: '逻辑找茬',
+            role: '检查逻辑严谨性与推理漏洞',
+            model: '',
+            systemPrompt: '你是逻辑找茬子代理。专注检查方案的逻辑严谨性、推理链漏洞、前后矛盾。逐条列出发现的问题；若无问题，明确说「未发现逻辑问题」。',
+            toolPermissions: ['read', 'search'],
+            maxTokens: 2048,
+          },
+          {
+            id: 'nitpick-detail',
+            name: '细节找茬',
+            role: '检查细节完整性与边界遗漏',
+            model: '',
+            systemPrompt: '你是细节找茬子代理。专注检查方案的细节完整性、边界条件遗漏、异常处理缺失。逐条列出问题；若无问题，明确说「未发现细节问题」。',
+            toolPermissions: ['read', 'search'],
+            maxTokens: 2048,
+          },
+          {
+            id: 'nitpick-practice',
+            name: '实践找茬',
+            role: '检查可行性与落地风险',
+            model: '',
+            systemPrompt: '你是实践找茬子代理。专注检查方案的可行性、落地风险、与现实约束的冲突。逐条列出问题；若无问题，明确说「未发现可行性问题」。',
+            toolPermissions: ['read', 'search'],
+            maxTokens: 2048,
+          },
+        ],
+      },
+      {
+        id: 'has-issue',
+        type: 'condition',
+        expr: '前序找茬子代理是否发现了需要修复的实质问题（而非全部回复「未发现问题」）',
+        onFalse: 'abort',
+        message: '三个找茬子代理均未发现需修复的实质问题，初版方案已可用，无需进入修复阶段。',
+      },
+      {
+        id: 'fix',
+        type: 'agent',
+        subagent: {
+          id: 'fixer',
+          name: '修复者',
+          role: '综合找茬意见修复并产出最终方案',
+          model: '',
+          systemPrompt: '你是修复者子代理。综合前序找茬子代理提出的问题，逐条修复初版方案，产出最终的、经过打磨的完整方案。',
+          toolPermissions: ['read', 'search', 'write'],
+          maxTokens: 4096,
+        },
+        taskTemplate: '请综合找茬意见，修复初版方案并产出最终方案。\n\n## 用户原始任务\n{{userInput}}\n\n## 前序结果（含初版方案与找茬意见）\n{{context}}',
+      },
+    ],
   },
 ];
 
