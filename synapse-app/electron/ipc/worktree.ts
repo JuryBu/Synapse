@@ -12,6 +12,11 @@
  * - 路径一律 path.resolve 归一；create/remove 目标路径校验防穿越。
  * - 命令失败统一返回 { error: true, message }，不抛异常给渲染进程。
  * - remove 默认不带 --force（git worktree remove 会动 .git、可能丢未提交改动），仅显式 force 才加。
+ *
+ * 中文路径编码（M2-5 真机定位并修复，详见 decodeOutput / runGit 注释）：
+ * - git 子进程输出统一按 UTF-8 解码（旧版照搬 command.ts 的 GBK 口径，对直接 spawn 的 git 是错的）。
+ * - runGit 统一注入 `-c core.quotepath=false`，路径以原始 UTF-8 字节输出。
+ * - 两端对齐后，含中文（如「VC工具包」）的 repoRoot 全功能（create/list/remove/status）正常。
  */
 
 import { ipcMain, app } from 'electron';
@@ -47,26 +52,29 @@ const MAX_OUTPUT_CHARS = 20_000;
 /** worktree 名校验：只允许字母数字、连字符、下划线、点，避免路径穿越与非法分支名。 */
 const SAFE_NAME = /^[A-Za-z0-9._-]+$/;
 
-function isWin(): boolean {
-    return process.platform === 'win32';
-}
-
-/** Windows git 输出按 GBK 解码（与 ipc/command.ts 口径一致，避免中文路径/分支名乱码）；其它平台 UTF-8。 */
+/**
+ * git 子进程输出一律按 UTF-8 解码（含 Windows）。
+ *
+ * 中文路径根因（M2-5 真机定位）：
+ *   git for Windows 直接 spawn 时，对路径/分支名等以 **UTF-8 字节** 输出 stdout/stderr
+ *   （git 内部统一 UTF-8，与系统 ANSI 代码页 CP936/GBK 无关；本仓配 core.quotepath=false 见 runGit）。
+ *   旧实现照搬 ipc/command.ts 的「Windows 按 GBK 解码」，但 command.ts 跑的是 cmd.exe
+ *   （其内建命令输出确实是 GBK），而本文件直接跑 git——编码口径不同，照搬就错。
+ *   结果：rev-parse --show-toplevel 的 UTF-8 中文路径被 GBK 误解成乱码（工具包→宸ュ叿鍖），
+ *   ensureGitRepo 把乱码当 root，后续 `git -C <乱码>` 真的 cannot change to → worktree 全功能崩。
+ *   修复：统一 UTF-8 解码。ASCII（英文路径/分支）在 UTF-8 与 GBK 下字节一致，故不影响英文路径。
+ */
 function decodeOutput(chunks: Buffer[]): string {
-    const buf = Buffer.concat(chunks);
-    if (isWin()) {
-        try {
-            return new TextDecoder('gbk').decode(buf);
-        } catch {
-            return buf.toString('utf-8'); // ICU 不支持 gbk 时兜底
-        }
-    }
-    return buf.toString('utf-8');
+    return Buffer.concat(chunks).toString('utf-8');
 }
 
 /**
  * 跑一条 git 命令。数组传参 + shell:false（spawn 默认），从根上杜绝注入。
  * args 形如 ['-C', repoRoot, 'worktree', 'list', '--porcelain']。
+ *
+ * 中文路径防御（与 decodeOutput 配套）：统一注入 `-c core.quotepath=false`，
+ * 让 git 把含非 ASCII 的路径/文件名以**原始 UTF-8 字节**输出，而非默认的八进制转义
+ * （形如 "\345\267\245…"）——否则即便按 UTF-8 解码也拿不回中文。两端对齐后中文路径全链路通。
  */
 function runGit(args: string[], cwd?: string): Promise<GitResult> {
     return new Promise((resolve) => {
@@ -75,7 +83,7 @@ function runGit(args: string[], cwd?: string): Promise<GitResult> {
 
         let child;
         try {
-            child = spawn('git', args, {
+            child = spawn('git', ['-c', 'core.quotepath=false', ...args], {
                 cwd: cwd || process.cwd(),
                 env: { ...process.env },
                 timeout: GIT_TIMEOUT_MS,
