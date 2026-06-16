@@ -128,13 +128,13 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - 目标：请求失败自动 retry/重连 + reconnect i/N 显示 + 端到端本轮计时。
 - 依据：`Plan_5_M4-8_稳定性重连计时.md`
 - 执行清单：
-  - [ ] **S1**(M) 错误分类 + 可中断退避：`classifyError`(status/body/errName→retryable/category/userMessage) + `retryableSleep(delay,signal)`；streamChat real 分支重构（400/422+upstream_error 纳入可重试 gateway_upstream，优先级 降级>重试>不可重试）；三处 sleep 改 retryableSleep(signal)
-  - [ ] **S2**(M) completeChat(off/pseudo) 补 retry：!ok 改重试循环复用 classifyError+retryableSleep，可重试 yield retry chunk 退避；与 auto→pseudo 降级不冲突
-  - [ ] **S3**(M) 重连进度进气泡：conversation slice 加瞬态 `reconnect` 字段 + `setMessageReconnect`；agentLoop retry chunk set / 实质数据或收尾 clear；MessageBubble 渲染 `reconnect i/N`；持久化显式剔除
-  - [ ] **S4**(S) 本轮计时端到端：`formatDuration` 带空格「X m Y s」+ hour 位；agentLoop 记 `loopStartedAt`，最终完成消息附端到端总计时徽标（逐条 run 计时仍各自显示）
-  - [ ] **S5**(S) maxRetries 配置化：共享常量 `MAX_RETRIES`(默认 5)，三处统一引用（不做设置项）；自测 + 真机制造网关 upstream 错误验证 reconnect 计数 + 计时刷新 + 耗尽错误文案
-- 验收：网关失败自动重连显示 reconnect i/5；消息底部端到端计时实时刷新；重试耗尽给明确错误。
-- 证据/产物：
+  - [x] **S1**(M) 错误分类 + 可中断退避：`classifyError` + `retryableSleep(delay,signal)`；streamChat real 重构(400/422+upstream 特征词纳入可重试 gateway_upstream+console.warn body 摘要，优先级 降级>重试>不可重试)；三处 sleep 改 retryableSleep(signal)
+  - [x] **S2**(M) completeChat(off/pseudo) 补 retry：!ok 改重试循环复用 classifyError+retryableSleep；abort throw 外层转 aborted；与 auto→pseudo 降级不冲突
+  - [x] **S3**(M) 重连进度进气泡：conversation slice 瞬态 `reconnect` + `setMessageReconnect`；agentLoop set/clear；MessageBubble 渲染 `reconnect i/N`；sanitize+branchConversation 双重剔除不持久化；去掉持续 notification
+  - [x] **S4**(S) 本轮计时端到端：`formatDuration` 带空格+hour 位(「26 m 39 s」/「1 h 5 m 0 s」)；agentLoop `loopStartedAt`，loop 自然完成(completedNaturally 守卫)给最终消息挂 endToEndMs 徽标
+  - [x] **S5**(S) maxRetries=5 共享常量三处统一引用；编译过（真机制造网关 upstream 错误验证留主人侧）
+- 验收：✅ 5 stage 实现，build+electron:build 双过；✅ 3 路对抗审查→1 high+2 medium 已修(关键：真流式断线重试内容拼接污染→resetContent 覆盖语义，顺带根治旧 M2-S 隐患)；🔸 真机 retry/reconnect 待主人侧异常端点触发验证。
+- 证据/产物：commit `feat(M4-8)`；改 aiClient/agentLoop/conversation/MessageBubble + sanitize 剔除 reconnect。
 
 ---
 
@@ -150,3 +150,4 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - [ ] 二期：工作区文件树概要注入 / /loop 收敛循环 / M4-8 fallback 第三层
 - [ ] (M4-1 low) 护栏 `historyOnlyTokens` 仅含历史文本 token、不含历史非文本(图片)token——块一治本后概率极低，Plan 措辞本就如此，记为口径取舍
 - [ ] (M4-1 low) StatusBar 两态：切到另一已存在对话若未重置 `tokenUsage` 可能短暂显示上一对话 promptTokens（clearConversation 已置 null，仅切换路径）；后续可在 loadConversation 确认重置
+- [ ] (M4-8 真机) retry/重连/计时需主人侧用真实异常/超时端点触发验证：reconnect i/5 计数、本轮端到端计时实时刷新、重试耗尽错误文案

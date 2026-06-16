@@ -55,6 +55,11 @@ export interface StreamChunk {
   // M2-S 任务2：重试进度可观测。每次退避重试【前】发一个该事件，让 UI 显示「正在重试 N/M」
   // 而非干等。仅在重试真实发生时发出，不改变现有【是否重试】判定与退避时长。
   retry?: { attempt: number; maxRetries: number; reason: string };
+  // M4-8 审查修复：真流式读流【中途】断线重试，会让模型从头重生成整段回复。若本轮已 yield 过
+  // 实质 content/thinking（已上屏 + 已累积进 fullContent），直接 continue 重发会造成「半截旧内容 +
+  // 完整新内容」首尾拼接污染气泡与 conversation history。故在这类 retry chunk 上带 resetContent，
+  // 让 agentLoop 收到时先丢弃本轮已上屏/已累积内容，再接收重试后的新流（覆盖而非追加）。
+  resetContent?: boolean;
 }
 
 const DEFAULT_ENDPOINTS: Record<string, string> = {
@@ -63,6 +68,108 @@ const DEFAULT_ENDPOINTS: Record<string, string> = {
   ollama: 'http://localhost:11434/v1',
   openrouter: 'https://openrouter.ai/api/v1',
 };
+
+/**
+ * M4-8-S5：最大重试次数共享常量（写死，不做设置项）。
+ * streamChat（real）/ completeChat（off/pseudo）/ UI 文案的 N 统一引用此常量——
+ * brief 文案「reconnect 1/5」暗示 5，最坏退避总等待约 2+4+8+10+10 ≈ 34s 才放弃，
+ * 配合气泡 reconnect 进度让等待可见（见 Plan_5 第七节决议2）。
+ */
+export const MAX_RETRIES = 5;
+
+/** 退避时长（指数，封顶 10s）：第 attempt 次重试前等待 min(1000 * 2^attempt, 10000) ms。 */
+function backoffDelay(attempt: number): number {
+  return Math.min(1000 * Math.pow(2, attempt), 10000);
+}
+
+/**
+ * M4-8-S1：错误分类——把「可重试性」判定集中到单一可测函数，杜绝散落各处的 status code 判定。
+ *
+ * 真根因修复（Plan_5 第三节【2】）：旧实现只看 HTTP status，把【被网关包装成 400/422 的上游故障】
+ * （body 带 upstream_error / bad gateway / timeout / connection 等文案）误判为「不可重试的参数错」
+ * 直接失败、不重连。这里对 400/422 额外看 body 文案：命中保守上游特征词 → 归为可重试 gateway_upstream。
+ *
+ * 判定优先级（自上而下，命中即返回）：
+ *   ① abort（errName==='AbortError' 或 signalAborted）→ 不可重试 aborted（绝不能当网络错重试，
+ *      否则 stop 触发重试死循环，见 Plan_5 风险三）。
+ *   ② 429 → 可重试 rate_limit。
+ *   ③ status >= 500 → 可重试 server_error。
+ *   ④ fetch / 流读取异常（有 errName 但非 status，且非 abort）→ 可重试 network。
+ *   ⑤ 400/422 且 body 命中上游特征词 → 可重试 gateway_upstream（命中时 console.warn 输出 body 摘要便于真机调参）。
+ *   ⑥ 400/422 且 body 无上游特征 → 不可重试 client_error（真参数错）。
+ *   ⑦ 401/403 → 不可重试 auth；404 → 不可重试 not_found；其它 → 不可重试 client_error。
+ */
+export type ErrorCategory =
+  | 'rate_limit' | 'server_error' | 'network' | 'gateway_upstream'
+  | 'client_error' | 'auth' | 'not_found' | 'aborted';
+
+export interface ErrorClassification {
+  retryable: boolean;
+  category: ErrorCategory;
+  /** 重试耗尽 / 不可重试时给用户的明确文案。 */
+  userMessage: string;
+}
+
+/** 网关把上游 5xx / 超时 / 连接失败包装成 400/422 时 body 里常见的保守特征词（仅对 400/422 生效）。 */
+const UPSTREAM_HINT_WORDS = [
+  'upstream_error', 'upstream', 'bad gateway', 'gateway',
+  'timeout', 'timed out', 'connection', 'econnreset', 'econnrefused',
+  'socket hang up', 'temporarily unavailable', 'service unavailable',
+];
+
+export function classifyError(
+  status?: number,
+  body?: string,
+  errName?: string,
+  signalAborted?: boolean,
+): ErrorClassification {
+  // ① abort 优先级最高——绝不可重试，否则 stop 会触发重试死循环。
+  if (errName === 'AbortError' || signalAborted) {
+    return { retryable: false, category: 'aborted', userMessage: 'aborted' };
+  }
+
+  // 无 status：fetch / 流读取等抛异常（非 abort）→ 网络错，可重试。
+  if (status === undefined) {
+    return {
+      retryable: true,
+      category: 'network',
+      userMessage: '🌐 网络连接异常，请检查网络后重试',
+    };
+  }
+
+  // ② 限流
+  if (status === 429) {
+    return { retryable: true, category: 'rate_limit', userMessage: '⏳ 请求过于频繁，请稍后再试（429）' };
+  }
+  // ③ 服务器错误
+  if (status >= 500) {
+    return { retryable: true, category: 'server_error', userMessage: `🔥 服务器错误（${status}），请稍后重试` };
+  }
+  // ④/⑤ 400 / 422：看 body 文案区分「网关包装的上游故障」vs「真参数错」。
+  if (status === 400 || status === 422) {
+    const normalized = (body ?? '').toLowerCase();
+    const hit = UPSTREAM_HINT_WORDS.some(word => normalized.includes(word));
+    if (hit) {
+      // 命中上游特征 → 当可重试上游故障；打 warn 摘要便于真机收紧词表。
+      console.warn(`[AIClient] HTTP ${status} 命中上游故障特征，按可重试处理。body 摘要:`, (body ?? '').slice(0, 200));
+      return {
+        retryable: true,
+        category: 'gateway_upstream',
+        userMessage: `🔁 上游服务暂时不可用（被网关包装为 ${status}），已自动重试`,
+      };
+    }
+    return { retryable: false, category: 'client_error', userMessage: `❌ 请求参数错误（${status}）：${(body ?? '').slice(0, 200)}` };
+  }
+  // ⑥ 鉴权 / 不存在
+  if (status === 401 || status === 403) {
+    return { retryable: false, category: 'auth', userMessage: '🔑 API Key 无效或已过期，请检查设置（401/403）' };
+  }
+  if (status === 404) {
+    return { retryable: false, category: 'not_found', userMessage: '❌ 接口或模型不存在，请检查模型名称（404）' };
+  }
+  // ⑦ 其它 4xx 等 → 不可重试。
+  return { retryable: false, category: 'client_error', userMessage: `HTTP ${status}: ${(body ?? '').slice(0, 200)}` };
+}
 
 const PSEUDO_STREAM_CHUNK_SIZE: Record<PseudoStreamSpeed, number> = {
   slow: 2,
@@ -171,6 +278,28 @@ export class AIClient {
     });
   }
 
+  /**
+   * M4-8-S1：可中断退避 sleep——退避等待期间用户 stop()（abort signal）能立即中断，
+   * 不必干等满 delay（最高 10s）。复用 waitPseudoDelay 的「可中断 sleep」范本：
+   * 进入即检查 signal.aborted；等待中监听 abort 立即 reject(AbortError)（由外层 catch 识别为 aborted，
+   * 经 classifyError 归为不可重试，杜绝 stop 触发重试死循环，见 Plan_5 风险三）。
+   * signal 缺省时取 this.abortController?.signal。
+   */
+  private async retryableSleep(delay: number, signal?: AbortSignal | null): Promise<void> {
+    const sig = signal ?? this.abortController?.signal ?? null;
+    if (sig?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = globalThis.setTimeout(resolve, delay);
+      const onAbort = () => {
+        globalThis.clearTimeout(timer);
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+      sig?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
   private async *yieldResponseError(response: Response, errText: string): AsyncGenerator<StreamChunk> {
     const status = response.status;
     if (status === 429) {
@@ -199,10 +328,59 @@ export class AIClient {
     mode: 'pseudo' | 'off',
     fallbackReason?: string,
   ): AsyncGenerator<StreamChunk> {
-    const response = await this.requestChat(messages, tools, false);
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      yield* this.yieldResponseError(response, errText);
+    // M4-8-S2：非流式路径（off/pseudo）补 retry 覆盖——原先 !ok 直接 yieldResponseError 返回、完全无重试，
+    // 与全局「请求要有 retry/重连」决策冲突。这里复用 streamChat 同一套 classifyError + retryableSleep：
+    //   - HTTP !ok：classifyError 判定可重试（429/5xx/网关 400-422 upstream）→ yield retry chunk（带 streamMode=mode，
+    //     让 agentLoop 知道是非流式重试）→ 可中断退避重试；达上限或不可重试 → yieldResponseError 明确文案。
+    //   - fetch / 解析异常：同样进 classifyError。AbortError throw 出去，由 streamChat off/pseudo 外层 catch 统一转 'aborted'
+    //     （与现有行为一致），不在此当网络错重试，杜绝 stop 触发重试死循环。
+    //   与现有 auto→pseudo 降级互不冲突：那是 streamChat 决定走哪条路，completeChat 只负责本条路内的重试。
+    let response: Response;
+    let retries = 0;
+    while (true) {
+      let httpResponse: Response | null = null;
+      let fetchErr: any = null;
+      try {
+        httpResponse = await this.requestChat(messages, tools, false);
+      } catch (err: any) {
+        fetchErr = err;
+      }
+
+      if (httpResponse && httpResponse.ok) {
+        response = httpResponse;
+        break;
+      }
+
+      // 统一分类：有 response 用 status+body，否则用 fetch 异常名。
+      const status = httpResponse?.status;
+      const errText = httpResponse ? await httpResponse.text().catch(() => '') : '';
+      const cls = classifyError(
+        status,
+        errText,
+        fetchErr?.name,
+        this.abortController?.signal.aborted,
+      );
+
+      if (cls.category === 'aborted') {
+        // 让 streamChat off/pseudo 外层 catch 统一转 'aborted'，与现有中止收尾一致。
+        throw new DOMException('Aborted', 'AbortError');
+      }
+
+      if (cls.retryable && retries < MAX_RETRIES) {
+        retries++;
+        const delay = backoffDelay(retries);
+        yield { type: 'retry', retry: { attempt: retries, maxRetries: MAX_RETRIES, reason: cls.userMessage }, streamMode: mode, fallbackReason };
+        await this.retryableSleep(delay, this.abortController?.signal);
+        continue;
+      }
+
+      // 达上限或不可重试：给明确文案（HTTP 有 response 走 yieldResponseError 复用既有细分文案；
+      // 纯 fetch 异常无 response，直接发 classifyError 文案）。
+      if (httpResponse) {
+        yield* this.yieldResponseError(httpResponse, errText);
+      } else {
+        yield { type: 'error', error: fetchErr?.message || cls.userMessage, streamMode: mode };
+      }
       return;
     }
 
@@ -309,7 +487,12 @@ export class AIClient {
     }
 
     let retries = 0;
-    const maxRetries = 3;
+    const maxRetries = MAX_RETRIES;
+    // M4-8 审查修复：是否已向消费者 yield 过实质 content/thinking/tool_call。
+    // 一旦为真，说明已有部分输出上屏 + 累积进 agentLoop 的 fullContent；此后真流式读流中途断线
+    // 触发的重试会让模型从头重生成整段回复，必须让 agentLoop 先丢弃已发内容（resetContent）再覆盖，
+    // 否则「半截旧 + 完整新」拼接污染气泡与 conversation history。仅真流式 read 中途断这一路径需要。
+    let streamedAny = false;
 
     while (retries <= maxRetries) {
       try {
@@ -319,51 +502,38 @@ export class AIClient {
           const status = response.status;
           const errText = await response.text().catch(() => '');
 
+          // 优先级① 真流式不支持 → auto 降级伪流式（最高优先，先于重试判定）。
           if (strategy === 'auto' && isStreamUnsupported(status, errText)) {
             yield* this.completeChat(messages, tools, 'pseudo', `真流式请求失败，已降级伪流式：HTTP ${status}`);
             this._isStreaming = false;
             return;
           }
 
-          // Stage 5: 错误类型细分
-          if (status === 429) {
+          // M4-8-S1：优先级② 用统一 classifyError 判定可重试性（替换散落的 429/5xx/404 分支）。
+          // 把「被网关包装成 400/422 的上游故障」（body 命中特征词）纳入可重试 gateway_upstream，修真根因。
+          const cls = classifyError(status, errText, undefined, this.abortController?.signal.aborted);
+          if (cls.retryable) {
             retries++;
             if (retries <= maxRetries) {
-              const delay = Math.min(1000 * Math.pow(2, retries), 10000);
-              // M2-S 任务2：重试前发进度事件（不改判定与退避时长，仅多一个可观测信号）
-              yield { type: 'retry', retry: { attempt: retries, maxRetries, reason: '请求过于频繁（429）' }, streamMode: 'real' };
-              await new Promise(r => setTimeout(r, delay));
+              const delay = backoffDelay(retries);
+              // 重试前发进度事件（让 UI 显示「reconnect N/M」而非干等）。
+              yield { type: 'retry', retry: { attempt: retries, maxRetries, reason: cls.userMessage }, streamMode: 'real' };
+              // 可中断退避：用户 stop 时立即抛 AbortError，由外层 catch 识别为 aborted。
+              await this.retryableSleep(delay, this.abortController?.signal);
               continue;
             }
-            yield { type: 'error', error: '⏳ 请求过于频繁，请稍后再试（429）' };
-            this._isStreaming = false;
-            return;
-          }
-          if (status === 401 || status === 403) {
-            yield { type: 'error', error: '🔑 API Key 无效或已过期，请检查设置（401/403）' };
-            this._isStreaming = false;
-            return;
-          }
-          if (status === 404) {
-            const modelHint = errText.includes('model') ? `模型 "${this.config.model}" 不存在` : '接口不存在';
-            yield { type: 'error', error: `❌ ${modelHint}，请检查模型名称（404）` };
-            this._isStreaming = false;
-            return;
-          }
-          if (status >= 500) {
-            retries++;
-            if (retries <= maxRetries) {
-              const delay = Math.min(1000 * Math.pow(2, retries), 10000);
-              // M2-S 任务2：重试前发进度事件
-              yield { type: 'retry', retry: { attempt: retries, maxRetries, reason: `服务器错误（${status}）` }, streamMode: 'real' };
-              await new Promise(r => setTimeout(r, delay));
-              continue;
+            // 重试耗尽：可重试错也要给明确文案；auto 流式可再降级伪流式兜底。
+            if (strategy === 'auto') {
+              yield* this.completeChat(messages, tools, 'pseudo', `真流式重试耗尽，已降级伪流式：${cls.userMessage}`);
+              this._isStreaming = false;
+              return;
             }
-            yield { type: 'error', error: `🔥 服务器错误（${status}），请稍后重试` };
+            yield { type: 'error', error: cls.userMessage, streamMode: 'real' };
             this._isStreaming = false;
             return;
           }
-          yield { type: 'error', error: `HTTP ${status}: ${errText.slice(0, 200)}` };
+          // 优先级③ 不可重试 → yieldResponseError（复用既有细分文案，如 404 带模型名、401/403 Key 提示）。
+          yield* this.yieldResponseError(response, errText);
           this._isStreaming = false;
           return;
         }
@@ -397,6 +567,7 @@ export class AIClient {
               if (trimmed === 'data: [DONE]') {
                 // Emit accumulated tool calls
                 for (const tc of toolCalls.values()) {
+                  streamedAny = true;
                   yield { type: 'tool_call', toolCall: tc, streamMode: 'real' };
                 }
                 yield { type: 'done', streamMode: 'real' };
@@ -425,11 +596,13 @@ export class AIClient {
               if (!delta) continue;
 
               if (delta.content) {
+                streamedAny = true;
                 yield { type: 'content', content: delta.content, streamMode: 'real' };
               }
 
               const thinking = delta.reasoning_content ?? delta.reasoning ?? delta.thinking;
               if (thinking) {
+                streamedAny = true;
                 yield { type: 'thinking', thinking: String(thinking), streamMode: 'real' };
               }
 
@@ -465,26 +638,63 @@ export class AIClient {
         return;
 
       } catch (err: any) {
-        if (err.name === 'AbortError') {
-          yield { type: 'error', error: 'aborted' };
+        // M4-8-S1：fetch / 流读取异常统一进 classifyError。AbortError（含可中断退避抛出的）
+        // 归为不可重试 aborted——绝不当网络错重试，杜绝 stop 触发重试死循环（Plan_5 风险三）。
+        const cls = classifyError(undefined, undefined, err?.name, this.abortController?.signal.aborted);
+        if (!cls.retryable) {
+          // aborted：发 'aborted' 让 agentLoop 走中止收尾分支；其它不可重试（理论上 catch 这里只会是 abort）给文案。
+          yield { type: 'error', error: cls.category === 'aborted' ? 'aborted' : (err?.message || cls.userMessage) };
           this._isStreaming = false;
           return;
         }
         retries++;
         if (retries > maxRetries) {
           if (strategy === 'auto') {
+            // M4-8 审查修复：读流中途断线已上屏部分内容时，降级伪流式会一次性吐全量，
+            // 同样会拼接到半截旧内容后。先发 resetContent 让 agentLoop 清空已发内容再覆盖。
+            if (streamedAny) {
+              yield { type: 'retry', retry: { attempt: retries, maxRetries, reason: '连接中断，重置后改用伪流式重发' }, streamMode: 'pseudo', resetContent: true };
+            }
             yield* this.completeChat(messages, tools, 'pseudo', `真流式连接失败，已降级伪流式：${err.message || '网络错误'}`);
             this._isStreaming = false;
             return;
           }
-          yield { type: 'error', error: err.message || '网络错误' };
+          yield { type: 'error', error: err.message || cls.userMessage };
           this._isStreaming = false;
           return;
         }
-        const delay = Math.min(1000 * Math.pow(2, retries), 10000);
-        // M2-S 任务2：网络异常重试前发进度事件
-        yield { type: 'retry', retry: { attempt: retries, maxRetries, reason: err?.message ? `连接异常（${String(err.message).slice(0, 60)}）` : '连接异常' }, streamMode: 'real' };
-        await new Promise(r => setTimeout(r, delay));
+        const delay = backoffDelay(retries);
+        // 网络异常重试前发进度事件。
+        // M4-8 审查修复（问题2/3）：真流式读流【中途】断线（已 yield 过实质内容 streamedAny）重试时，
+        // 重发会让模型从头重生成整段回复。带 resetContent 让 agentLoop 先清空本轮已上屏/已累积内容，
+        // 重试后的新流覆盖而非追加，杜绝「半截旧 + 完整新」拼接污染气泡与 conversation history。
+        yield {
+          type: 'retry',
+          retry: { attempt: retries, maxRetries, reason: err?.message ? `连接异常（${String(err.message).slice(0, 60)}）` : cls.userMessage },
+          streamMode: 'real',
+          resetContent: streamedAny,
+        };
+        // 已发过内容则重发等价于「从头重来」，重置标志，重试连接再次 yield 才重新置位。
+        streamedAny = false;
+        // 可中断退避：用户 stop 时立即抛 AbortError。
+        // M4-8 审查修复（问题1）：catch 块尾退避不像 HTTP !ok 退避（line 512）那样有外层 try 兜底——
+        // 此处单独包 try/catch，abort 时与 HTTP !ok 退避路径对齐：干净 yield aborted 收尾后 return，
+        // 不让 AbortError 逃逸出 while 与整个 generator（否则一路落到 agentLoop 顶层 catch，
+        // 会先塞一条假 error 事件污染 run 历史，再靠 this.running===false 这个外部不变量兜回 aborted）。
+        try {
+          await this.retryableSleep(delay, this.abortController?.signal);
+        } catch (sleepErr: any) {
+          const sleepCls = classifyError(undefined, undefined, sleepErr?.name, this.abortController?.signal.aborted);
+          if (sleepCls.category === 'aborted') {
+            yield { type: 'error', error: 'aborted', streamMode: 'real' };
+            this._isStreaming = false;
+            return;
+          }
+          // 理论上 retryableSleep 只会抛 AbortError；其它异常保守按不可重试失败处理，不再 continue。
+          yield { type: 'error', error: sleepErr?.message || sleepCls.userMessage, streamMode: 'real' };
+          this._isStreaming = false;
+          return;
+        }
       }
     }
   }

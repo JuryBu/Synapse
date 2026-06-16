@@ -7,13 +7,13 @@ import { AIClient, type ChatMessage, type ToolCallRequest } from './aiClient';
 import { store, type RootState } from '../store';
 import {
   addMessage, updateMessage, updateMessageMeta, appendMessageContent,
-  appendMessageThinking, setMessageStreamState, setStreaming,
+  appendMessageThinking, setMessageStreamState, setMessageReconnect, setStreaming,
   clearStreamingContent, setTitle, setTokenUsage,
   addAssistantRun, addRunEvent, addMessageDiff, recordFileSnapshot,
   type AttachmentRef, type MessageContentPart, type StreamModeUsed,
 } from '../store/slices/conversation';
 import { setConnectionStatus } from '../store/slices/agentSettings';
-import { addNotification, updateNotification, removeNotification } from '../store/slices/notifications';
+import { addNotification } from '../store/slices/notifications';
 import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
 import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type SynapseRecord } from './recordStore';
 import { generateBatch } from './recordGenerator';
@@ -633,6 +633,18 @@ export class AgentLoop {
       store.dispatch(setTitle(title));
     }
 
+    // ★ M4-8-S4 端到端计时：记录本次 agent loop 的起点（用户发出此刻）。
+    // 端到端总耗时 = loop 全程（含多轮工具调用）完成时的 now - loopStartedAt，
+    // 只挂在【最终完成消息】那一条上（finalCompletedAssistantId），不在每条 run 上重复（Plan_5 风险四）。
+    // 逐条 run 计时仍走各自 runStartedAt → durationMs，互不干扰。
+    const loopStartedAt = Date.now();
+    // 最终给出答复的 assistant 消息 id：每次「成功完成」分支更新；正常结束（无工具调用 break）时它就是最终答复。
+    // 中止 / 错误 / 空响应分支不更新它（那几种结束态已有 Stopped / 错误态，不挂端到端徽标）。
+    let finalCompletedAssistantId: string | null = null;
+    // 标记 loop 是否「自然完成」（最终一轮无工具调用、正常给出答复）。仅此态才挂端到端徽标——
+    // 避免「工具轮成功后用户中止」这种 finalCompletedAssistantId 指向非最终答复的轮次时误挂。
+    let completedNaturally = false;
+
     let round = 0;
 
     while (this.running && round < maxRounds) {
@@ -656,10 +668,10 @@ export class AgentLoop {
       let fallbackReason: string | undefined;
       let fallbackNotified = false;
       let streamModeRecorded = false;
-      // M2-S 任务2：本轮重试进度提示。首个 retry 事件创建一条 info 通知，后续重试复用同一 id 更新文案
-      // （不堆积多条）；本轮结束（成功/失败/中止）统一移除，让用户看到「正在重试 N/M」而非干等。
-      const retryNotifId = `retry-${runId}`;
-      let retryNotifShown = false;
+      // M4-8-S3：本轮重连进度展示位置 = 气泡内「reconnect i/N」（主推）+ StatusBar checking（已有）。
+      // 按 Plan_5 决策4，去掉原 M2-S 那条持续 notification（避免气泡 + 状态栏 + 通知三处冗余）。
+      // reconnectShown 标记本轮气泡是否正显示重连进度，用于收尾兜底 clear。
+      let reconnectShown = false;
       store.dispatch(addAssistantRun({
         id: runId,
         startedAt: runStartedAt,
@@ -731,11 +743,11 @@ export class AgentLoop {
           currentMode === 'fast' || !toolsEnabled ? undefined : (this.tools.length > 0 ? this.tools : undefined),
         );
 
-        // M2-S 任务2：重试已恢复（收到任何实质数据）则清掉「正在重试」提示，避免残留。
+        // M4-8-S3：重试已恢复（收到任何实质数据）则清掉气泡「reconnect i/N」提示，避免残留。
         const clearRetryNotice = () => {
-          if (retryNotifShown) {
-            retryNotifShown = false;
-            store.dispatch(removeNotification(retryNotifId));
+          if (reconnectShown) {
+            reconnectShown = false;
+            store.dispatch(setMessageReconnect({ id: assistantMessageId, reconnect: null }));
           }
         };
 
@@ -743,23 +755,24 @@ export class AgentLoop {
           if (!this.running) break;
           noteStreamMode(chunk.streamMode, chunk.fallbackReason);
 
-          // M2-S 任务2：重试进度可观测——aiClient 在每次退避重试【前】发该事件。
-          // 首次创建 info 通知，后续重试复用同一 id 更新文案（不堆叠），让用户看到「连接不稳，正在重试 N/M」。
+          // M4-8-S3：重连进度可观测——aiClient 在每次退避重试【前】发该事件（流式 real 与非流式 off/pseudo 同源）。
+          // 写气泡瞬态 reconnect 字段（MessageBubble 渲染「reconnect i/N」）+ StatusBar checking。
+          // 按决策4去掉了持续 notification（不再三处冗余）。
           if (chunk.type === 'retry' && chunk.retry) {
-            const { attempt, maxRetries, reason } = chunk.retry;
-            const message = `连接不稳，正在重试 ${attempt}/${maxRetries}…（${reason}）`;
+            const { attempt, maxRetries } = chunk.retry;
             store.dispatch(setConnectionStatus('checking'));
-            if (!retryNotifShown) {
-              retryNotifShown = true;
-              store.dispatch(addNotification({
-                id: retryNotifId,
-                type: 'info',
-                title: '连接不稳，正在重试',
-                message,
-                duration: 0, // 持续显示，本轮收尾时主动移除
-              }));
-            } else {
-              store.dispatch(updateNotification({ id: retryNotifId, message }));
+            reconnectShown = true;
+            store.dispatch(setMessageReconnect({
+              id: assistantMessageId,
+              reconnect: { attempt, max: maxRetries },
+            }));
+            // M4-8 审查修复（问题2/3）：真流式读流中途断线重试，重发会让模型从头重生成整段回复。
+            // aiClient 在本轮已 yield 过实质内容时会带 resetContent，要求先丢弃本轮已上屏/已累积内容，
+            // 让重试后的新流覆盖而非追加，杜绝「半截旧 + 完整新」拼接污染气泡与 conversation history。
+            if (chunk.resetContent) {
+              fullContent = '';
+              store.dispatch(updateMessage({ id: assistantMessageId, content: '' }));
+              store.dispatch(updateMessageMeta({ id: assistantMessageId, changes: { thinking: undefined } }));
             }
             continue;
           }
@@ -838,10 +851,10 @@ export class AgentLoop {
 
       if (!this.running) wasAborted = true;
       store.dispatch(setStreaming(false));
-      // M2-S 任务2：本轮收尾兜底移除「正在重试」提示（成功/失败/中止/异常任一路径都清，不残留）。
-      if (retryNotifShown) {
-        retryNotifShown = false;
-        store.dispatch(removeNotification(retryNotifId));
+      // M4-8-S3：本轮收尾兜底清气泡「reconnect i/N」（成功/失败/中止/异常任一路径都清，不残留）。
+      if (reconnectShown) {
+        reconnectShown = false;
+        store.dispatch(setMessageReconnect({ id: assistantMessageId, reconnect: null }));
       }
 
       if (wasAborted) {
@@ -926,6 +939,9 @@ export class AgentLoop {
           content: fullContent || '',
           tool_calls: pendingToolCalls.length > 0 ? pendingToolCalls : undefined,
         });
+        // ★ M4-8-S4：记录本轮成功完成的 assistant 消息——若本轮无后续工具调用（下方 break），它就是最终答复，
+        //   循环结束后给它挂端到端总计时徽标。有工具调用则 continue 进下一轮，本变量被下一轮覆盖。
+        finalCompletedAssistantId = assistantMessageId;
       } else if (lastError) {
         const errorMsg = `⚠️ AI 请求失败: ${lastError}`;
         const errorAt = Date.now();
@@ -1006,7 +1022,18 @@ export class AgentLoop {
       }
 
       // No tool calls = conversation complete
+      completedNaturally = true;
       break;
+    }
+
+    // ★ M4-8-S4：loop 自然完成（最终一轮无工具调用）→ 给最终答复消息挂端到端总计时徽标。
+    //   只挂这一条（finalCompletedAssistantId），含本轮所有工具调用全程的总耗时；逐条 run 计时不受影响。
+    //   中止 / 错误 / 达轮次上限等非自然完成态不挂（completedNaturally=false）。
+    if (completedNaturally && finalCompletedAssistantId) {
+      store.dispatch(updateMessageMeta({
+        id: finalCompletedAssistantId,
+        changes: { endToEndMs: Date.now() - loopStartedAt },
+      }));
     }
     } finally {
       // ★ R5 修复（问题1）：无论正常结束 / break / 抛出未捕获异常，都在 finally 统一收尾：

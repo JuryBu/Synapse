@@ -63,6 +63,10 @@ interface MessageProps {
   showStreamCursor?: boolean;
   showGeneratingPlaceholder?: boolean;
   durationMs?: number;
+  // ★ M4-8-S3：重连进度【瞬态】——退避重试期间显示「reconnect i/N」，收到实质数据/本轮收尾即清。
+  reconnect?: { attempt: number; max: number };
+  // ★ M4-8-S4：端到端总计时（ms）——只挂在 agent loop 最终完成消息那一条上，渲染端到端徽标。
+  endToEndMs?: number;
   thinking?: ThinkingInfo;
   attachments?: AttachmentInfo[];
   toolCalls?: ToolCallInfo[];
@@ -148,12 +152,17 @@ function changeLabel(type: FileDiffInfo['changeType']) {
   return 'Edited';
 }
 
+// ★ M4-8-S4：带空格「X m Y s」+ 补 hour 位（≥1h 显示「H h M m S s」），支持「26 m 39 s」「1 h 5 m 0 s」量级。
 function formatDuration(ms: number): string {
-  if (ms < 1000) return '<1s';
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${seconds % 60}s`;
+  if (ms < 1000) return '<1 s';
+  const totalSeconds = Math.round(ms / 1000);
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  if (hours >= 1) return `${hours} h ${minutes} m ${seconds} s`;
+  if (totalMinutes >= 1) return `${minutes} m ${seconds} s`;
+  return `${seconds} s`;
 }
 
 function formatBytes(bytes?: number): string {
@@ -163,7 +172,7 @@ function formatBytes(bytes?: number): string {
   return `${bytes} B`;
 }
 
-export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, thinking, attachments, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onOpenAttachment, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
+export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, reconnect, endToEndMs, thinking, attachments, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onOpenAttachment, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
   const [copied, setCopied] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -308,6 +317,18 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
               title={fallbackReason}
             >
               {streamState === 'aborted' ? 'Stopped' : `${streamLabel} for ${formatDuration(elapsedMs)}`}
+            </span>
+          )}
+          {/* ★ M4-8-S3：重连进度——退避重试期间气泡内显示「reconnect i/N」（瞬态，收到数据/收尾即清）。 */}
+          {!isUser && reconnect && (
+            <span className="message-reconnect-state" title="连接不稳，正在自动重试">
+              <RefreshCw size={11} className="reconnect-spin" /> reconnect {reconnect.attempt}/{reconnect.max}
+            </span>
+          )}
+          {/* ★ M4-8-S4：端到端总计时徽标——只挂在 agent loop 最终完成消息那一条（含多轮工具调用全程）。 */}
+          {!isUser && endToEndMs !== undefined && (
+            <span className="message-e2e-state" title="本轮端到端总耗时（含多轮工具调用）">
+              total {formatDuration(endToEndMs)}
             </span>
           )}
           {/* Action buttons */}

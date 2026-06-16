@@ -115,6 +115,38 @@
   color: var(--syn-warning);
 }
 
+/* ★ M4-8-S3：重连进度徽标——退避重试期间显示「reconnect i/N」，复用 stream-state 胶囊基底。 */
+.message-reconnect-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--syn-bg-elevated);
+  color: var(--syn-warning);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.message-reconnect-state .reconnect-spin {
+  animation: syn-reconnect-spin 1s linear infinite;
+}
+
+@keyframes syn-reconnect-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ★ M4-8-S4：端到端总计时徽标——只挂 loop 最终完成消息那一条。 */
+.message-e2e-state {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--syn-bg-elevated);
+  color: var(--syn-primary-light);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .message-copy-btn {
   margin-left: auto;
   background: none;

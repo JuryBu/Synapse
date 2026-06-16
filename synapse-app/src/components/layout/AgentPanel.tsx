@@ -1342,6 +1342,8 @@ export function AgentPanel() {
                     showStreamCursor={(msg as any).showStreamCursor}
                     showGeneratingPlaceholder={(msg as any).showGeneratingPlaceholder}
                     durationMs={(msg as any).durationMs}
+                    reconnect={(msg as any).reconnect}
+                    endToEndMs={(msg as any).endToEndMs}
                     thinking={(msg as any).thinking}
                     attachments={resolveAttachmentsForRender((msg as any).attachments)}
                     toolCalls={(msg as any).toolCalls}

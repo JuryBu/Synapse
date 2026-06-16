@@ -223,8 +223,16 @@ export function sanitizeMessagesForPersistence(messages: Message[]): Message[] {
       return att;
     });
 
+    // ★ M4-8-S3：reconnect 是 UI 瞬态字段（退避重试进度），绝不持久化。这里显式剔除——
+    //   sanitizeMessagesForPersistence 是白名单剔除式（其余字段经 ...msg 全量保留），
+    //   若不剔，挂在 message 上的 reconnect 会被原样落库，历史恢复后带假「重连中」（Plan_5 风险二）。
+    const hasReconnect = (msg as any).reconnect !== undefined;
+    if (hasReconnect) touched = true;
+
     if (!touched) return msg;
-    return { ...msg, contentParts, attachments };
+    const next: Message = { ...msg, contentParts, attachments };
+    if (hasReconnect) delete (next as any).reconnect;
+    return next;
   });
 }
 

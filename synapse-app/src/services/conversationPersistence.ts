@@ -340,6 +340,8 @@ export async function branchConversation(
       fallbackReason: _fallbackReason,
       showStreamCursor: _showStreamCursor,
       showGeneratingPlaceholder: _showGeneratingPlaceholder,
+      // ★ M4-8-S3：reconnect 是 UI 瞬态（重连进度），分支复制时一并剥离，绝不带进新对话/落库。
+      reconnect: _reconnect,
       ...keep
     } = m;
     // 确定性去重：极小概率两次 randomUUID 撞了也再生成，绝不让同批出现重复 id。

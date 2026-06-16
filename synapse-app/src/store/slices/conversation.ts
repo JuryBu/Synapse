@@ -130,6 +130,18 @@ export interface Message {
   showStreamCursor?: boolean;
   showGeneratingPlaceholder?: boolean;
   durationMs?: number;
+  /**
+   * ★ M4-8-S3：重连进度【瞬态】字段——退避重试期间显示「reconnect i/N」，收到实质数据/本轮收尾即清。
+   *   绝不持久化：sanitizeMessagesForPersistence 显式剔除、branchConversation 子集复制时剥离，
+   *   保证历史恢复后消息不带残留假「重连中」（Plan_5 风险二）。
+   */
+  reconnect?: { attempt: number; max: number };
+  /**
+   * ★ M4-8-S4：端到端总计时（ms）——整个 agent loop 完成（用户发出 → 含多轮工具调用全部完成）耗时，
+   *   只挂在 loop【最终完成消息】那一条上（不在每条 run 上重复，见 Plan_5 风险四）。
+   *   逐条 run 计时仍走各自的 durationMs，互不干扰。
+   */
+  endToEndMs?: number;
   runId?: string;
   runEvents?: AssistantRunEvent[];
   diffs?: FileDiffSummary[];
@@ -378,6 +390,22 @@ export const conversationSlice = createSlice({
         if (action.payload.fallbackReason !== undefined) msg.fallbackReason = action.payload.fallbackReason;
       }
     },
+    /**
+     * ★ M4-8-S3：设置/清除消息的【瞬态】重连进度。
+     *   reconnect 有值 → 写入（退避重试中，气泡显示 reconnect i/N）；
+     *   reconnect 为 null/undefined → 清除（收到实质数据 / 本轮收尾，提示消失）。
+     *   该字段不持久化（sanitize + branch 双重剔除）。
+     */
+    setMessageReconnect(state, action: PayloadAction<{ id: string; reconnect: { attempt: number; max: number } | null }>) {
+      const msg = state.messages.find(m => m.id === action.payload.id);
+      if (msg) {
+        if (action.payload.reconnect) {
+          msg.reconnect = action.payload.reconnect;
+        } else {
+          delete msg.reconnect;
+        }
+      }
+    },
     addMessageDiff(state, action: PayloadAction<{ messageId: string; diff: FileDiffSummary }>) {
       const msg = state.messages.find(m => m.id === action.payload.messageId);
       if (msg) {
@@ -566,7 +594,7 @@ export const conversationSlice = createSlice({
 export const {
   setConversation, addMessage, updateMessage,
   updateMessageMeta, appendMessageContent, setMessageAttachments,
-  appendMessageThinking, setMessageStreamState,
+  appendMessageThinking, setMessageStreamState, setMessageReconnect,
   addMessageDiff, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,
   setStreaming, appendStreamingContent, clearStreamingContent,
   setModel, setTokenUsage, setPendingMessage, clearConversation, setTitle,
