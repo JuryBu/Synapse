@@ -46,6 +46,11 @@ const PLAN_IDENTITY = `<identity>
 
 export const MAX_CONTEXT_TOKENS = 128000;
 export const COMPRESSION_THRESHOLD = 0.9; // 90% of model context window triggers compression
+/**
+ * M4-1-S4 护栏阈值：少条超长危险态下，仅当「不含当前消息的历史文本 token」≥ 阈值 * 此比例
+ * 才认定为真·历史超长（标 overLimitWithoutCompression）。低于此比例则判超额来自当前消息、护栏放行不截断。
+ */
+export const HISTORY_OVERLIMIT_RATIO = 0.5;
 
 export class SystemPromptBuilder {
   build(context: PromptContext = {}): string {
@@ -140,6 +145,13 @@ export function compressContext(
   messages: Array<{ role: string; content: string }>,
   maxTokens: number = MAX_CONTEXT_TOKENS,
   realTokenCount?: number,
+  /**
+   * M4-1-S4 护栏：调用方传入「除最后一条 user 外的历史文本 token」（不含当前最新 user 消息）。
+   * 仅当历史本身也接近阈值（≥ threshold * HISTORY_OVERLIMIT_RATIO）才认为是真·历史超长、标 overLimitWithoutCompression。
+   * 若历史远低于阈值（说明超额几乎全来自当前消息估算），不标危险态、不触发 truncate。
+   * 向后兼容：不传（undefined）时维持原行为（条数<6 且超阈值即标 true）。
+   */
+  historyOnlyTokens?: number,
 ): {
   compressed: Array<{ role: string; content: string }>;
   wasCompressed: boolean;
@@ -165,6 +177,16 @@ export function compressContext(
   // 由调用方对超长单条做截断保护。此处仅告警，不在 compressed 内截断——因为不压缩分支调用方实际发送的是
   // 原始 requestHistory（含图片/附件 part），截断需在调用方层面对发送体做（见 agentLoop.ts 不压缩守卫）。
   if (messages.length < 6) {
+    // M4-1-S4 护栏：若调用方传了 historyOnlyTokens（除最后一条 user 外的历史文本 token），
+    // 且历史本身远低于阈值，说明超额几乎全来自当前消息估算（修复块一后这种情况应近乎绝迹，此为最后防线）——
+    // 不标危险态、不触发 truncate，避免误截当前消息。仅历史也接近阈值时才认为是真·历史超长。
+    if (historyOnlyTokens !== undefined && historyOnlyTokens < threshold * HISTORY_OVERLIMIT_RATIO) {
+      console.warn(
+        `[compressContext] token(${currentTokens}) 超阈值(${Math.floor(threshold)})但历史(${historyOnlyTokens})` +
+        `< 阈值*${HISTORY_OVERLIMIT_RATIO}，判定超额来自当前消息，不标 overLimitWithoutCompression（护栏放行）。`,
+      );
+      return { compressed: messages, wasCompressed: false };
+    }
     console.warn(
       `[compressContext] token(${currentTokens}) 已超阈值(${Math.floor(threshold)})，` +
       `但消息条数(${messages.length})<6 无法切片压缩（少条超长）。已标记 overLimitWithoutCompression，` +

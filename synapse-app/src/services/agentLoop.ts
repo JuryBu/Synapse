@@ -20,6 +20,7 @@ import { generateBatch } from './recordGenerator';
 import { AUTOSAVE_ID, saveAutosaveSnapshot } from './conversationPersistence';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 import { restoreApiMessagesAttachments, chatContentToTextWithPlaceholder } from './attachmentRefs';
+import { getModelContextWindow } from '../store/selectors/modelSelectors';
 
 export interface ToolDefinition {
   type: 'function';
@@ -72,50 +73,70 @@ function chatContentToText(content: ChatMessage['content']): string {
 }
 
 /**
- * M2-R4 修复（问题2 多模态低估）：chatContentToText 只取文本 part，
- * 但图片/附件 part 会随请求体实际发送并占用大量 token。
- * 这里对【非文本 part】做体积近似，计入压缩触发判定，避免「带图/附件对话」组装量系统性偏小、压缩偏晚。
+ * M2-R4（问题2 多模态低估）→ M4-1（问题4 多模态严重高估治本）：
+ * chatContentToText 只取文本 part，但图片/附件 part 会随请求体实际发送并占用 token，
+ * 故对【非文本 part】单独折算 token 计入压缩触发判定，避免「带图/附件对话」组装量与触发判定失真。
  *
- * 估算口径（保守粗估，宁多勿少，方向与触发判定一致）：
- *   - image_url：base64 data URI 按其编码长度折算 token（≈ 字符数 * 0.25，与 estimateTokens 英文系数一致）；
- *                ★ M2-R6：附件分离后历史图 part 落库/判定时是【sha256 引用态】（url 非 data:），此刻还没还原成
- *                  base64（还原推迟到发送前 restoreApiMessagesAttachments），但发送时会膨胀回完整 base64 进请求体。
- *                  故引用态按 part.size（原始字节，put 返回写入）折算：base64 字符数≈字节*4/3，token≈base64字符*0.25
- *                  ⇒ ≈ 字节/3。用 Math.ceil(size/3) 估，与「还原成 base64 后按长度估」同量级，避免带图对话压缩偏晚。
- *                外链 http url（无 size、非 data:）走视觉 token 固定估值（detail=low 约 85，high/auto 约 1100）。
- *   - file：优先按 file_data/data（base64）长度折算；其次按 size（同 image 口径 字节/3）；都无则固定占位下限。
+ * ★★ M4-1 核心口径修正（治本，根治问题4「新对话带图即触发上下文过长截断」）：
+ *   传输字节数 ≠ token。旧实现把 base64 data URI 的【编码字符长度】当 token（`url.length * 0.25`）
+ *   或把【原始字节数】当 token（`size / 3`），对图片高估约 11~1100 倍——3.9MB 图（base64≈520 万字符）
+ *   被估成约 130 万 token，远超阈值 128000 * 0.9 = 115200，撑爆判定后误触发 truncate。
+ *   真实情况：网关把图片按【视觉 token】计（与图片体积/base64 长度完全解耦），单图固定量级 85~1100 token。
+ *
+ * 修正后的口径：
+ *   - image_url（data: 内联 / size 引用态 / 外链 http，三条分支统一）：一律走 imageVisionTokens(detail)，
+ *     与 base64/字节体积彻底解耦——detail=low → 85，detail=high/auto/未指定 → 1100（OpenAI 视觉 token 量级）。
+ *     单图无论多大固定约 1100 token，130 万 → 1100，约降 1100 倍，根治高估。
+ *   - file：网关对 file 也是【解码后按内容算 token】，base64 传输长度不是真 token。
+ *     故按 estimateFileContentTokens——有 base64 时先解出原始字节数（base64 长度 * 3/4），
+ *     再按 FILE_TOKENS_PER_BYTE(0.3) 折算；仅 size 时 size * 0.3；都无走 FILE_ID_PLACEHOLDER_TOKENS。
  * 文本 part 不在此计（由 chatContentToText → countConversationTokens 统一计）。
  */
-const IMAGE_TOKENS_LOW = 85;       // detail=low 视觉 token（OpenAI 量级）
-const IMAGE_TOKENS_HIGH = 1100;   // detail=high/auto 视觉 token 上界近似
-const FILE_ID_PLACEHOLDER_TOKENS = 256; // 仅有 file_id（体积不可见）时的保守占位估值
-/** size(原始字节) → 发送时 base64 进请求体的近似 token：base64 字符≈字节*4/3，token≈字符*0.25 ⇒ ≈字节/3。 */
-function estimateBytesAsBase64Tokens(size: number): number {
-  return Math.ceil(size / 3);
+const IMAGE_TOKENS_LOW = 85;       // detail=low 视觉 token（OpenAI 量级，与图片体积无关）
+const IMAGE_TOKENS_HIGH = 1100;    // detail=high/auto/未指定 视觉 token 上界近似（与图片体积无关）
+const FILE_ID_PLACEHOLDER_TOKENS = 256; // 仅有 file_id（内容不可见）时的保守占位估值
+/**
+ * 文件内容 token / 原始字节系数：网关解码 base64 后按内容算 token，
+ * 混合文本约 0.3 token/字节（英文真实约 0.25，取 0.3 保守上界，宁多勿少，方向与触发判定一致）。
+ */
+const FILE_TOKENS_PER_BYTE = 0.3;
+
+/** 图片视觉 token：与 base64/字节体积完全解耦，仅由 detail 决定（low=85，high/auto/未指定=1100）。 */
+function imageVisionTokens(detail?: string): number {
+  return detail === 'low' ? IMAGE_TOKENS_LOW : IMAGE_TOKENS_HIGH;
 }
+
+/**
+ * 文件内容 token 估算：网关解码后按内容算 token，传输 base64 长度不是真 token。
+ *   - 有 base64（file_data/data，可能带 `data:...;base64,` 前缀）：剥头取 payload 长度 → 原始字节 ≈ 长度*3/4
+ *     → token ≈ 原始字节 * FILE_TOKENS_PER_BYTE。零解码开销（只取长度不真解码）。
+ *   - 仅 size（原始字节）：size * FILE_TOKENS_PER_BYTE。
+ *   - 都无：FILE_ID_PLACEHOLDER_TOKENS 占位。
+ */
+function estimateFileContentTokens(data: string, size: number): number {
+  if (data) {
+    // 剥掉 `data:...;base64,` 头（与 attachmentRefs 的 comma 切法一致，但只取长度不解码，零开销）
+    const commaIdx = data.indexOf(',');
+    const b64Len = data.startsWith('data:') && commaIdx >= 0 ? data.length - commaIdx - 1 : data.length;
+    const rawBytes = b64Len * 0.75; // base64 长度 * 3/4 ≈ 原始字节
+    return Math.ceil(rawBytes * FILE_TOKENS_PER_BYTE);
+  }
+  if (size > 0) return Math.ceil(size * FILE_TOKENS_PER_BYTE);
+  return FILE_ID_PLACEHOLDER_TOKENS;
+}
+
 function estimateNonTextPartsTokens(content: ChatMessage['content']): number {
   if (typeof content === 'string') return 0;
   let total = 0;
   for (const part of content as any[]) {
     if (!part || part.type === 'text') continue;
     if (part.type === 'image_url') {
-      const url: string = part.image_url?.url || '';
-      if (url.startsWith('data:')) {
-        // base64 内联图：按 data URI 编码长度折算（base64 字符直接进请求体）
-        total += Math.ceil(url.length * 0.25);
-      } else if (typeof part.size === 'number' && part.size > 0) {
-        // M2-R6 引用态：发送前会还原成 base64，按引用元数据 size 估其发送占用。
-        total += estimateBytesAsBase64Tokens(part.size);
-      } else {
-        const detail = part.image_url?.detail;
-        total += detail === 'low' ? IMAGE_TOKENS_LOW : IMAGE_TOKENS_HIGH;
-      }
+      // 三条分支（data: 内联 / size 引用态 / 外链 http）统一走视觉固定值，与体积彻底解耦。
+      total += imageVisionTokens(part.image_url?.detail);
     } else if (part.type === 'file') {
       const data: string = part.file?.file_data || part.file?.data || '';
       const size: number = typeof part.file?.size === 'number' ? part.file.size : 0;
-      if (data) total += Math.ceil(data.length * 0.25);
-      else if (size > 0) total += estimateBytesAsBase64Tokens(size);
-      else total += FILE_ID_PLACEHOLDER_TOKENS;
+      total += estimateFileContentTokens(data, size);
     }
   }
   return total;
@@ -123,6 +144,13 @@ function estimateNonTextPartsTokens(content: ChatMessage['content']): number {
 
 /** 截断标记：超长单条被截断时插入，提示模型该消息内容已被裁剪。 */
 const TRUNCATION_NOTICE = '\n\n[…内容过长，已截断以避免超出上下文窗口…]';
+
+/**
+ * M4-1-S4 护栏：truncate 时给文本侧的最小预算保底（token）。
+ * 即便 fixedTokens 已逼近 threshold（budget 算出来 ≤ 0），也至少给当前消息留 1024 token 正文，
+ * 宁可总量略超阈值也不发空消息（标准网关按真实 token 计、估算略超不影响）。
+ */
+const MIN_TEXT_BUDGET = 1024;
 
 /**
  * M2-R4 问题4 修复：「少条超长」危险态（compressContext 返回 overLimitWithoutCompression=true）下，
@@ -144,20 +172,27 @@ function truncateOverLongHistory(
   // 当前文本侧总量
   const textTokensOf = (m: ChatMessage) => estimateTokens(chatContentToText(m.content));
   let textTotal = messages.reduce((s, m) => s + textTokensOf(m), 0);
-  let budget = threshold - fixedTokens;
-  if (budget < 0) budget = 0;
+  // M4-1-S4：budget 最小保底——即便 fixedTokens 逼近 threshold（budget ≤ 0），也至少给文本留 MIN_TEXT_BUDGET，
+  // 保证再极端也不把当前消息正文截成空（宁可略超阈值也不发空消息）。
+  let budget = Math.max(threshold - fixedTokens, MIN_TEXT_BUDGET);
   // 文本侧可用预算（给文本 part 的总额度）
   if (textTotal <= budget) return messages; // 固定占用已把超额吃掉，文本无需截断
+
+  // M4-1-S4 当前消息保护：最后一条即本轮「当前消息」。若它自身文本 token < budget（不是超长的元凶），
+  // 则绝不截它——只截更早的历史长文本。仅当当前消息自身就超 budget（单条巨型粘贴）时才允许截它（否则无法压回）。
+  const currentIdx = messages.length - 1;
+  const protectCurrent = currentIdx >= 0 && textTokensOf(messages[currentIdx]) < budget;
 
   // 找最长文本消息，按比例把它截到「让文本总量回到预算」所需的目标长度。
   // 一次只截最长的一条通常够用（少条超长场景往往是单条巨型粘贴）；循环兜底处理多条都很长的情况。
   const result = messages.map(m => ({ ...m })) as ChatMessage[];
   let truncatedAny = false;
   for (let guard = 0; guard < result.length && textTotal > budget; guard++) {
-    // 选当前文本最长的一条
+    // 选当前文本最长的一条（受保护的当前消息排除在候选外）
     let idx = -1;
     let maxTok = -1;
     for (let i = 0; i < result.length; i++) {
+      if (protectCurrent && i === currentIdx) continue; // 保护当前消息：不参与截断选择
       const t = textTokensOf(result[i]);
       if (t > maxTok) { maxTok = t; idx = i; }
     }
@@ -395,12 +430,10 @@ export class AgentLoop {
       ? messages
       : [...messages, { role: 'user', content: userContentForApi }];
 
-    // 用当前模型真实 contextWindow + API 真实 token 数驱动压缩（回退写死上限/字符估算）
-    const agentSettingsState = (rootState as any).agentSettings;
-    const currentModelOption = agentSettingsState?.availableModels?.find((m: any) => m.id === agentSettingsState?.currentModel);
-    const modelContextWindow = currentModelOption?.capabilities?.contextWindow
-      || currentModelOption?.contextWindow
-      || MAX_CONTEXT_TOKENS;
+    // 用当前模型真实 contextWindow + API 真实 token 数驱动压缩（回退写死上限/字符估算）。
+    // M4-1-S3：统一走 getModelContextWindow 选择器（capabilities.contextWindow ?? option.contextWindow ?? MAX_CONTEXT_TOKENS），
+    // 与 StatusBar / AgentPanel 同一真相源，消除本地三元 fallback 不一致。
+    const modelContextWindow = getModelContextWindow(rootState);
     // M2-R4（90% 触发 B方案）：压缩触发判定基于「本轮实际将发送的组装请求体」本地 tokenize，
     // 而非上一轮 API 滞后 token。组装 = systemPrompt + tools schema + 全部历史原文（文本 + 图片/附件体积近似）。
     // tools 计入条件对齐实际发送处（line ~422：mode!=='fast' && toolsEnabled && tools.length>0）。
@@ -420,10 +453,14 @@ export class AgentLoop {
     // 正常情况 assembledTokens（本轮全量未压缩）通常更大占主导，兜底不介入。
     const apiRealTokens = (rootState as any).conversation?.tokenUsage?.promptTokens || 0;
     const triggerTokens = Math.max(assembledTokens, apiRealTokens);
+    // M4-1-S4 护栏入参：除最后一条（本轮当前消息）外的历史文本 token，与 compressContext 内同口径
+    // （countConversationTokens）。仅历史本身也接近阈值才标 overLimitWithoutCompression，避免误截当前消息。
+    const historyOnlyTokens = countConversationTokens(requestHistoryText.slice(0, -1));
     const { compressed, wasCompressed, overLimitWithoutCompression } = compressContext(
       requestHistoryText,
       modelContextWindow,
       triggerTokens,
+      historyOnlyTokens,
     );
 
     // M2-R1: 压缩时优先用 record（多批次结构化摘要）作稳定前缀以命中 prompt cache；

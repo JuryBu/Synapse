@@ -29,7 +29,8 @@ import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@
 // ★ M3-2b 修复：工作流走 agentOrchestrator（非 agentLoop），handleStop 需直接调 abortAll() 才能真正中止工作流。
 import { agentOrchestrator } from '@/services/agentOrchestrator';
 import { exitWorktree } from '@/store/slices/worktreeSession';
-import { countConversationTokens, MAX_CONTEXT_TOKENS } from '@/services/systemPrompt';
+import { countConversationTokens } from '@/services/systemPrompt';
+import { getModelContextWindowForOption } from '@/store/selectors/modelSelectors';
 import { conversationExporter } from '@/services/conversationExporter';
 import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, migrateSnapshotAttachments, branchConversation, beginConversationSwitch, endConversationSwitch, AUTOSAVE_ID } from '@/services/conversationPersistence';
 import { platform } from '@/platform';
@@ -921,7 +922,8 @@ export function AgentPanel() {
     return countConversationTokens(messages.map((m: any) => ({ role: m.role, content: m.content })));
   }, [messages]);
   const tokenCount = apiTokenCount || estimatedTokenCount;
-  const effectiveContextWindow = currentCapabilities?.contextWindow ?? MAX_CONTEXT_TOKENS;
+  // M4-1-S3：统一走 selector 纯函数版（fallback 链 capabilities.contextWindow ?? option.contextWindow ?? MAX_CONTEXT_TOKENS）
+  const effectiveContextWindow = getModelContextWindowForOption(currentModelOption);
   const tokenRatio = effectiveContextWindow > 0 ? tokenCount / effectiveContextWindow : 0;
 
   const formatTokens = (n: number) => {

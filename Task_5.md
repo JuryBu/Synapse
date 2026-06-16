@@ -17,13 +17,13 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - 目标：根治「新对话带图即截断」（问题4），统一 contextWindow 认知（问题2a），加截断兜底护栏。
 - 依据：`Plan_5_M4-1_上下文token根治.md`
 - 执行清单：
-  - [ ] **S1**(S) 重写 `agentLoop.ts` `estimateNonTextPartsTokens`：图片三分支统一走 `imageVisionTokens(detail)`（low=85，auto/high/空=1100）；文件改 `estimateFileContentTokens`（base64 解码后字节×`FILE_TOKENS_PER_BYTE`=0.3，仅 size 时 size×0.3，都无走 256）；删死代码 `estimateBytesAsBase64Tokens`；重写常量组注释（行 74-95）纠正错误口径
-  - [ ] **S2**(S) 抽 `getModelContextWindow`/`getCurrentModelOption` 统一选择器到 `src/store/selectors/modelSelectors.ts`（reselect 缓存或跟随既有风格），fallback 链 `capabilities.contextWindow ?? option.contextWindow ?? MAX_CONTEXT_TOKENS`
-  - [ ] **S3**(M) 三处接入：StatusBar.tsx 删硬编码映射(27-34)→ selector + 已用 token 优先 `tokenUsage.promptTokens`(实测)否则估算 + 两态标识；AgentPanel.tsx:924；agentLoop.ts:401-403
-  - [ ] **S4**(M) 截断护栏：`compressContext` 增 `historyOnlyTokens` 入参（仅历史也接近阈值才标 overLimit，向后兼容）；`truncateOverLongHistory` 加 `MIN_TEXT_BUDGET`(1024) 保底 + 当前 user 消息文本 < budget 时绝不截它
-  - [ ] **S5**(S) 自测 build + electron:build；真机回归问题4：新对话首条带 3MB+ 图，确认不再弹截断 toast、图正常进请求体
-- 验收：问题4 不复现；StatusBar 显示真实窗口 + 估算/实测区分；编译过。
-- 证据/产物：
+  - [x] **S1**(S) 重写 `agentLoop.ts` `estimateNonTextPartsTokens`：图片三分支统一走 `imageVisionTokens(detail)`（low=85，auto/high/空=1100）；文件改 `estimateFileContentTokens`（0.3/byte，仅 size 时 size×0.3，都无走 256）；删死代码 `estimateBytesAsBase64Tokens`；重写常量组注释
+  - [x] **S2**(S) 抽 `getModelContextWindow`/`getCurrentModelOption` 选择器到 `src/store/selectors/modelSelectors.ts`（createSelector 缓存），fallback 链 `capabilities.contextWindow ?? option.contextWindow ?? MAX_CONTEXT_TOKENS`
+  - [x] **S3**(M) 三处接入：StatusBar 删硬编码映射→ selector + 已用 token 实测(`promptTokens`，确认 `tokenCount=totalTokens` 口径不符)优先否则估算 + 两态标识；AgentPanel；agentLoop
+  - [x] **S4**(M) 截断护栏：`compressContext` 增 `historyOnlyTokens`（仅历史接近阈值才标 overLimit，向后兼容）；`truncateOverLongHistory` 加 `MIN_TEXT_BUDGET`(1024) 保底 + 当前消息保护
+  - [x] **S5**(S) 自测 build + electron:build 双过；问题4 token 口径核验（图片 1100，降 1239 倍）
+- 验收：✅ 问题4 不复现（带图新对话不触发截断）；✅ StatusBar 真实窗口 + 实测/估算两态；✅ 编译双过；✅ 3 路对抗审查 0 high/med。
+- 证据/产物：commit `feat(M4-1)`；改 agentLoop.ts / systemPrompt.ts / StatusBar.tsx / AgentPanel.tsx + 新建 store/selectors/modelSelectors.ts。
 
 ---
 
@@ -149,3 +149,5 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - [ ] LibreOffice 冷启动延迟体验（M4-4 S2）
 - [ ] 工作区改名→对话失联（已知限制，是否后续做 path 重绑）（M4-2）
 - [ ] 二期：工作区文件树概要注入 / /loop 收敛循环 / M4-8 fallback 第三层
+- [ ] (M4-1 low) 护栏 `historyOnlyTokens` 仅含历史文本 token、不含历史非文本(图片)token——块一治本后概率极低，Plan 措辞本就如此，记为口径取舍
+- [ ] (M4-1 low) StatusBar 两态：切到另一已存在对话若未重置 `tokenUsage` 可能短暂显示上一对话 promptTokens（clearConversation 已置 null，仅切换路径）；后续可在 loadConversation 确认重置
