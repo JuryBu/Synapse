@@ -104,16 +104,76 @@ export interface RunningSubagent {
   conversationId?: string;    // 子代理落库的独立 conversation id（卡片点进查看其完整对话流）
 }
 
+/**
+ * ★ M3-3a 工作流运行实例内的单个子代理快照（方案见 Plan_4_M3 §五）。
+ * 与全局 RunningSubagent 的区别：
+ *   - RunningSubagent 是【全局活动子代理表】（不区分归属哪个工作流，且 clearCompletedSubagents 会清理）；
+ *   - WorkflowRunSubagent 是【某次工作流运行内】的子代理快照，随 WorkflowRun 长期存在（卡片回看），
+ *     带 nodeId（归属哪个节点）+ role + 四色 status（与 RunningSubagent.status 同款状态机）。
+ * 四色状态（与 RunningSubagent.status 对齐）：灰=complete、蓝=running、黄=retrying、红=error。
+ */
+export interface WorkflowRunSubagent {
+  /** 子代理唯一 id（= spawnSubagent 生成的 subagentId；卡片 key + 与全局 runningSubagents 对应）。 */
+  subagentId: string;
+  /** 角色名（卡片主标签，取 SubagentConfig.name）。 */
+  role: string;
+  /** 归属节点 id（卡片可按节点分组/溯源；agent 节点 = 节点 id，parallel 分支 = 节点 id）。 */
+  nodeId: string;
+  /** 四色状态（与 RunningSubagent.status 同款，复用同一状态机）。 */
+  status: RunningSubagent['status'];
+  /** 使用的模型（卡片副标签）。 */
+  model: string;
+  /** 工具调用次数（卡片展示，完成/失败时回填）。 */
+  toolCalls?: number;
+  /** 粗估 token 用量（卡片展示，完成时回填）。 */
+  tokens?: number;
+  startTime: number;
+  /** 完成/失败时间（卡片据此算耗时，停止计时）。 */
+  endTime?: number;
+}
+
+/**
+ * ★ M3-3a 一次固定工作流运行实例（方案见 Plan_4_M3 §五）。
+ * 由 runWorkflow 在开始时 startWorkflowRun 创建、按节点 spawn 子代理时登记/流转、结束 finishWorkflowRun 收口。
+ * 关联到对话流里【触发它的那条消息】（triggerMessageId），由 WorkflowCard 在该消息体内渲染实时四色卡片。
+ */
+export interface WorkflowRun {
+  /** 运行实例唯一 id（稳定生成；triggerMessageId 关联 + 卡片订阅键）。 */
+  runId: string;
+  /** 模式名（卡片标题，取 MultiAIMode.name）。 */
+  modeName: string;
+  /** 关联的触发消息 id（对话里那条 assistant 汇总消息 / 触发用的 user 消息；卡片渲染锚点）。可空（先建 run 后回填）。 */
+  triggerMessageId?: string;
+  /** 工作流整体状态：running=进行中、complete=全部完成、aborted=中止（含用户终止/护栏/判断中止）。 */
+  status: 'running' | 'complete' | 'aborted';
+  startTime: number;
+  endTime?: number;
+  /** 本次运行登记的子代理快照列表（按登记顺序，含各节点/各并行分支）。 */
+  subagents: WorkflowRunSubagent[];
+}
+
 export interface MultiAIState {
   enabled: boolean;
   activeMode: string; // mode id
   modes: MultiAIMode[];
   runningSubagents: RunningSubagent[];
+  /**
+   * ★ M3-3a 工作流运行实例表（运行态，卡片可视化数据源）。与 runningSubagents 一样属【运行态】，
+   *   不应持久化复用（store/index sanitizePersistedMultiAI 在加载时重置为空，见该处）。
+   */
+  workflowRuns: WorkflowRun[];
   maxConcurrentSubagents: number;
   defaultSubagentModel: string;
   defaultSubagentMaxTokens: number;
   subagentDefaultModel: string;
 }
+
+/**
+ * ★ medium#1（M3-3a 审查）workflowRuns FIFO 上限：单次会话内每跑一个工作流就 push 一条 WorkflowRun，
+ *   且每个 multiAI/* dispatch 都被 persistMiddleware 序列化（虽治本已剔除运行态出 localStorage，仍要控内存增长）。
+ *   startWorkflowRun 在 push 后把超出本上限的最旧实例 shift 掉，让 workflowRuns 始终 ≤ MAX_WORKFLOW_RUNS。
+ */
+const MAX_WORKFLOW_RUNS = 20;
 
 export const BUILT_IN_MODES: MultiAIMode[] = [
   {
@@ -293,6 +353,7 @@ const initialState: MultiAIState = {
   activeMode: 'solo',
   modes: BUILT_IN_MODES,
   runningSubagents: [],
+  workflowRuns: [],
   maxConcurrentSubagents: 3,
   defaultSubagentModel: '',
   defaultSubagentMaxTokens: 32000,
@@ -366,6 +427,90 @@ const multiAISlice = createSlice({
     clearCompletedSubagents(state) {
       state.runningSubagents = state.runningSubagents.filter(s => s.status === 'running');
     },
+
+    // ===== M3-3a 工作流运行实例（卡片可视化）=====
+
+    /** 开始一次工作流运行：创建 running 状态的 WorkflowRun（无子代理）。runId 由调用方稳定生成。 */
+    startWorkflowRun(
+      state,
+      action: PayloadAction<{ runId: string; modeName: string; triggerMessageId?: string }>,
+    ) {
+      // 防重复：同 runId 已存在则不重复 push（容错重入）。
+      if (state.workflowRuns.some(r => r.runId === action.payload.runId)) return;
+      state.workflowRuns.push({
+        runId: action.payload.runId,
+        modeName: action.payload.modeName,
+        triggerMessageId: action.payload.triggerMessageId,
+        status: 'running',
+        startTime: Date.now(),
+        subagents: [],
+      });
+      // ★ medium#1（M3-3a 审查）控内存：workflowRuns 是运行态数据源，单会话内只增不减会无限膨胀。
+      //   开新 run 时把超出 FIFO 上限的最旧实例丢弃（保留最近 MAX_WORKFLOW_RUNS 条供卡片回看）。
+      if (state.workflowRuns.length > MAX_WORKFLOW_RUNS) {
+        state.workflowRuns.splice(0, state.workflowRuns.length - MAX_WORKFLOW_RUNS);
+      }
+      // ★ medium#1（M3-3a 审查）顺手清理已落地（complete/error）的全局活动子代理——runningSubagents 同样只增不减，
+      //   且 clearCompletedSubagents 此前从未被调用。新工作流启动是个安全清理点（已完成的不再需要保留在活动表）。
+      state.runningSubagents = state.runningSubagents.filter(s => s.status === 'running' || s.status === 'retrying');
+    },
+
+    /** 更新 run 的元信息（主要用于回填 triggerMessageId——先建 run 跑工作流、拿到汇总消息 id 后再关联）。 */
+    updateWorkflowRun(
+      state,
+      action: PayloadAction<{ runId: string; triggerMessageId?: string; modeName?: string }>,
+    ) {
+      const run = state.workflowRuns.find(r => r.runId === action.payload.runId);
+      if (!run) return;
+      if (action.payload.triggerMessageId !== undefined) run.triggerMessageId = action.payload.triggerMessageId;
+      if (action.payload.modeName !== undefined) run.modeName = action.payload.modeName;
+    },
+
+    /** 向 run 登记一个子代理（节点 spawn 时调用）。同 subagentId 已存在则跳过（容错）。 */
+    addWorkflowRunSubagent(
+      state,
+      action: PayloadAction<{ runId: string; subagent: WorkflowRunSubagent }>,
+    ) {
+      const run = state.workflowRuns.find(r => r.runId === action.payload.runId);
+      if (!run) return;
+      if (run.subagents.some(s => s.subagentId === action.payload.subagent.subagentId)) return;
+      run.subagents.push(action.payload.subagent);
+    },
+
+    /** 流转 run 内某子代理的状态/统计（与 RunningSubagent 同款四色状态机；运行中→完成/失败回填 endTime 等）。 */
+    updateWorkflowRunSubagent(
+      state,
+      action: PayloadAction<{
+        runId: string;
+        subagentId: string;
+        status?: WorkflowRunSubagent['status'];
+        toolCalls?: number;
+        tokens?: number;
+        endTime?: number;
+        model?: string;
+      }>,
+    ) {
+      const run = state.workflowRuns.find(r => r.runId === action.payload.runId);
+      if (!run) return;
+      const sub = run.subagents.find(s => s.subagentId === action.payload.subagentId);
+      if (!sub) return;
+      if (action.payload.status !== undefined) sub.status = action.payload.status;
+      if (action.payload.toolCalls !== undefined) sub.toolCalls = action.payload.toolCalls;
+      if (action.payload.tokens !== undefined) sub.tokens = action.payload.tokens;
+      if (action.payload.endTime !== undefined) sub.endTime = action.payload.endTime;
+      if (action.payload.model !== undefined) sub.model = action.payload.model;
+    },
+
+    /** 收口一次工作流运行：置整体 status（complete/aborted）+ endTime。 */
+    finishWorkflowRun(
+      state,
+      action: PayloadAction<{ runId: string; status: 'complete' | 'aborted' }>,
+    ) {
+      const run = state.workflowRuns.find(r => r.runId === action.payload.runId);
+      if (!run) return;
+      run.status = action.payload.status;
+      run.endTime = Date.now();
+    },
   },
 });
 
@@ -381,6 +526,11 @@ export const {
   addRunningSubagent,
   updateSubagentStatus,
   clearCompletedSubagents,
+  startWorkflowRun,
+  updateWorkflowRun,
+  addWorkflowRunSubagent,
+  updateWorkflowRunSubagent,
+  finishWorkflowRun,
 } = multiAISlice.actions;
 
 export default multiAISlice.reducer;

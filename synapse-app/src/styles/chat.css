@@ -551,3 +551,64 @@
 .context-section { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .context-label { font-size: 12px; color: var(--syn-text-muted); font-weight: 500; min-width: 80px; }
 .context-value { font-size: 12px; color: var(--syn-text-primary); text-align: right; flex: 1; word-break: break-all; }
+
+/* ★ M3-3a 工作流卡片（@MultiAI 工作流实时四色子代理卡片） */
+.message-workflow { display: flex; flex-direction: column; gap: 6px; }
+.workflow-card {
+  border: 1px solid var(--syn-border);
+  border-left: 3px solid var(--syn-info);
+  border-radius: 8px;
+  background: var(--syn-bg-elevated);
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.workflow-card:hover { background: var(--syn-bg-hover); }
+.workflow-card:focus-visible { outline: 1px solid var(--syn-accent); outline-offset: 1px; }
+.wf-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.wf-card-title { font-size: 13px; font-weight: 600; color: var(--syn-text-primary); }
+.wf-card-run-status {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid currentColor;
+  line-height: 1.5;
+}
+.wf-card-progress { font-size: 11px; color: var(--syn-text-muted); margin-left: auto; }
+.wf-card-empty { font-size: 12px; color: var(--syn-text-muted); padding: 4px 0; }
+.wf-card-subagents { display: flex; flex-direction: column; gap: 6px; }
+.wf-card-subagent {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.wf-card-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+.wf-card-dot.pulsing { animation: wf-card-pulse 1.4s ease-in-out infinite; }
+@keyframes wf-card-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.wf-card-subagent-main { flex: 1; min-width: 0; }
+.wf-card-subagent-top { display: flex; align-items: center; gap: 8px; }
+.wf-card-role { font-size: 12px; font-weight: 500; color: var(--syn-text-primary); }
+.wf-card-status { font-size: 11px; font-weight: 500; }
+.wf-card-meta {
+  font-size: 11px;
+  color: var(--syn-text-muted);
+  font-family: var(--syn-font-mono);
+  margin-top: 2px;
+  word-break: break-all;
+}
+.message-workflow-summary { margin-top: 2px; }

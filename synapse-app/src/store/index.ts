@@ -102,6 +102,8 @@ function sanitizePersistedMultiAI(multiAI: any) {
     activeMode,
     modes: [...BUILT_IN_MODES, ...customModes],
     runningSubagents: Array.isArray(multiAI.runningSubagents) ? multiAI.runningSubagents : [],
+    // ★ M3-3a：工作流运行实例是【运行态】，重启/刷新一律重置为空（不复用上次未完成的卡片状态）。
+    workflowRuns: [],
     maxConcurrentSubagents: Number.isFinite(Number(multiAI.maxConcurrentSubagents)) ? Number(multiAI.maxConcurrentSubagents) : 3,
     defaultSubagentModel: subagentModel,
     subagentDefaultModel: subagentModel,
@@ -170,8 +172,14 @@ const persistMiddleware: Middleware = (storeApi) => (next) => (action) => {
     }
     if (type.startsWith('multiAI/')) {
       try {
-        localStorage.setItem(MULTI_AI_KEY, JSON.stringify(state.multiAI));
-        localStorage.setItem(MULTI_AI_SETTINGS_KEY, JSON.stringify(state.multiAI));
+        // ★ medium#1（M3-3a 审查）治本：剔除【运行态】字段再落盘。workflowRuns / runningSubagents 是运行实例
+        //   （loadPersistedState 时本就重置为空，不复用上次未完成状态），不该进 localStorage——否则单次工作流的
+        //   ~(1+N+状态翻转) 次 multiAI/* dispatch 每次都把全会话累积的运行态整体序列化写盘（性能/quota 风险）。
+        //   与 worktreeSession 前缀不入 persistMiddleware 同思路：只持久化配置类字段，运行态留在内存。
+        const { workflowRuns: _wfRuns, runningSubagents: _running, ...persistable } = state.multiAI;
+        const serialized = JSON.stringify(persistable);
+        localStorage.setItem(MULTI_AI_KEY, serialized);
+        localStorage.setItem(MULTI_AI_SETTINGS_KEY, serialized);
       } catch { /* localStorage 不可用 */ }
     }
     if (type.startsWith('layout/')) {

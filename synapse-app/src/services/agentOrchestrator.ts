@@ -24,9 +24,14 @@ import { AIClient, type ChatMessage, type ToolCallRequest } from './aiClient';
 import {
   addRunningSubagent,
   updateSubagentStatus,
+  startWorkflowRun,
+  updateWorkflowRunSubagent,
+  addWorkflowRunSubagent,
+  finishWorkflowRun,
   type SubagentConfig,
   type MultiAIMode,
   type WorkflowNode,
+  type RunningSubagent,
 } from '@/store/slices/multiAI';
 import { addNotification } from '@/store/slices/notifications';
 import { toolRegistry } from './toolRegistry';
@@ -41,6 +46,12 @@ export interface SubagentTask {
   config: SubagentConfig;
   /** 主对话 id（子代理对话落库时作 parent_id；卡片归属）。可选——无主对话时落 null。 */
   parentConversationId?: string;
+  /**
+   * ★ M3-3a 工作流运行上下文（卡片可视化）。由 runWorkflow 派发节点子代理时填入，使本子代理的注册/状态流转
+   *   除了写全局 runningSubagents 外，同步登记/流转到 WorkflowRun.subagents（runId 下、归属 nodeId），
+   *   供 WorkflowCard 实时四色渲染。未填（普通 spawn_subagent 工具直派）时不写工作流实例，零回归。
+   */
+  runContext?: { runId: string; nodeId: string };
 }
 
 export interface SubagentResult {
@@ -146,6 +157,16 @@ export class AgentOrchestrator {
   private depthByContext: Map<string, number> = new Map();
 
   /**
+   * ★ medium#2（M3-3a 审查）subagentId → 所属工作流运行上下文（runId/nodeId）的反查表。
+   * 仅【由 runWorkflow 派发的工作流节点子代理】（task.runContext 存在）才登记，spawnSubagent finally 清理。
+   * 用途：abortAll() 终止工作流时，除了把全局 runningSubagents 置 error，还能据此【同步】回填
+   *   WorkflowRun.subagents（updateWorkflowRunSubagent status:error + endTime），让卡片中止瞬间子代理点
+   *   立即转红停表，不依赖各子代理 catch 块异步兜底（消除「红边框但子代理仍蓝点脉冲」的时序窗口）。
+   * 普通 spawn_subagent 工具直派无 runContext，不登记（零回归）。
+   */
+  private runContextBySubagent: Map<string, SubagentTask['runContext']> = new Map();
+
+  /**
    * ★ medium#8 工作流级中断信号。runWorkflow 启动时新建一个 AbortController 存这里，循环每个节点开始前检查
    *   signal.aborted；abortAll() 在杀在途子代理的同时 abort 这个信号，使「终止全部」能真正停住串行推进循环本身
    *   （否则单节点失败的设计是「继续」，abortAll 只能逐个杀新 spawn 的子代理，打地鼠）。无运行中工作流时为 null。
@@ -159,6 +180,30 @@ export class AgentOrchestrator {
   getContextMaxDepth(contextId?: string): number | undefined {
     if (!contextId) return undefined;
     return this.depthByContext.get(contextId);
+  }
+
+  /**
+   * ★ M3-3a：把子代理的状态流转同步到所属 WorkflowRun.subagents（卡片实时四色）。
+   * 仅在 task.runContext 存在（即由 runWorkflow 派发的工作流节点子代理）时生效；普通 spawn_subagent 工具直派无 runContext，
+   * 不写工作流实例（避免污染卡片，零回归）。与全局 runningSubagents 的 updateSubagentStatus 调用点一一对应。
+   */
+  private syncWorkflowRunSubagent(
+    runContext: SubagentTask['runContext'],
+    subagentId: string,
+    patch: {
+      status?: RunningSubagent['status'];
+      toolCalls?: number;
+      tokens?: number;
+      endTime?: number;
+      model?: string;
+    },
+  ): void {
+    if (!runContext) return;
+    store.dispatch(updateWorkflowRunSubagent({
+      runId: runContext.runId,
+      subagentId,
+      ...patch,
+    }));
   }
 
   /**
@@ -263,6 +308,23 @@ export class AgentOrchestrator {
         startTime,
         depth: maxDepth,
       }));
+      // ★ M3-3a：同步登记进所属工作流运行实例（卡片数据源）。仅工作流节点子代理（有 runContext）写。
+      if (task.runContext) {
+        store.dispatch(addWorkflowRunSubagent({
+          runId: task.runContext.runId,
+          subagent: {
+            subagentId,
+            role: task.config.name,
+            nodeId: task.runContext.nodeId,
+            status: 'running',
+            model,
+            startTime,
+          },
+        }));
+        // ★ medium#2（M3-3a 审查）登记反查表：abortAll() 据此把被中止的工作流子代理同步回填进 WorkflowRun.subagents
+        //   （立即转红 + 停表），不依赖本函数 catch 异步兜底。finally 清理（与 depthByContext 一致）。
+        this.runContextBySubagent.set(subagentId, task.runContext);
+      }
       registered = true;
 
       store.dispatch(addNotification({
@@ -353,6 +415,7 @@ export class AgentOrchestrator {
               if (!sawRetry) {
                 sawRetry = true;
                 store.dispatch(updateSubagentStatus({ id: subagentId, status: 'retrying' }));
+                this.syncWorkflowRunSubagent(task.runContext, subagentId, { status: 'retrying' });
               }
             } else if (chunk.type === 'error') {
               // 超时触发的 abort 也会让 streamChat yield aborted；timedOut 已置位时按超时收尾（下方统一抛）。
@@ -367,6 +430,7 @@ export class AgentOrchestrator {
         // 本轮收到数据后从 retrying 回到 running（若曾置黄）。
         if (sawRetry && !abortController.signal.aborted) {
           store.dispatch(updateSubagentStatus({ id: subagentId, status: 'running' }));
+          this.syncWorkflowRunSubagent(task.runContext, subagentId, { status: 'running' });
         }
         // 超时优先于「用户终止」判定：明确告知是墙钟超时而非手动 abort（走 catch 的 error 收尾路径）。
         if (timedOut) {
@@ -457,15 +521,24 @@ export class AgentOrchestrator {
         conversationId,
       };
 
+      const completeEndTime = Date.now();
       store.dispatch(updateSubagentStatus({
         id: subagentId,
         status: 'complete',
         result: report,
-        endTime: Date.now(),
+        endTime: completeEndTime,
         toolCallsUsed,
         tokensUsed,
         conversationId,
       }));
+      // ★ M3-3a：完成回填工作流卡片（灰=complete + 工具调用次数 + token + 耗时）。
+      this.syncWorkflowRunSubagent(task.runContext, subagentId, {
+        status: 'complete',
+        toolCalls: toolCallsUsed,
+        tokens: tokensUsed,
+        endTime: completeEndTime,
+        model,
+      });
 
       store.dispatch(addNotification({
         type: 'success',
@@ -490,14 +563,21 @@ export class AgentOrchestrator {
           parentConversationId,
         ).catch(() => undefined);
 
+        const errorEndTime = Date.now();
         store.dispatch(updateSubagentStatus({
           id: subagentId,
           status: 'error',
           result: message,
-          endTime: Date.now(),
+          endTime: errorEndTime,
           toolCallsUsed,
           conversationId,
         }));
+        // ★ M3-3a：失败回填工作流卡片（红=error + 已用工具调用次数 + 耗时）。
+        this.syncWorkflowRunSubagent(task.runContext, subagentId, {
+          status: 'error',
+          toolCalls: toolCallsUsed,
+          endTime: errorEndTime,
+        });
       }
 
       store.dispatch(addNotification({
@@ -519,6 +599,8 @@ export class AgentOrchestrator {
     } finally {
       this.activeSubagents.delete(subagentId);
       this.depthByContext.delete(subagentId);
+      // ★ medium#2（M3-3a 审查）清理反查表，防泄漏到下次复用（实际 id 含时间戳唯一，仍按 depthByContext 同步清）。
+      this.runContextBySubagent.delete(subagentId);
     }
   }
 
@@ -815,16 +897,45 @@ export class AgentOrchestrator {
    *
    * @param mode 目标模式（须含 workflow 节点；无 workflow 视为空工作流直接 complete）。
    * @param userInput 触发工作流的原始用户输入。
+   * @param runOptions ★ M3-3a 卡片可视化运行选项：runId（稳定运行实例 id；不填则内部生成）+ triggerMessageId
+   *   （关联对话里触发它的那条消息，供 WorkflowCard 渲染锚点）。调用方（multiAITrigger / AgentPanel）传 runId
+   *   即可拿到同一 id 关联到汇总消息。无 runOptions 时仍建一个匿名 run（向后兼容，卡片无法关联消息但状态机完整）。
    */
-  async runWorkflow(mode: MultiAIMode, userInput: string): Promise<WorkflowResult> {
+  async runWorkflow(
+    mode: MultiAIMode,
+    userInput: string,
+    runOptions?: { runId?: string; triggerMessageId?: string },
+  ): Promise<WorkflowResult> {
     const nodes = mode.workflow ?? [];
     const nodeResults: WorkflowNodeResult[] = [];
 
+    // ★ M3-3a：建立工作流运行实例（卡片数据源）。runId 稳定生成（调用方传则用之，便于回填 triggerMessageId）。
+    const runId = runOptions?.runId
+      || `wf-${mode.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    store.dispatch(startWorkflowRun({
+      runId,
+      modeName: mode.name,
+      triggerMessageId: runOptions?.triggerMessageId,
+    }));
+    // 统一收口工作流实例状态（与 WorkflowResult.status 对齐：complete / aborted）。
+    const finishRun = (status: 'complete' | 'aborted') => {
+      store.dispatch(finishWorkflowRun({ runId, status }));
+    };
+    // ★ M3-3a：本函数内所有 abort 返回统一走此包装——先收口运行实例为 aborted，再产出 aborted WorkflowResult。
+    //   保证卡片整体状态与 WorkflowResult 一致（不留 running 卡片）。
+    const abortRun = (
+      reason: string,
+      notifyTitle?: string,
+    ): WorkflowResult => {
+      finishRun('aborted');
+      return notifyTitle
+        ? this.abortedWorkflow(mode, nodeResults, reason, notifyTitle)
+        : this.abortedWorkflow(mode, nodeResults, reason);
+    };
+
     // ★ medium#7 节点数上限：防配置/递归把 nodes 撑到几十上百，累积墙钟失控。空工作流（0 节点）正常 complete。
     if (nodes.length > WORKFLOW_MAX_NODES) {
-      return this.abortedWorkflow(
-        mode,
-        nodeResults,
+      return abortRun(
         `无法推进: 工作流节点数 ${nodes.length} 超过上限 ${WORKFLOW_MAX_NODES}，拒绝执行（疑似配置异常）。`,
         '工作流配置异常',
       );
@@ -846,13 +957,11 @@ export class AgentOrchestrator {
       for (const node of nodes) {
         // ★ medium#8：每个节点开始前检查工作流是否已被 abortAll 终止——是则立即停住串行推进（不再 spawn 后续节点）。
         if (wfAbort.signal.aborted) {
-          return this.abortedWorkflow(mode, nodeResults, '无法推进: 用户终止工作流');
+          return abortRun('无法推进: 用户终止工作流');
         }
         // ★ medium#7：整工作流墙钟预算超支 → 中止剩余节点。
         if (Date.now() - workflowStart > WORKFLOW_WALL_CLOCK_BUDGET_MS) {
-          return this.abortedWorkflow(
-            mode,
-            nodeResults,
+          return abortRun(
             `无法推进: 工作流总时长超过预算 ${Math.round(WORKFLOW_WALL_CLOCK_BUDGET_MS / 60_000)} 分钟，已中止剩余节点。`,
           );
         }
@@ -862,15 +971,15 @@ export class AgentOrchestrator {
         if (node.type === 'agent') {
           // ★ medium#7：派发前检查累计派发数。
           if (dispatchCount + 1 > WORKFLOW_MAX_SUBAGENT_DISPATCHES) {
-            return this.abortedWorkflow(
-              mode,
-              nodeResults,
+            return abortRun(
               `无法推进: 累计子代理派发数超过上限 ${WORKFLOW_MAX_SUBAGENT_DISPATCHES}，已中止（防失控派发）。`,
             );
           }
           const task: SubagentTask = {
             taskDescription: this.renderTaskTemplate(node.taskTemplate, userInput, context),
             config: node.subagent,
+            // ★ M3-3a：登记到本次工作流运行实例（卡片实时四色）。
+            runContext: { runId, nodeId: node.id },
           };
           const result = await this.spawnSubagent(task);
           dispatchCount += 1;
@@ -878,9 +987,7 @@ export class AgentOrchestrator {
           // ★ medium#2：关键节点（单 agent）失败即 abort——其产出是错误文本而非有效结论，
           //   继续推进会让下游拿到错误堆栈当「前序结果」，语义错误。
           if (this.allResultsFailed([result])) {
-            return this.abortedWorkflow(
-              mode,
-              nodeResults,
+            return abortRun(
               `无法推进: 节点「${node.id}」(${result.role}) 执行失败，无有效产出可供后续节点使用。`,
             );
           }
@@ -890,15 +997,15 @@ export class AgentOrchestrator {
         if (node.type === 'parallel') {
           // ★ medium#7：派发前检查累计派发数（并行分支一次性算多个）。
           if (dispatchCount + node.branches.length > WORKFLOW_MAX_SUBAGENT_DISPATCHES) {
-            return this.abortedWorkflow(
-              mode,
-              nodeResults,
+            return abortRun(
               `无法推进: 累计子代理派发数将超过上限 ${WORKFLOW_MAX_SUBAGENT_DISPATCHES}，已中止（防失控派发）。`,
             );
           }
           const tasks: SubagentTask[] = node.branches.map(branch => ({
             taskDescription: this.renderTaskTemplate(node.taskTemplate, userInput, context),
             config: branch,
+            // ★ M3-3a：每个并行分支都登记到本节点下（卡片同节点多分支并列）。
+            runContext: { runId, nodeId: node.id },
           }));
           const results = await this.spawnMultiple(tasks);
           dispatchCount += node.branches.length;
@@ -907,9 +1014,7 @@ export class AgentOrchestrator {
           //   否则 condition 拿到的 context 全是错误文本，判断「是否发现问题」语义不可控，
           //   且 evaluateCondition 容错保守 true 会带着失败结果照常进入修复节点（fixer 拿到的是错误堆栈）。
           if (this.allResultsFailed(results)) {
-            return this.abortedWorkflow(
-              mode,
-              nodeResults,
+            return abortRun(
               `无法推进: 并行节点「${node.id}」全部 ${results.length} 个分支执行失败，无有效产出可供后续节点使用。`,
             );
           }
@@ -965,7 +1070,7 @@ export class AgentOrchestrator {
             results: [],
             condition: { expr: node.expr, passed: false },
           });
-          return this.abortedWorkflow(mode, nodeResults, abortReason);
+          return abortRun(abortReason);
         }
 
         // onFalse === 'continue'：记 skipped，继续后续节点
@@ -984,6 +1089,8 @@ export class AgentOrchestrator {
         message: `「${mode.name}」全部 ${nodes.length} 个节点执行完毕`,
       }));
 
+      // ★ M3-3a：全部节点跑完 → 收口运行实例为 complete（卡片整体置灰/完成）。
+      finishRun('complete');
       return {
         modeId: mode.id,
         modeName: mode.name,
@@ -998,6 +1105,8 @@ export class AgentOrchestrator {
         title: '工作流异常中止',
         message: abortReason,
       }));
+      // ★ M3-3a：运行器层异常 → 收口运行实例为 aborted。
+      finishRun('aborted');
       return {
         modeId: mode.id,
         modeName: mode.name,
@@ -1023,17 +1132,33 @@ export class AgentOrchestrator {
     // 先置工作流信号：runWorkflow 当前 await（如某子代理）返回后，循环顶部检查到 aborted 即 return aborted，不再推进。
     this.workflowAbortController?.abort();
 
+    const abortEndTime = Date.now();
     for (const [id, controller] of this.activeSubagents) {
       controller.abort();
       store.dispatch(updateSubagentStatus({
         id,
         status: 'error',
         result: '用户手动终止',
-        endTime: Date.now(),
+        endTime: abortEndTime,
       }));
+      // ★ medium#2（M3-3a 审查）一致性收口：与上面的全局 updateSubagentStatus 调用点一一对应，
+      //   同步把该子代理回填进所属 WorkflowRun.subagents（红=error + endTime 停表）。
+      //   不再依赖各子代理 catch 块（syncWorkflowRunSubagent status:error）异步兜底——后者与
+      //   finishWorkflowRun('aborted') 同步置红边框之间存在时序窗口（卡片红边框但子代理仍蓝点脉冲），
+      //   极端早退路径还可能永久残留蓝点。这里同步回填消除该裂缝。
+      const runContext = this.runContextBySubagent.get(id);
+      if (runContext) {
+        store.dispatch(updateWorkflowRunSubagent({
+          runId: runContext.runId,
+          subagentId: id,
+          status: 'error',
+          endTime: abortEndTime,
+        }));
+      }
     }
     this.activeSubagents.clear();
     this.depthByContext.clear();
+    this.runContextBySubagent.clear();
   }
 }
 

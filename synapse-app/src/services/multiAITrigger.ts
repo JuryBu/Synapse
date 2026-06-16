@@ -161,16 +161,39 @@ export function formatWorkflowResult(result: WorkflowResult): string {
 export type MultiAITriggerOutcome =
   | { kind: 'not-trigger' }                 // 不是 @MultiAI 触发，调用方照常走普通 agentLoop.run
   | { kind: 'error'; message: string }      // 触发了但匹配失败，调用方应 notification 友好提示（不跑工作流、不发普通对话）
-  | { kind: 'ran'; assistantText: string }; // 工作流已跑完，assistantText 为待插入对话的汇总文本
+  | { kind: 'ran'; assistantText: string; runId: string }; // 工作流已跑完，assistantText 为汇总文本，runId 关联卡片
+
+/**
+ * ★ M3-3a 运行选项：
+ *   - runId：调用方预生成的稳定运行实例 id。在【调用 runMultiAITrigger 之前】先 startWorkflowRun（或先插占位消息拿到 id）
+ *     即可让卡片在工作流刚启动时就出现并实时刷新，而非等整个工作流跑完。
+ *   - triggerMessageId：关联对话里触发它的那条消息（供 WorkflowCard 渲染锚点）。
+ */
+export interface MultiAITriggerOptions {
+  runId?: string;
+  triggerMessageId?: string;
+}
+
+/** ★ M3-3a：生成稳定 runId（供调用方在跑前预生成、关联占位消息 + 卡片实时显示）。 */
+export function generateWorkflowRunId(): string {
+  return `wf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 /**
  * 入口：解析 → 匹配 → 跑工作流 → 返回汇总文本。
  * 注意：本函数【不】直接 dispatch 对话消息——user 消息的插入、assistant 消息的插入由调用方（AgentPanel）负责，
  *   以复用其消息 id 生成 / 落库 / 滚动等既有逻辑，且保证「用户消息照常显示」与既有发送链路一致。
  *
+ * ★ M3-3a：传 options.runId 时，runWorkflow 用该 id 建运行实例（卡片数据源），返回里带回同一 runId，
+ *   调用方据此把汇总 assistant 消息标记 workflowRunId，让 MessageBubble 渲染实时四色卡片。
+ *
  * @param rawInput 用户原始输入（含 @MultiAI: 前缀）。
+ * @param options ★ M3-3a 运行选项（runId / triggerMessageId）。
  */
-export async function runMultiAITrigger(rawInput: string): Promise<MultiAITriggerOutcome> {
+export async function runMultiAITrigger(
+  rawInput: string,
+  options?: MultiAITriggerOptions,
+): Promise<MultiAITriggerOutcome> {
   const parsed = parseMultiAITrigger(rawInput);
   if (!parsed) return { kind: 'not-trigger' };
 
@@ -179,6 +202,10 @@ export async function runMultiAITrigger(rawInput: string): Promise<MultiAITrigge
 
   // 任务描述：优先用模式名后的文本；为空则兜底用整条原始输入（去掉前缀+模式名后仍空时，让工作流至少拿到用户原话）。
   const userInput = parsed.taskInput || rawInput.trim();
-  const result = await agentOrchestrator.runWorkflow(resolved.mode, userInput);
-  return { kind: 'ran', assistantText: formatWorkflowResult(result) };
+  const runId = options?.runId || generateWorkflowRunId();
+  const result = await agentOrchestrator.runWorkflow(resolved.mode, userInput, {
+    runId,
+    triggerMessageId: options?.triggerMessageId,
+  });
+  return { kind: 'ran', assistantText: formatWorkflowResult(result), runId };
 }

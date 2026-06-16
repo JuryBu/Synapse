@@ -135,6 +135,13 @@ export interface Message {
   diffs?: FileDiffSummary[];
   rollbackSnapshotId?: string;
   error?: string;
+  /**
+   * ★ M3-3a：本消息关联的 Multi-AI 工作流运行实例 id（multiAI.workflowRuns[runId]）。
+   *   仅 @MultiAI 工作流触发的 assistant 汇总消息带此字段；MessageBubble 据此在消息体内渲染 <WorkflowCard runId=.../>
+   *   （实时四色子代理卡片），纯文本汇总 content 作为 fallback/可折叠。普通对话消息无此字段，零回归。
+   *   注：workflowRuns 是运行态（不持久化），重启后该 runId 查不到 → WorkflowCard 自然回退只显示文本汇总。
+   */
+  workflowRunId?: string;
 }
 
 export interface ToolCall {

@@ -22,9 +22,10 @@ import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { toolRegistry } from '@/services/toolRegistry';
 import { addNotification } from '@/store/slices/notifications';
-import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, setStreaming, updateDiffStatus, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
-import { parseMultiAITrigger, runMultiAITrigger } from '@/services/multiAITrigger';
+// ★ M3-3a：generateWorkflowRunId 预生成稳定 runId，跑前先建占位 assistant 消息 + 关联卡片实时显示。
+import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@/services/multiAITrigger';
 // ★ M3-2b 修复：工作流走 agentOrchestrator（非 agentLoop），handleStop 需直接调 abortAll() 才能真正中止工作流。
 import { agentOrchestrator } from '@/services/agentOrchestrator';
 import { exitWorktree } from '@/store/slices/worktreeSession';
@@ -481,7 +482,7 @@ export function AgentPanel() {
   //   TODO(M3-3)：assistant 汇总目前是结构化文本；M3-3 会替换/增强为工作流卡片（节点四色 + 子代理树 + 点进子对话）。
   const runWorkflowFromInput = useCallback(async (rawText: string) => {
     // ★ M3-2b 修复（medium 串台）：捕获触发时刻的对话身份。runWorkflow 可能耗时数十分钟，
-    //   期间用户可能切走对话（ConversationList 双击不设防）。await 解析后插 assistant/error 消息前
+    //   期间用户可能切走对话（ConversationList 双击不设防）。await 解析后回填 assistant/error 消息前
     //   比对 conversationRef.current.id === scopedId，不一致则改走 notification、不污染当前（已切走的别的）对话 slice。
     //   与 autosave 既有迟到守卫（见上方 effect scopedId/liveId 比对）同款思路。
     const scopedId = (conversationRef.current.id as string | null);
@@ -495,47 +496,51 @@ export function AgentPanel() {
       timestamp: Date.now(),
     }));
 
+    // ★ M3-3a：跑前先预生成 runId + 占位 assistant 消息（带 workflowRunId），让【工作流卡片在启动瞬间即出现】
+    //   并随子代理状态实时四色刷新，而非等整个工作流跑完才显示。triggerMessageId = 该 assistant 消息 id，
+    //   使 runWorkflow 建立的运行实例关联到这条消息（WorkflowCard 渲染锚点）。
+    const runId = generateWorkflowRunId();
+    const assistantMsgId = generateMessageId('assistant');
+    dispatch(addMessage({
+      id: assistantMsgId,
+      role: 'assistant',
+      content: '', // 跑完回填文本汇总（作为卡片下方可折叠 fallback）
+      model: 'Multi-AI 工作流',
+      timestamp: Date.now(),
+      workflowRunId: runId,
+    }));
+
     // 2. 置流式占位，期间禁用再次发送（runWorkflow 可能耗时较长）。
     //    isWorkflowRunningRef 让 handleStop 知道现在该 abort 工作流而非 agentLoop。
     isWorkflowRunningRef.current = true;
     dispatch(setStreaming(true));
     try {
-      const outcome = await runMultiAITrigger(rawText);
+      const outcome = await runMultiAITrigger(rawText, { runId, triggerMessageId: assistantMsgId });
       if (outcome.kind === 'error') {
         // 匹配失败（无此模式 / 该模式无 workflow）→ 友好提示，不静默吞。
+        //   此时 runWorkflow 未被调用、卡片运行实例不存在（WorkflowCard 自然返回 null），
+        //   把占位消息回填为错误说明文本即可（去掉 workflowRunId，纯文本展示）。
         dispatch(addNotification({
           type: 'warning',
           title: '无法触发工作流',
           message: outcome.message,
         }));
-        // 同时在对话流里给一条 assistant 说明，避免用户只看到一条孤零零的 user 消息。
-        //   但若用户已切走对话（迟到结果），插进当前 slice 会串台 → 跳过插消息，仅靠上面的 notification 反馈。
         if (isStillScoped()) {
-          dispatch(addMessage({
-            id: generateMessageId('assistant'),
-            role: 'assistant',
-            content: `⚠️ ${outcome.message}`,
-            timestamp: Date.now(),
-          }));
+          dispatch(updateMessage({ id: assistantMsgId, content: `⚠️ ${outcome.message}` }));
+          dispatch(updateMessageMeta({ id: assistantMsgId, changes: { workflowRunId: undefined } }));
         }
         return;
       }
       if (outcome.kind === 'ran') {
-        // 3. 工作流结果汇总成一条 assistant 消息插入对话。
-        //    迟到结果（已切走对话）→ 不污染当前对话，改 notification 告知结果已就绪。
+        // 3. 工作流跑完——把占位 assistant 消息回填为文本汇总（卡片仍由 workflowRunId 实时渲染）。
+        //    迟到结果（已切走对话）→ updateMessage 在当前 slice 找不到该 id 自然 no-op，额外 notification 告知。
         if (isStillScoped()) {
-          dispatch(addMessage({
-            id: generateMessageId('assistant'),
-            role: 'assistant',
-            content: outcome.assistantText,
-            model: `Multi-AI 工作流`,
-            timestamp: Date.now(),
-          }));
+          dispatch(updateMessage({ id: assistantMsgId, content: outcome.assistantText }));
         } else {
           dispatch(addNotification({
             type: 'info',
             title: '工作流已完成',
-            message: '工作流已执行完成，但你已切换到其它对话，汇总未插入当前对话。',
+            message: '工作流已执行完成，但你已切换到其它对话，汇总未回填当前对话。',
           }));
         }
       }
@@ -545,14 +550,9 @@ export function AgentPanel() {
         title: '工作流执行失败',
         message: err?.message || '未知错误',
       }));
-      // 同样守护：异常汇总只插回触发它的那条对话。
+      // 同样守护：异常汇总只回填触发它的那条对话的占位消息。
       if (isStillScoped()) {
-        dispatch(addMessage({
-          id: generateMessageId('assistant'),
-          role: 'assistant',
-          content: `❌ 工作流执行失败：${err?.message || '未知错误'}`,
-          timestamp: Date.now(),
-        }));
+        dispatch(updateMessage({ id: assistantMsgId, content: `❌ 工作流执行失败：${err?.message || '未知错误'}` }));
       }
     } finally {
       isWorkflowRunningRef.current = false;
@@ -1190,6 +1190,7 @@ export function AgentPanel() {
                     attachments={resolveAttachmentsForRender((msg as any).attachments)}
                     toolCalls={(msg as any).toolCalls}
                     diffs={(msg as any).diffs}
+                    workflowRunId={(msg as any).workflowRunId}
                     onReviewChanges={openReviewChanges}
                     onOpenDiff={openDiffTarget}
                     onUndoToMessage={handleUndoToMessage}

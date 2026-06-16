@@ -6,6 +6,7 @@ import 'katex/dist/katex.min.css';
 import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, ListChecks, Undo2, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { ToolCallCard } from './ToolCallCard';
+import { WorkflowCard } from './WorkflowCard';
 import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
 
 interface ToolCallInfo {
@@ -62,6 +63,9 @@ interface MessageProps {
   attachments?: AttachmentInfo[];
   toolCalls?: ToolCallInfo[];
   diffs?: FileDiffInfo[];
+  // ★ M3-3a：@MultiAI 工作流汇总消息关联的运行实例 id；有则在消息体渲染实时四色 <WorkflowCard/>，
+  //   纯文本 content 作为可折叠 fallback。
+  workflowRunId?: string;
   onReviewChanges?: () => void;
   onOpenDiff?: (diff: FileDiffInfo) => void;
   onUndoToMessage?: (id: string) => void;
@@ -153,12 +157,14 @@ function formatBytes(bytes?: number): string {
   return `${bytes} B`;
 }
 
-export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, thinking, attachments, toolCalls, diffs, onReviewChanges, onOpenDiff, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
+export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, thinking, attachments, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
   const [copied, setCopied] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(content);
   const [thinkingOpen, setThinkingOpen] = useState(!thinking?.collapsed);
+  // ★ M3-3a：工作流卡片消息默认折叠纯文本汇总（卡片是主视图，文本汇总作为可展开 fallback）。
+  const [workflowSummaryOpen, setWorkflowSummaryOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const editRef = useRef<HTMLTextAreaElement>(null);
   const live = isStreaming || streamState === 'pending' || streamState === 'streaming';
@@ -355,6 +361,31 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
             ) : (
               <p>{content}</p>
             )
+          ) : workflowRunId ? (
+            // ★ M3-3a：工作流汇总消息——实时四色卡片为主视图，纯文本汇总折叠为 fallback。
+            //   WorkflowCard 在 runId 查不到运行实例时返回 null（重启后运行态已清空），此时仅显示文本汇总。
+            <div className="message-workflow">
+              <WorkflowCard runId={workflowRunId} />
+              {content && (
+                <div className="message-workflow-summary">
+                  <button
+                    className="thinking-toggle"
+                    onClick={() => setWorkflowSummaryOpen(open => !open)}
+                  >
+                    {workflowSummaryOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    <span>文本汇总</span>
+                  </button>
+                  {workflowSummaryOpen && (
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[rehypeKatex]}
+                    >
+                      {content}
+                    </ReactMarkdown>
+                  )}
+                </div>
+              )}
+            </div>
           ) : content ? (
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
