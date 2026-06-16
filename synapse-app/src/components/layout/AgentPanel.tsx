@@ -22,7 +22,11 @@ import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { toolRegistry } from '@/services/toolRegistry';
 import { addNotification } from '@/store/slices/notifications';
-import { clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, updateDiffStatus, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, setStreaming, updateDiffStatus, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+// ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
+import { parseMultiAITrigger, runMultiAITrigger } from '@/services/multiAITrigger';
+// ★ M3-2b 修复：工作流走 agentOrchestrator（非 agentLoop），handleStop 需直接调 abortAll() 才能真正中止工作流。
+import { agentOrchestrator } from '@/services/agentOrchestrator';
 import { exitWorktree } from '@/store/slices/worktreeSession';
 import { countConversationTokens, MAX_CONTEXT_TOKENS } from '@/services/systemPrompt';
 import { conversationExporter } from '@/services/conversationExporter';
@@ -40,6 +44,11 @@ const MAX_IMAGE_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
 function generateAttachmentId(): string {
   return `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// ★ M3-2b：@MultiAI 工作流分支用的消息 id 生成器（与 agentLoop 的 msg_ 前缀口径一致，供 user/assistant 汇总消息使用）。
+function generateMessageId(prefix = 'msg'): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function formatBytes(bytes?: number): string {
@@ -75,6 +84,9 @@ export function AgentPanel() {
   // 持有最新 conversation 供异步回调（如懒迁移 onMigrated）安全校验当前对话身份/消息数，不被 effect 闭包旧值误导。
   const conversationRef = useRef(conversation);
   conversationRef.current = conversation;
+  // ★ M3-2b 修复（high）：标记当前是否在跑 @MultiAI 工作流（走 agentOrchestrator 而非 agentLoop）。
+  //   runWorkflowFromInput 进入置 true / finally 置 false；handleStop 据此分流到 agentOrchestrator.abortAll()。
+  const isWorkflowRunningRef = useRef(false);
   const isStreaming = useAppSelector((s: RootState) => (s as any).conversation.isStreaming);
   const settings = useAppSelector((s: RootState) => (s as any).settings);
   const agentSettings = useAppSelector((s: RootState) => (s as any).agentSettings);
@@ -462,6 +474,92 @@ export function AgentPanel() {
     return parts;
   }, []);
 
+  // ★ M3-2b：@MultiAI:模式名 触发固定工作流。
+  //   - 用户那条输入【照常】作为 user 消息插入对话（用户能看到自己发了什么），随后走 runWorkflow 而非普通 agentLoop.run。
+  //   - 跑期间用 setStreaming(true) 占位（复用既有「流式中」语义防止重复发送 / 禁用输入），完成后插一条 assistant 汇总消息。
+  //   - 工作流自身的进度/错误已由 agentOrchestrator 内部 addNotification 反馈；这里只负责对话消息的 user/assistant 落位。
+  //   TODO(M3-3)：assistant 汇总目前是结构化文本；M3-3 会替换/增强为工作流卡片（节点四色 + 子代理树 + 点进子对话）。
+  const runWorkflowFromInput = useCallback(async (rawText: string) => {
+    // ★ M3-2b 修复（medium 串台）：捕获触发时刻的对话身份。runWorkflow 可能耗时数十分钟，
+    //   期间用户可能切走对话（ConversationList 双击不设防）。await 解析后插 assistant/error 消息前
+    //   比对 conversationRef.current.id === scopedId，不一致则改走 notification、不污染当前（已切走的别的）对话 slice。
+    //   与 autosave 既有迟到守卫（见上方 effect scopedId/liveId 比对）同款思路。
+    const scopedId = (conversationRef.current.id as string | null);
+    const isStillScoped = () => (conversationRef.current.id as string | null) === scopedId;
+
+    // 1. 用户输入照常入对话流（与普通发送一致，让用户看到自己发了什么）。同步 dispatch，必在当前对话。
+    dispatch(addMessage({
+      id: generateMessageId('user'),
+      role: 'user',
+      content: rawText,
+      timestamp: Date.now(),
+    }));
+
+    // 2. 置流式占位，期间禁用再次发送（runWorkflow 可能耗时较长）。
+    //    isWorkflowRunningRef 让 handleStop 知道现在该 abort 工作流而非 agentLoop。
+    isWorkflowRunningRef.current = true;
+    dispatch(setStreaming(true));
+    try {
+      const outcome = await runMultiAITrigger(rawText);
+      if (outcome.kind === 'error') {
+        // 匹配失败（无此模式 / 该模式无 workflow）→ 友好提示，不静默吞。
+        dispatch(addNotification({
+          type: 'warning',
+          title: '无法触发工作流',
+          message: outcome.message,
+        }));
+        // 同时在对话流里给一条 assistant 说明，避免用户只看到一条孤零零的 user 消息。
+        //   但若用户已切走对话（迟到结果），插进当前 slice 会串台 → 跳过插消息，仅靠上面的 notification 反馈。
+        if (isStillScoped()) {
+          dispatch(addMessage({
+            id: generateMessageId('assistant'),
+            role: 'assistant',
+            content: `⚠️ ${outcome.message}`,
+            timestamp: Date.now(),
+          }));
+        }
+        return;
+      }
+      if (outcome.kind === 'ran') {
+        // 3. 工作流结果汇总成一条 assistant 消息插入对话。
+        //    迟到结果（已切走对话）→ 不污染当前对话，改 notification 告知结果已就绪。
+        if (isStillScoped()) {
+          dispatch(addMessage({
+            id: generateMessageId('assistant'),
+            role: 'assistant',
+            content: outcome.assistantText,
+            model: `Multi-AI 工作流`,
+            timestamp: Date.now(),
+          }));
+        } else {
+          dispatch(addNotification({
+            type: 'info',
+            title: '工作流已完成',
+            message: '工作流已执行完成，但你已切换到其它对话，汇总未插入当前对话。',
+          }));
+        }
+      }
+    } catch (err: any) {
+      dispatch(addNotification({
+        type: 'error',
+        title: '工作流执行失败',
+        message: err?.message || '未知错误',
+      }));
+      // 同样守护：异常汇总只插回触发它的那条对话。
+      if (isStillScoped()) {
+        dispatch(addMessage({
+          id: generateMessageId('assistant'),
+          role: 'assistant',
+          content: `❌ 工作流执行失败：${err?.message || '未知错误'}`,
+          timestamp: Date.now(),
+        }));
+      }
+    } finally {
+      isWorkflowRunningRef.current = false;
+      dispatch(setStreaming(false));
+    }
+  }, [dispatch]);
+
   const handleSend = useCallback(() => {
     const text = input.trim();
     const readyAttachments = pendingAttachments.filter(att => att.status === 'ready');
@@ -494,6 +592,24 @@ export function AgentPanel() {
       return;
     }
 
+    // ★ M3-2b：检测 @MultiAI:模式名 前缀 → 分流到固定工作流（不走普通 agentLoop.run）。
+    //   parseMultiAITrigger 返回 null（非触发）时完全走下方原有发送链路，普通对话零改动。
+    if (parseMultiAITrigger(text)) {
+      setInput('');
+      // ★ M3-2b 修复（medium refCount 泄漏）：工作流路径不把附件转交给任何消息（runWorkflow 只收 string），
+      //   也不走 removePendingAttachment 的 GC。若直接 setPendingAttachments([]) 丢弃，带 sha256 的草稿图
+      //   （addPendingFiles 已 platform.attachment.put → refCount=1）会变成孤儿实体，违反 M2-R6 refCount 守恒契约。
+      //   故清空前对每个带 sha256 的草稿附件 release（复用 removePendingAttachment 同款逻辑）止血。
+      //   注：用 pendingAttachments（含 ready 与非 ready），凡 put 过的（有 sha256）都要 release。
+      for (const att of pendingAttachments) {
+        if (att.sha256) void platform.attachment.delete(att.sha256).catch(() => undefined);
+      }
+      setPendingAttachments([]);
+      setPreviewAttachment(null);
+      void runWorkflowFromInput(text);
+      return;
+    }
+
     setInput('');
     setPendingAttachments([]);
     setPreviewAttachment(null);
@@ -507,10 +623,20 @@ export function AgentPanel() {
         message: err.message || '未知错误',
       }));
     });
-  }, [input, pendingAttachments, isStreaming, hasApiKey, hasModel, buildUserContentParts, dispatch]);
+  }, [input, pendingAttachments, isStreaming, hasApiKey, hasModel, buildUserContentParts, runWorkflowFromInput, dispatch]);
 
   const handleStop = useCallback(() => {
+    // ★ M3-2b 修复（high）：Stop 按钮要同时管「普通对话」与「@MultiAI 工作流」两条路。
+    //   两条路共用同一个 isStreaming 闸门和同一个 Stop 控件，但工作流不由 agentLoop 驱动——
+    //   它在 agentOrchestrator.runWorkflow 这条独立链路上跑（可长达 30 分钟、派发 60 个子代理）。
+    //   - agentLoopRef.current?.stop()：停普通 agentLoop（工作流期间 agentLoop 未运行，是 no-op）。
+    //   - agentOrchestrator.abortAll()：abort workflowAbortController（让 runWorkflow 在下个节点前 return aborted）
+    //       + 杀在途子代理；无运行工作流时 abortAll 内部全是 optional-chain/空集合遍历，安全 no-op。
+    //   abortAll 后 runWorkflow 返回 aborted 结果，照常走 outcome.kind==='ran' 插「无法推进」汇总，闭环正常。
     agentLoopRef.current?.stop();
+    if (isWorkflowRunningRef.current) {
+      agentOrchestrator.abortAll();
+    }
   }, []);
 
   // Plan_4 M2-1：编辑/重试/回溯会截断后续消息。把 record 水位线 clamp 到保留范围（替代此前的整条删）：
@@ -1222,7 +1348,7 @@ export function AgentPanel() {
           <textarea
             ref={inputRef}
             className="agent-input"
-            placeholder={!hasApiKey ? "请先配置 API Key..." : !hasModel ? "请先选择模型..." : "输入消息... (Ctrl+Enter 发送)"}
+            placeholder={!hasApiKey ? "请先配置 API Key..." : !hasModel ? "请先选择模型..." : "输入消息... (Ctrl+Enter 发送；@MultiAI:模式名 触发工作流)"}
             rows={1}
             value={input}
             onChange={e => setInput(e.target.value)}
