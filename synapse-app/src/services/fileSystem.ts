@@ -25,6 +25,16 @@ function isAbsolutePath(p: string): boolean {
   return /^([a-zA-Z]:[\\/]|[\\/])/.test(p);
 }
 
+/**
+ * ★ M4-4-S3：getDisplayUrl 的扩展名白名单（图片 + 常见视频 + pdf）。
+ * 与主进程 electron/ipc/fileProtocol.ts ALLOWED_EXTENSIONS 保持一致——前后端两侧都校验。
+ */
+const DISPLAY_URL_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico',
+  '.mp4', '.webm', '.mov', '.avi', '.mkv', '.ogg', '.ogv',
+  '.pdf',
+]);
+
 /** 末尾分隔符归一去掉，便于做前缀比较（保留盘符根如 `C:` 不动）。 */
 function stripTrailingSep(p: string): string {
   return p.replace(/[\\/]+$/, '');
@@ -550,6 +560,30 @@ class FileSystemService {
 
   getFileUrl(filePath: string): string | undefined {
     return this.memoryFileUrls.get(filePath);
+  }
+
+  /**
+   * ★ M4-4-S3：取「可直接喂给 <img>/<video>/pdf.js 的可显示 URL」。
+   *
+   * - Electron 模式：返回自定义协议 url `synapse-file://local/<encodeURIComponent(绝对路径)>`，
+   *   由主进程 electron/ipc/fileProtocol.ts 映射回真实文件（带扩展名白名单 + 防穿越校验）。
+   *   解决「http(dev)/file(prod) 源 + webSecurity 下裸路径 <img> 无法加载」的黑屏问题。
+   * - Web 模式：返回上传时建立的 object url（memoryFileUrls）；无则空串。
+   * - 兜底：返回空串（不再退回裸文件路径——裸路径在 Electron 下必然黑屏）。调用方据空串走优雅占位。
+   *
+   * 为何新增而非改 getFileUrl：getFileUrl 仍服务 PdfFileViewer 的 objectUrl||readBinary 二段式与 Web 路径，
+   * 语义不能动；getDisplayUrl 专供 image/video（及 PDF 可选）一次性取协议/object url。
+   */
+  getDisplayUrl(filePath: string): string {
+    if (!filePath) return '';
+    if (isElectron) {
+      const ext = ('.' + (filePath.split('.').pop() || '')).toLowerCase();
+      // 前端防御性白名单（与主进程协议白名单一致）：非可视类型不生成协议 url，避免注定失败的请求。
+      if (!DISPLAY_URL_EXTENSIONS.has(ext)) return '';
+      return `synapse-file://local/${encodeURIComponent(filePath)}`;
+    }
+    // Web 模式：上传文件的 object url。
+    return this.memoryFileUrls.get(filePath) || '';
   }
 
   // ==========================================

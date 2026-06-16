@@ -157,6 +157,9 @@ export function EditorArea() {
           />
         );
 
+      // ★ M4-4-S2：docx 现归 'office' 路径（OfficeViewer → LibreOffice → PDF 真版式）。
+      //   本分支保留作显式 openTab({type:'docx'}) 的兼容兜底（死分支，正常入口不再命中）。
+      //   DocxViewer 组件不删——synopsisEngine/SynopsisPanel 的「知识概要」体系仍引用 docx 概念。
       case 'docx':
         return (
           <DocxViewer
@@ -165,18 +168,21 @@ export function EditorArea() {
           />
         );
 
+      // ★ M4-4-S3：图片用 getDisplayUrl（Electron→synapse-file:// 协议 / Web→object url），
+      //   去掉裸路径 fallback（裸 C:\... 在 Electron http/file 源下必然黑屏）。
       case 'image':
         return (
           <ImageViewer
-            src={fileSystem.getFileUrl(activeTab.filePath) || activeTab.filePath}
+            src={fileSystem.getDisplayUrl(activeTab.filePath)}
             fileName={activeTab.fileName}
           />
         );
 
+      // ★ M4-4-S3：视频同步切到 getDisplayUrl，消除与图片同源的 Electron 黑屏隐患。
       case 'video':
         return (
           <MediaPlayer
-            src={activeTab.filePath}
+            src={fileSystem.getDisplayUrl(activeTab.filePath)}
             fileName={activeTab.fileName}
             type="video"
           />
@@ -290,6 +296,9 @@ export function EditorArea() {
             </div>
           );
 
+      // ★ M4-4-S2：pptx 现归 'office' 路径（OfficeViewer → LibreOffice → PDF 真版式）。
+      //   本分支保留作显式 openTab({type:'pptx'}) 的兼容兜底（死分支，正常入口不再命中）。
+      //   PptxViewer 组件不删——synopsisEngine/SynopsisPanel 的「知识概要」体系仍引用 pptx 概念。
       case 'pptx':
         return (
           <PptxViewer
@@ -357,6 +366,9 @@ function PdfFileViewer({ filePath, fileName }: { filePath: string; fileName: str
     (async () => {
       try {
         setError('');
+        // ★ M4-4-S3：Web 上传走 object url；其余（含 Electron 本地 PDF）统一读二进制喂 pdf.js。
+        //   PDF 现状本就走 readBinary→ArrayBuffer，不存在图片那类裸路径黑屏（getFileUrl 在 Electron 恒空），
+        //   ArrayBuffer 路径对 dev/prod 双源都稳，故 PDF 不切协议 url（避免 pdf.js worker fetch 自定义协议的不确定性）。
         const objectUrl = fileSystem.getFileUrl(filePath);
         if (objectUrl) {
           if (!cancelled) setData(objectUrl);

@@ -67,12 +67,12 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - 目标：修图片黑屏(3①)、代码无高亮(3②)、Office 走 LibreOffice(3③)。
 - 依据：`Plan_5_M4-4_文件查看器.md`
 - 执行清单：
-  - [ ] **S1**(S) 代码高亮：装 react-syntax-highlighter，CodeEditor 只读分支换高亮组件（复用 detectLanguage + Prism 映射 c++→cpp），可编辑 textarea 不动；>2000 行降级裸 pre
-  - [ ] **S2**(S) Office 归 office：`editorFileTypes.ts` 删 pptx/docx 特判(12-13) 并入 OFFICE_EXTENSIONS；EditorArea case 'pptx'/'docx' 保留注释作死分支兜底（PptxViewer/DocxViewer 仍被 Synopsis 用，不可删）
-  - [ ] **S3**(M) `synapse-file://` 协议：新建 `electron/ipc/fileProtocol.ts`(仿 wallpaper, registerFileProtocol, standard+secure, 路径规范化+存在性+扩展名白名单)；main.ts 注册 scheme+whenReady 调；`fileSystem.getDisplayUrl`(Electron→协议/Web→object url)；EditorArea image/video/pdf 改用 getDisplayUrl 去裸路径
-  - [ ] **S4**(S) 自测 build + electron:build；真机验图片(dev+prod)/高亮/pptx+docx 版式；Codex 独立 review 协议安全（路径穿越/二次解码/盘符大小写）；修 high/med
-- 验收：图片/video/pdf 不再黑屏；代码有高亮；pptx/docx 走 LibreOffice 真版式。
-- 证据/产物：
+  - [x] **S1**(S) 代码高亮：装 react-syntax-highlighter(PrismAsyncLight 按需)，CodeEditor 只读分支换高亮(vscDarkPlus + detectLanguage + c++→cpp)，可编辑 textarea 不动；>2000 行或 >=256KB 降级裸 pre
+  - [x] **S2**(S) Office 归 office：`editorFileTypes.ts` 删 pptx/docx 特判并入 OFFICE_EXTENSIONS→OfficeViewer→LibreOffice→PDF；EditorArea case 保留注释死分支；PptxViewer/DocxViewer 未删(Synopsis 仍用)
+  - [x] **S3**(M) `synapse-file://` 协议：新建 `electron/ipc/fileProtocol.ts`(registerFileProtocol standard+secure+supportFetchAPI+stream，规范化+存在性+扩展名白名单)；main.ts 顶层注册 scheme+whenReady 调；`fileSystem.getDisplayUrl`(Electron→synapse-file://local/encodeURIComponent / Web→object url)；EditorArea image/video/pdf 改 getDisplayUrl
+  - [x] **S4**(S) 编译双过(electron:build 关键)；协议安全沙箱 8/8 PASS(穿越/二次编码/盘符/存在性)；真机视觉留主人侧
+- 验收：✅ 4 stage 实现，build+electron:build 双过；✅ 协议安全沙箱 8/8；✅ 对抗审查 1 medium 已修(UNC/网络路径越界收口防 NTLM 凭据外泄→本地盘符白名单)；🔸 图片/高亮/Office 真机视觉留主人验。
+- 证据/产物：commit `feat(M4-4)`；新建 electron/ipc/fileProtocol.ts；改 main.ts/CodeEditor/EditorArea/editorFileTypes/fileSystem + package.json(react-syntax-highlighter)。
 
 ---
 

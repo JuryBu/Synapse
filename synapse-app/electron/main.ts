@@ -11,6 +11,9 @@ import { registerWorktreeHandlers } from './ipc/worktree';
 import { registerAttachmentHandlers } from './ipc/attachment';
 import { registerMCPHandlers, shutdownAllMCP } from './ipc/mcp';
 import { registerWallpaperHandlers, registerWallpaperProtocol } from './ipc/wallpaper';
+// ★ M4-4-S3：import 触发顶层 registerSchemesAsPrivileged 副作用（必须在 app.whenReady 前），
+//   registerFileProtocol 在 whenReady 内调用。根治图片/视频/PDF 本地资源加载黑屏。
+import { registerFileProtocol } from './ipc/fileProtocol';
 
 let mainWindow: BrowserWindow | null = null;
 const devServerUrl = process.env.SYNAPSE_DEV_SERVER_URL || 'http://localhost:5173';
@@ -53,6 +56,7 @@ function createWindow() {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   registerWallpaperProtocol();
+  registerFileProtocol(); // ★ M4-4-S3：注册 synapse-file:// 文件协议（图片/视频/PDF 本地资源）。
   createWindow();
 
   app.on('activate', () => {
