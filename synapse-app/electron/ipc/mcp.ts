@@ -36,25 +36,73 @@ function loadMCPConfig(): Record<string, MCPConfigEntry> {
     return merged;
 }
 
+/**
+ * ★ M4-7-S2：首次运行生成默认 ~/.synapse/mcp_config.json。
+ *   - 文件【已存在则绝不覆盖】（保护用户编辑过的路径 / enabled / 自定义 server）。
+ *   - command='node'、args=[各 server dist/index.js 绝对路径]（三 server 原生支持 StdioServerTransport，
+ *     走 stdio spawn，不走 HTTP Broker）。
+ *   - enabled 默认（决策）：memory-store=true（最轻、读记忆最常用），sandbox/web-fetcher=false（依赖重，用户显式开启）。
+ *   - 写 {servers:{}} 包裹形态（loadMCPConfig 同时支持包裹与裸对象，包裹最规范）。
+ *   在 main.ts 启动序列（registerMCPHandlers 之前）调用。
+ */
+export function ensureDefaultMCPConfig(): void {
+    try {
+        const dir = path.join(app.getPath('home'), '.synapse');
+        const configPath = path.join(dir, 'mcp_config.json');
+        if (fs.existsSync(configPath)) return; // 存在绝不覆盖。
+        const base = 'C:\\Users\\Stardust\\.gemini\\antigravity';
+        const defaultConfig = {
+            servers: {
+                'memory-store': {
+                    command: 'node',
+                    args: [path.join(base, 'mcp-memory-store', 'dist', 'index.js')],
+                    enabled: true,
+                },
+                'sandbox': {
+                    command: 'node',
+                    args: [path.join(base, 'mcp-sandbox', 'dist', 'index.js')],
+                    enabled: false,
+                },
+                'web-fetcher': {
+                    command: 'node',
+                    args: [path.join(base, 'mcp-web-fetcher', 'dist', 'index.js')],
+                    enabled: false,
+                },
+            },
+        };
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2), 'utf-8');
+        console.log(`[MCP] default mcp_config.json generated at ${configPath}`);
+    } catch (err) {
+        console.error('[MCP] ensureDefaultMCPConfig failed:', (err as Error)?.message);
+    }
+}
+
 export function registerMCPHandlers(): void {
     // 获取 MCP 状态
-    ipcMain.handle('mcp:status', () => {
+    // ★ M4-7-S2：handler 改 async——对 running server 调 listTools() 填【真实 tools 名列表】
+    //   （旧实现恒返回 []）。listTools 内部已 catch 成空集，单 server 失败不影响整条状态。
+    ipcMain.handle('mcp:status', async () => {
         const config = loadMCPConfig();
         const result: Array<{ name: string; status: string; running: boolean; configured: boolean; enabled: boolean; tools: string[] }> = [];
         for (const [name, entry] of Object.entries(config)) {
             const proc = servers.get(name);
+            const running = proc?.status === 'running';
+            const tools = running ? (await proc!.listTools()).map(t => t.name) : [];
             result.push({
                 name,
                 status: proc?.status ?? (entry.enabled === false ? 'disabled' : 'stopped'),
-                running: proc?.status === 'running',
+                running,
                 configured: true,
                 enabled: entry.enabled !== false,
-                tools: [],
+                tools,
             });
         }
         for (const [name, proc] of servers) {
             if (config[name]) continue;
-            result.push({ name, status: proc.status, running: proc.status === 'running', configured: false, enabled: true, tools: [] });
+            const running = proc.status === 'running';
+            const tools = running ? (await proc.listTools()).map(t => t.name) : [];
+            result.push({ name, status: proc.status, running, configured: false, enabled: true, tools });
         }
         return { servers: result };
     });

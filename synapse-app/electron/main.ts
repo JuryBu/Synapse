@@ -9,7 +9,7 @@ import { registerFileHandlers } from './ipc/file';
 import { registerCommandHandlers } from './ipc/command';
 import { registerWorktreeHandlers } from './ipc/worktree';
 import { registerAttachmentHandlers } from './ipc/attachment';
-import { registerMCPHandlers, shutdownAllMCP } from './ipc/mcp';
+import { registerMCPHandlers, shutdownAllMCP, ensureDefaultMCPConfig } from './ipc/mcp';
 import { registerWallpaperHandlers, registerWallpaperProtocol } from './ipc/wallpaper';
 // ★ M4-4-S3：import 触发顶层 registerSchemesAsPrivileged 副作用（必须在 app.whenReady 前），
 //   registerFileProtocol 在 whenReady 内调用。根治图片/视频/PDF 本地资源加载黑屏。
@@ -111,6 +111,8 @@ app.whenReady().then(() => {
     registerCommandHandlers();
     registerWorktreeHandlers();
     registerAttachmentHandlers();
+    // ★ M4-7-S2：注册 MCP handlers 前先确保默认 mcp_config.json 存在（文件不存在才写，存在绝不覆盖）。
+    ensureDefaultMCPConfig();
     registerMCPHandlers();
     console.log('[main] All IPC handlers registered');
   } catch (err) {

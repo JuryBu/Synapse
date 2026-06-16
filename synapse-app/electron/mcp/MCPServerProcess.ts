@@ -32,6 +32,12 @@ export class MCPServerProcess extends EventEmitter {
     private requestId = 0;
     private pending = new Map<number, PendingRequest>();
     private _status: 'stopped' | 'starting' | 'running' | 'error' = 'stopped';
+    /**
+     * ★ M4-7-S1：start() 期间监听 spawn error（ENOENT / 路径错）的快速失败回调。
+     *   spawn 是异步的——'error' 事件在 start() 的 await initialize 之后才到达。把进行中 start 的
+     *   reject 暂存在这里，process.on('error') 触发时立刻调用它，让 start() 秒级失败而非苦等 30s timeout。
+     */
+    private startErrorReject: ((err: Error) => void) | null = null;
 
     constructor(
         public readonly name: string,
@@ -51,6 +57,8 @@ export class MCPServerProcess extends EventEmitter {
         this.process = spawn(this.command, this.args, {
             stdio: ['pipe', 'pipe', 'pipe'],
             env: { ...process.env, ...this.env },
+            // ★ M4-7-S1：去黑框——Windows 下 spawn node 子进程默认会闪一个控制台窗口。
+            windowsHide: true,
         });
 
         this.process.stdout?.on('data', (data: Buffer) => {
@@ -78,22 +86,37 @@ export class MCPServerProcess extends EventEmitter {
         this.process.on('error', (err) => {
             console.error(`[MCP:${this.name}] error:`, err.message);
             this._status = 'error';
+            // ★ M4-7-S1 快速失败：spawn error（ENOENT / command 不存在 / 路径错）在 start() 的
+            //   await initialize 期间到达时，立刻 reject 进行中的 start，而不是让它干等 30s request timeout。
+            if (this.startErrorReject) {
+                this.startErrorReject(err);
+            }
             this.emit('error', err);
         });
 
-        // Initialize: send initialize request
+        // Initialize：把 initialize 请求与「spawn error 事件」竞速（Promise.race）。
+        //   - 正常 server：initialize 先 resolve → running。
+        //   - spawn 失败：'error' 事件触发 startErrorReject 先 reject → 秒级失败，不等 timeout。
         try {
-            await this.request('initialize', {
+            const errorRace = new Promise<never>((_resolve, reject) => {
+                this.startErrorReject = reject;
+            });
+            const initPromise = this.request('initialize', {
                 protocolVersion: '2024-11-05',
-                capabilities: {},
+                // ★ M4-7-S1：声明客户端支持 tools（更规范；个别 server 会据此决定是否暴露 tools/list）。
+                capabilities: { tools: {} },
                 clientInfo: { name: 'synapse', version: '0.1.0' },
             });
+            await Promise.race([initPromise, errorRace]);
             await this.notify('notifications/initialized');
             this._status = 'running';
             console.log(`[MCP:${this.name}] initialized`);
         } catch (err) {
             this._status = 'error';
             throw err;
+        } finally {
+            // 竞速结束后解除引用，避免后续 error 事件误调用旧 reject。
+            this.startErrorReject = null;
         }
     }
 
@@ -137,8 +160,15 @@ export class MCPServerProcess extends EventEmitter {
     }
 
     async listTools(): Promise<Array<{ name: string; description: string; inputSchema: unknown }>> {
-        const result = await this.request('tools/list') as { tools?: unknown[] };
-        return (result?.tools || []) as Array<{ name: string; description: string; inputSchema: unknown }>;
+        // ★ M4-7-S1：server 不支持 tools/list（未声明 capability / 协议差异）时 request 会 reject。
+        //   这里 catch 成空集——桥接层 / status 据此跳过该 server，而非让整条状态/桥接链路崩。
+        try {
+            const result = await this.request('tools/list') as { tools?: unknown[] };
+            return (result?.tools || []) as Array<{ name: string; description: string; inputSchema: unknown }>;
+        } catch (err) {
+            console.error(`[MCP:${this.name}] listTools failed:`, (err as Error)?.message);
+            return [];
+        }
     }
 
     async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {

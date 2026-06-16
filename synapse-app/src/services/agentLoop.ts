@@ -354,6 +354,14 @@ function buildStableRecordPrefix(record: SynapseRecord): string {
 export class AgentLoop {
   private client: AIClient;
   private tools: ToolDefinition[] = [];
+  /**
+   * ★ M4-7 审查修复（MCP 启停后 schema 快照滞后）：可选的「动态取数函数」。
+   * 提供时，本 AgentLoop 在每次发请求前实时从它取最新工具 schema（而非用 registerTools 当时的静态快照）；
+   * 这样 SettingsPanel 启停 MCP server（mcpBridge.refresh 改了 toolRegistry）后，无需重建 AgentLoop / 切模型，
+   * 下一轮 send 即能反映工具增删——启动的 MCP 工具立刻进 schema 让 AI 主动调用；停止的工具同步移出快照，
+   * AI 不再因旧快照尝试调用已注销工具而拿到 'Tool not found'。缺省（未提供）时回退用 this.tools 静态快照。
+   */
+  private toolsProvider: (() => ToolDefinition[]) | null = null;
   private toolExecutor: ToolExecutor | null = null;
   private running = false;
   /**
@@ -381,9 +389,30 @@ export class AgentLoop {
     this.contextId = opts?.contextId;
   }
 
-  registerTools(tools: ToolDefinition[], executor: ToolExecutor) {
+  /**
+   * 注册工具集与执行器。
+   * @param tools     初始静态 schema 快照（兜底用；toolsProvider 提供时优先走动态取数）。
+   * @param executor  工具执行器（toolRegistry.execute 透传）。
+   * @param toolsProvider 可选动态取数函数（如 () => toolRegistry.getSchemas()）；提供时每次发请求实时取，
+   *   使 MCP server 启停后工具增删立即对当前会话生效（无需重建 AgentLoop）。见字段注释。
+   */
+  registerTools(tools: ToolDefinition[], executor: ToolExecutor, toolsProvider?: () => ToolDefinition[]) {
     this.tools = tools;
     this.toolExecutor = executor;
+    this.toolsProvider = toolsProvider ?? null;
+  }
+
+  /** 取当前生效的工具 schema：优先动态取数函数（实时反映 MCP 启停），否则回退静态快照。 */
+  private getActiveTools(): ToolDefinition[] {
+    if (this.toolsProvider) {
+      try {
+        const dyn = this.toolsProvider();
+        if (Array.isArray(dyn)) return dyn;
+      } catch {
+        // 取数失败（极端情况）→ 回退静态快照，绝不让取 schema 异常打断主对话。
+      }
+    }
+    return this.tools;
   }
 
   stop() {
@@ -496,6 +525,10 @@ export class AgentLoop {
       ? messages
       : [...messages, { role: 'user', content: userContentForApi }];
 
+    // ★ M4-7 审查修复：本轮取一次「当前生效工具集」（优先动态取数函数 → 实时反映 MCP server 启停后的工具增删），
+    //   token 估算与下方 streamChat 发送统一用这一份，保证同口径且 MCP 启停立即对当前会话生效（无需重建 AgentLoop）。
+    const activeTools = this.getActiveTools();
+
     // 用当前模型真实 contextWindow + API 真实 token 数驱动压缩（回退写死上限/字符估算）。
     // M4-1-S3：统一走 getModelContextWindow 选择器（capabilities.contextWindow ?? option.contextWindow ?? MAX_CONTEXT_TOKENS），
     // 与 StatusBar / AgentPanel 同一真相源，消除本地三元 fallback 不一致。
@@ -509,8 +542,8 @@ export class AgentLoop {
     // ★ M4-5 审查 medium#2：<open_files> 已从 systemPrompt 挪到 messages 末尾，systemTokens 不再涵盖它；
     //   但它仍随请求体发送、占用输入 token，故单独把 openFilesSection 的 token 计入估算口径，保持组装量准确。
     const systemTokens = estimateTokens(systemPrompt) + estimateTokens(openFilesSection);
-    const toolsTokens = (toolsEnabled && currentMode !== 'fast' && this.tools.length > 0)
-      ? estimateTokens(JSON.stringify(this.tools))
+    const toolsTokens = (toolsEnabled && currentMode !== 'fast' && activeTools.length > 0)
+      ? estimateTokens(JSON.stringify(activeTools))
       : 0;
     const nonTextTokens = requestHistory.reduce((sum, m) => sum + estimateNonTextPartsTokens(m.content), 0);
     const assembledTokens = systemTokens + toolsTokens + countConversationTokens(requestHistoryText) + nonTextTokens;
@@ -551,102 +584,21 @@ export class AgentLoop {
     let apiHistory: ChatMessage[];
     if (wasCompressed) {
       const keepCount = compressed.length - 1; // compressContext 保留的最近原文条数（含 tool 口径）
-      // R5：为本次压缩生成新建独立中止器，作为【本 run 的局部变量】并登记到实例集合。
-      // 局部变量保证归属——不会被并发/重入 run 覆盖引用；登记集合让 stop() 能遍历 abort 到它。
-      const compressController = new AbortController();
-      this.compressControllers.add(compressController);
       // 问题1 修复：新对话 store.conversation.id 为 null，但 autosave 已把当前对话落到
       // AUTOSAVE_ID('autosave-current')（含 conversations 行，FK 满足），故 record 回退用它，
       // 让新对话的 record 多批次也能触发。（正式保存时 record 迁移到新 id 见 Task_4 小本本。）
       const conversationId = ((rootState as any).conversation?.id as string | null) || AUTOSAVE_ID;
-      let recordMd: string | null = null;
-      if (conversationId) {
-        try {
-          const existingRecord = await getRecord(conversationId);
-
-          // 被压缩段 = 去掉「最近 keepCount 条原文」之前的全部历史（含 tool）。
-          const keepStartIdx = Math.max(0, requestHistory.length - keepCount);
-          const compressedSegment = requestHistory.slice(0, keepStartIdx);
-
-          // ★ step 口径对齐 record（全程不含 tool）：把被压缩段过滤掉 tool 后，
-          //   才是 record 应覆盖到的「不含 tool」消息序列；本批 = 该序列里超出末批 stepEnd 的尾部。
-          const coveredEligible = compressedSegment.filter(m => m.role !== 'tool');
-          const priorSteps = existingRecord?.totalSteps ?? 0;       // = 末批 stepEnd（不含 tool）
-          const priorRounds = existingRecord?.totalRounds ?? 0;     // = 末批 roundEnd
-          const batchSlice = coveredEligible.slice(priorSteps);     // 本批切片（不含 tool，与上一批不重叠）
-
-          // ★ M4-5-S2：压缩注入改用确定性稳定前缀（不随 contextWindow 动态升降级），杜绝 apiMessages[1] 前缀漂移。
-          recordMd = existingRecord ? buildStableRecordPrefix(existingRecord) : null;
-
-          if (batchSlice.length > 0) {
-            const batchUserCount = batchSlice.filter(m => m.role === 'user').length;
-            const roundStart = priorRounds + 1;
-            const roundEnd = priorRounds + batchUserCount;
-            const stepStart = priorSteps;
-            const stepEnd = priorSteps + batchSlice.length;
-            // 旧批骨架只读概览：本批之前所有批次的 skeleton 拼接（getRecordSkeleton）。
-            const priorSkeleton = existingRecord
-              ? await getRecordSkeleton(conversationId)
-              : '';
-
-            const batchResult = await generateBatch({
-              conversationId,
-              messages: batchSlice.map(m => ({
-                role: m.role as 'user' | 'assistant' | 'system' | 'tool',
-                // ★ M2-R6：record 源用占位版（图片/附件 → 「[图片 name]」），绝不含 base64，且比直接丢弃更可读。
-                content: chatContentToTextWithPlaceholder(m.content),
-              })),
-              priorSkeleton,
-              roundStart,
-              roundEnd,
-              workspaceName: workspaceName || undefined,
-            }, compressController.signal); // R5：透传本 run 局部 compressController 的 signal，用户 stop 时立即降级返回 null
-            if (batchResult) {
-              const updated = await appendBatch({
-                conversationId,
-                stepStart,
-                stepEnd,
-                roundStart,
-                roundEnd,
-                contentMd: batchResult.contentMd,
-                skeleton: batchResult.skeleton,
-                phases: batchResult.phases,
-                timeSpan: batchResult.timeSpan,
-              });
-              if (updated) {
-                // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性。
-                recordMd = buildStableRecordPrefix(updated);
-                // ★ R5 修复（问题3：record 水位 vs messages 缺口）：appendBatch 已把【本批覆盖到的 step】落库，
-                // 但触发本轮压缩的新 user 消息此刻可能还没被 autosave（700ms 防抖 + 压缩期同步占住事件循环，
-                // 且压缩成功后立即进 while 重新点亮 isStreaming 关掉 autosave 闸门）。这里主动同步持久化一次
-                // store.messages，保证「record 已覆盖的消息」在 DB 里一定存在——否则崩溃恢复后 record 水位会指向
-                // messages 里不存在的 step，造成水位错位。持久化失败吞掉（record/autosave 都是加速层，绝不阻塞主对话）。
-                try {
-                  const liveConversation = (store.getState() as RootState).conversation;
-                  await saveAutosaveSnapshot({
-                    id: liveConversation.id,
-                    title: liveConversation.title,
-                    messages: liveConversation.messages,
-                    model: currentModel,
-                    assistantRuns: liveConversation.assistantRuns,
-                    fileSnapshots: liveConversation.fileSnapshots,
-                    pendingDiffs: liveConversation.pendingDiffs,
-                    timestamp: Date.now(),
-                  });
-                } catch (saveErr) {
-                  console.warn('[agentLoop] 压缩后同步 autosave 失败（不阻塞主对话）:', saveErr);
-                }
-              }
-            }
-          }
-        } catch (err) {
-          console.warn('[agentLoop] record 压缩失败，回退字符截断:', err);
-        } finally {
-          // R5：本次压缩生成结束（成功/降级/中止/异常）即从集合移除【自己这个】 controller，
-          // 只 delete 局部变量，绝不整体置空——避免误清别的在途 run 登记的 controller（归属隔离）。
-          this.compressControllers.delete(compressController);
-        }
-      }
+      // 被压缩段 = 去掉「最近 keepCount 条原文」之前的全部历史（含 tool）。
+      const keepStartIdx = Math.max(0, requestHistory.length - keepCount);
+      const compressedSegment = requestHistory.slice(0, keepStartIdx);
+      // ★ M4-7-S6：自动压缩路径下沉到可复用的 compactNow（生成批次 record + 落库 + 同步持久化）。
+      //   行为与现状完全一致——compactNow 只是把原内联逻辑搬进方法，返回同一个 recordMd（落库后稳定前缀
+      //   / 旧 record 前缀回退 / null 降级），自动与手动（M4-6 /compact）共用同一套压缩实现。
+      const recordMd = await this.compactNow(conversationId, {
+        compressedSegment,
+        workspaceName: workspaceName || undefined,
+        currentModel,
+      });
       apiHistory = recordMd
         // ★ M4-5-S2：前缀文案常量化（RECORD_INJECTION_PREFIX），与确定性 recordMd 配合保证 apiMessages[1] 逐字稳定。
         ? [{ role: 'system', content: `${RECORD_INJECTION_PREFIX}${recordMd}` } as ChatMessage, ...requestHistory.slice(-keepCount)]
@@ -862,7 +814,7 @@ export class AgentLoop {
         const stream = this.client.streamChat(
           apiMessages,
           // Fast mode: don't pass tools (no agentic behavior)
-          currentMode === 'fast' || !toolsEnabled ? undefined : (this.tools.length > 0 ? this.tools : undefined),
+          currentMode === 'fast' || !toolsEnabled ? undefined : (activeTools.length > 0 ? activeTools : undefined),
         );
 
         // M4-8-S3：重试已恢复（收到任何实质数据）则清掉气泡「reconnect i/N」提示，避免残留。
@@ -1165,6 +1117,157 @@ export class AgentLoop {
       store.dispatch(setStreaming(false));
       this.running = false;
     }
+  }
+
+  /**
+   * ★ M4-7-S6：可复用的「压缩落库」核心——生成 record 批次 + 落库 + 同步持久化，返回刷新后的注入前缀 recordMd。
+   *
+   * 同时服务【两条路径】，复用同一套实现、结果一致：
+   *   - 自动压缩（run 内 ~90% 水位 compressContext 判定 wasCompressed 后）：传入它算好的 compressedSegment
+   *     （= 本轮 requestHistory 去掉最近 keepCount 条原文之前的全部），行为与抽取前【逐字节一致】。
+   *   - 手动压缩（M4-6 的 /compact 命令）：不传 compressedSegment，由本方法从 store 当前对话历史自行计算
+   *     被压缩段（与自动同口径：过滤 tool 后保留最近 KEEP_RECENT 条原文之前的全部），主动触发一次压缩。
+   *
+   * 返回：
+   *   - 落库成功 → buildStableRecordPrefix(updated)（含本批的确定性稳定前缀）。
+   *   - 无新批 / 生成失败 / 中止 → 旧 record 的稳定前缀（existingRecord 存在时）或 null（无 record 时）。
+   *   - 调用方据此组装注入前缀；null 时自动路径回退到 compressContext 字符截断（手动路径据此提示无可压缩内容）。
+   *
+   * ★★ 职责边界（M4-7 审查澄清，调用方务必知悉）：
+   *   本方法【只负责】「生成 record 批次 + 落库 + 同步持久化 store.messages 一次」三件事，并返回刷新后的
+   *   注入前缀 recordMd。它【不负责】下面两件事，手动入口（M4-6 /compact thunk）必须自行补齐：
+   *     (1) 截断 store.conversation.messages（把被压缩段从对话历史中移除/收敛，使后续组装只剩 keep 尾部）；
+   *     (2) 刷新当前会话 AgentLoop 的注入前缀（让下一轮 send 用上新的 recordMd，而非旧前缀）。
+   *   自动路径无需这两步——run() 外层在组装 apiHistory 时本就自行用 compressedSegment 截断 + 注入 recordMd，
+   *   行为与抽取前【逐字节一致】（这正是本方法对自动路径只返回 recordMd 的原因）。手动入口若只调一次本方法、
+   *   拿到 recordMd 就以为闭环，会漏掉对当前历史的实际截断与注入刷新——这两步须由 M4-6 调用方包一层补上。
+   *
+   * ★ R5 健壮性契约沿用（务必维持）：
+   *   - 为本次压缩生成新建独立 AbortController 登记到 this.compressControllers，stop() 可遍历 abort；
+   *     finally 只 delete 自己这个 controller（归属隔离，不误清并发 run 的 controller）。
+   *   - generateBatch 失败/中止 → 不 appendBatch → record 维持压缩前状态，绝不丢 store.messages。
+   *   - appendBatch 落库原子 + 幂等（见 record 链路注释），崩溃恢复一致。
+   *
+   * @param conversationId 目标对话 id（新对话回退 AUTOSAVE_ID 由调用方传入）。
+   * @param opts.compressedSegment 被压缩段（含 tool）。自动路径必传；手动路径缺省时从 store 计算。
+   * @param opts.workspaceName   工作区名（写入 record 元数据，可空）。
+   * @param opts.currentModel    当前模型（仅用于压缩后同步 autosave 的 model 字段；缺省读 store）。
+   */
+  async compactNow(
+    conversationId: string,
+    opts?: {
+      compressedSegment?: ChatMessage[];
+      workspaceName?: string;
+      currentModel?: string;
+    },
+  ): Promise<string | null> {
+    if (!conversationId) return null;
+
+    // 被压缩段：自动路径由 run 传入；手动 /compact 缺省时从 store 当前对话历史自算（与自动同口径）。
+    let compressedSegment = opts?.compressedSegment;
+    if (!compressedSegment) {
+      // 手动入口：保留最近 KEEP_RECENT 条原文（与 compressContext 的 keepCount=4 同口径），其余压成 record。
+      const KEEP_RECENT = 4;
+      const liveMessages = (store.getState() as RootState).conversation.messages
+        .filter((m: any) => m.role !== 'tool') // tool 结果由 agentLoop 内部管理，store 历史里本就不含
+        .map(toChatMessage);
+      const keepStartIdx = Math.max(0, liveMessages.length - KEEP_RECENT);
+      compressedSegment = liveMessages.slice(0, keepStartIdx);
+    }
+
+    const workspaceName = opts?.workspaceName
+      || ((store.getState() as RootState) as any).workspace?.name
+      || undefined;
+    const currentModel = opts?.currentModel
+      || ((store.getState() as RootState) as any).agentSettings?.currentModel
+      || '';
+
+    // R5：为本次压缩生成新建独立中止器，登记到实例集合让 stop() 能遍历 abort 到它（归属隔离，finally 只删自己）。
+    const compressController = new AbortController();
+    this.compressControllers.add(compressController);
+    let recordMd: string | null = null;
+    try {
+      const existingRecord = await getRecord(conversationId);
+
+      // ★ step 口径对齐 record（全程不含 tool）：把被压缩段过滤掉 tool 后，
+      //   才是 record 应覆盖到的「不含 tool」消息序列；本批 = 该序列里超出末批 stepEnd 的尾部。
+      const coveredEligible = compressedSegment.filter(m => m.role !== 'tool');
+      const priorSteps = existingRecord?.totalSteps ?? 0;       // = 末批 stepEnd（不含 tool）
+      const priorRounds = existingRecord?.totalRounds ?? 0;     // = 末批 roundEnd
+      const batchSlice = coveredEligible.slice(priorSteps);     // 本批切片（不含 tool，与上一批不重叠）
+
+      // ★ M4-5-S2：压缩注入改用确定性稳定前缀（不随 contextWindow 动态升降级），杜绝 apiMessages[1] 前缀漂移。
+      recordMd = existingRecord ? buildStableRecordPrefix(existingRecord) : null;
+
+      if (batchSlice.length > 0) {
+        const batchUserCount = batchSlice.filter(m => m.role === 'user').length;
+        const roundStart = priorRounds + 1;
+        const roundEnd = priorRounds + batchUserCount;
+        const stepStart = priorSteps;
+        const stepEnd = priorSteps + batchSlice.length;
+        // 旧批骨架只读概览：本批之前所有批次的 skeleton 拼接（getRecordSkeleton）。
+        const priorSkeleton = existingRecord
+          ? await getRecordSkeleton(conversationId)
+          : '';
+
+        const batchResult = await generateBatch({
+          conversationId,
+          messages: batchSlice.map(m => ({
+            role: m.role as 'user' | 'assistant' | 'system' | 'tool',
+            // ★ M2-R6：record 源用占位版（图片/附件 → 「[图片 name]」），绝不含 base64，且比直接丢弃更可读。
+            content: chatContentToTextWithPlaceholder(m.content),
+          })),
+          priorSkeleton,
+          roundStart,
+          roundEnd,
+          workspaceName: workspaceName || undefined,
+        }, compressController.signal); // R5：透传本次压缩 controller 的 signal，用户 stop 时立即降级返回 null
+        if (batchResult) {
+          const updated = await appendBatch({
+            conversationId,
+            stepStart,
+            stepEnd,
+            roundStart,
+            roundEnd,
+            contentMd: batchResult.contentMd,
+            skeleton: batchResult.skeleton,
+            phases: batchResult.phases,
+            timeSpan: batchResult.timeSpan,
+          });
+          if (updated) {
+            // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性。
+            recordMd = buildStableRecordPrefix(updated);
+            // ★ R5 修复（问题3：record 水位 vs messages 缺口）：appendBatch 已把【本批覆盖到的 step】落库，
+            // 但触发本轮压缩的新 user 消息此刻可能还没被 autosave（700ms 防抖 + 压缩期同步占住事件循环，
+            // 且压缩成功后立即进 while 重新点亮 isStreaming 关掉 autosave 闸门）。这里主动同步持久化一次
+            // store.messages，保证「record 已覆盖的消息」在 DB 里一定存在——否则崩溃恢复后 record 水位会指向
+            // messages 里不存在的 step，造成水位错位。持久化失败吞掉（record/autosave 都是加速层，绝不阻塞主对话）。
+            try {
+              const liveConversation = (store.getState() as RootState).conversation;
+              await saveAutosaveSnapshot({
+                id: liveConversation.id,
+                title: liveConversation.title,
+                messages: liveConversation.messages,
+                model: currentModel,
+                assistantRuns: liveConversation.assistantRuns,
+                fileSnapshots: liveConversation.fileSnapshots,
+                pendingDiffs: liveConversation.pendingDiffs,
+                timestamp: Date.now(),
+              });
+            } catch (saveErr) {
+              console.warn('[agentLoop] 压缩后同步 autosave 失败（不阻塞主对话）:', saveErr);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[agentLoop] record 压缩失败，回退字符截断:', err);
+    } finally {
+      // R5：本次压缩生成结束（成功/降级/中止/异常）即从集合移除【自己这个】 controller，
+      // 只 delete 局部变量，绝不整体置空——避免误清别的在途 run 登记的 controller（归属隔离）。
+      this.compressControllers.delete(compressController);
+    }
+    return recordMd;
   }
 
 }

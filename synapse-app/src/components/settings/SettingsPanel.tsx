@@ -52,6 +52,8 @@ import type { AIModelOption } from '@/types/aiModel';
 import { addNotification } from '@/store/slices/notifications';
 import { isElectron, platform } from '@/platform';
 import type { PlatformInfo, WorktreeEntry } from '@/platform';
+// ★ M4-7-S4：启停 MCP server 后刷新桥接，使工具进/出 toolRegistry。
+import { mcpBridge } from '@/services/mcpBridge';
 import '@/styles/settings.css';
 
 /**
@@ -82,6 +84,15 @@ type McpServerInfo = {
   running?: boolean;
   configured?: boolean;
   enabled?: boolean;
+  // ★ M4-7-S4：running server 的真实工具名列表（来自 ipc/mcp.ts:status 对 running server 调 listTools）。
+  tools?: string[];
+};
+
+// ★ M4-7-S4：三个本地 MCP server 的友好描述（动态列表只有 server 名时补展示文案；其它 server 用通用描述）。
+const MCP_SERVER_DESCRIPTIONS: Record<string, { description: string; icon: string }> = {
+  'sandbox': { description: '执行隔离命令、持久会话与长任务托管的 MCP 服务（执行类工具需审批）。', icon: '📦' },
+  'web-fetcher': { description: '网页抓取、截图、结构化提取与带登录态访问（写类工具需审批）。', icon: '🌐' },
+  'memory-store': { description: '跨源读取项目记忆、决策记录与对话原文（写类工具需审批）。', icon: '🧠' },
 };
 
 type StorageUsageSnapshot = {
@@ -91,30 +102,6 @@ type StorageUsageSnapshot = {
   source: string;
   measuredAt: number;
 };
-
-const mcpEntries: PluginEntry[] = [
-  {
-    name: 'sandbox',
-    description: '执行隔离命令、持久会话与长任务托管的 MCP 服务。',
-    status: 'Electron 模式下可用',
-    source: '~/.synapse/mcp_config.json',
-    icon: '📦',
-  },
-  {
-    name: 'web-fetcher',
-    description: '负责网页抓取、截图、结构化提取与带登录态访问。',
-    status: 'Electron 模式下可用',
-    source: '~/.synapse/mcp_config.json',
-    icon: '🌐',
-  },
-  {
-    name: 'memory-store',
-    description: '保存项目记忆、决策记录与可检索的对话沉淀。',
-    status: 'Electron 模式下可用',
-    source: '~/.synapse/mcp_config.json',
-    icon: '🧠',
-  },
-];
 
 export function SettingsPanel() {
   const dispatch = useAppDispatch();
@@ -168,20 +155,25 @@ export function SettingsPanel() {
     sourceType: rule.sourceType,
     icon: rule.status === 'loaded' ? '📘' : '📄',
   })));
+  // ★ M4-7-S4：MCP 列表全部走 getStatus 动态结果（删静态三条 entry）。每条带真实工具数（running server 的
+  //   tools 名列表来自 ipc/mcp.ts:status 调 listTools），description 补来源 server 友好说明。
   const pluginMcpEntries = useMemo<PluginEntry[]>(() => {
-    const entries = [...mcpEntries];
-    for (const name of Object.keys(mcpServers)) {
-      if (entries.some(entry => entry.name === name)) continue;
-      entries.push({
-        name,
-        description: '来自 MCP 配置文件的服务器。',
+    return Object.values(mcpServers).map(server => {
+      const meta = MCP_SERVER_DESCRIPTIONS[server.name];
+      const toolCount = server.tools?.length ?? 0;
+      const baseDesc = meta?.description ?? '来自 MCP 配置文件的服务器。';
+      const toolSuffix = server.running
+        ? `（已发现 ${toolCount} 个工具${toolCount > 0 ? `：${server.tools!.slice(0, 6).join(', ')}${toolCount > 6 ? ' …' : ''}` : ''}）`
+        : '';
+      return {
+        name: server.name,
+        description: baseDesc + toolSuffix,
         status: '已配置',
-        source: '~/.synapse/mcp_config.json 或 .synapse/mcp_config.json',
+        source: '~/.synapse/mcp_config.json',
         sourceType: 'mcp',
-        icon: '🔌',
-      });
-    }
-    return entries;
+        icon: meta?.icon ?? '🔌',
+      };
+    });
   }, [mcpServers]);
   const [storageUsage, setStorageUsage] = useState<StorageUsageSnapshot>(() => calculateStorageUsageSync());
   const [loadingStorageUsage, setLoadingStorageUsage] = useState(false);
@@ -316,6 +308,8 @@ export function SettingsPanel() {
   const handleRestartMcp = useCallback(async (name: string) => {
     try {
       await platform.mcp.restart(name);
+      // ★ M4-7-S4：重启后刷新桥接，使该 server 的工具（可能列表变化）重新进/出 toolRegistry。
+      await mcpBridge.refresh();
       dispatch(addNotification({ type: 'success', title: 'MCP 已重启', message: `${name} 已重新启动` }));
       await refreshMcpStatus();
     } catch (error: any) {
@@ -325,7 +319,10 @@ export function SettingsPanel() {
 
   const handleStartMcp = useCallback(async (name: string) => {
     try {
-      await platform.mcp.start(name);
+      // ★ M4-7-S4：经 mcpBridge.startServer 启动——启动成功后内部 refresh 把该 server 的工具桥接进 toolRegistry。
+      //   ★ M4-7 审查修复：AgentLoop 已改为发请求前实时从 toolRegistry 动态取 schema（registerTools 传入
+      //   getSchemas 取数函数），故启动后【当前会话下一轮 send 即可调用】新工具——无需重建 AgentLoop / 切模型 / 重开会话。
+      await mcpBridge.startServer(name);
       dispatch(addNotification({ type: 'success', title: 'MCP 已启动', message: `${name} 已启动` }));
       await refreshMcpStatus();
     } catch (error: any) {
@@ -1187,9 +1184,15 @@ export function SettingsPanel() {
               <div className="plugin-section-heading">
                 <h4>MCP 服务器</h4>
                 {isElectron && (
-                  <button className="settings-btn compact" type="button" onClick={refreshMcpStatus} disabled={loadingMcpStatus}>
-                    {loadingMcpStatus ? '刷新中' : '刷新'}
-                  </button>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {/* ★ M4-7-S4：打开配置文件入口，让用户改 server 路径 / 增删 server / 改 enabled。 */}
+                    <button className="settings-btn compact" type="button" onClick={() => handleOpenExtensionPath('~/.synapse/mcp_config.json')}>
+                      📂 打开配置
+                    </button>
+                    <button className="settings-btn compact" type="button" onClick={refreshMcpStatus} disabled={loadingMcpStatus}>
+                      {loadingMcpStatus ? '刷新中' : '刷新'}
+                    </button>
+                  </div>
                 )}
               </div>
               <div className="plugin-list">

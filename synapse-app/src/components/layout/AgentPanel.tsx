@@ -22,6 +22,8 @@ import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fra
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { toolRegistry } from '@/services/toolRegistry';
+// ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
+import { mcpBridge } from '@/services/mcpBridge';
 import { addNotification } from '@/store/slices/notifications';
 import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setModel as setConversationModel, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
@@ -331,11 +333,25 @@ export function AgentPanel() {
       return;
     }
     const loop = new AgentLoop(aiClient);
-    loop.registerTools(
-      toolRegistry.getSchemas() as any[],
-      // M2-5：透传 agentLoop 注入的 contextId，让 worktree 工具按本上下文定位活动 worktree（并行不串台）。
-      (name, args, contextId) => toolRegistry.execute(name, args, contextId),
-    );
+    let cancelled = false;
+    // ★ M4-7-S4：把 MCP 工具桥接进 toolRegistry，使本 AgentLoop 的工具集含 MCP 工具。
+    //   refresh 异步（拉 getStatus → 对 running server listTools → register 进 toolRegistry），故 refresh
+    //   完成后再 registerTools 一次——保证 getSchemas() 此刻已含 MCP 工具。先同步注册一次让内置工具立即可用、
+    //   不被 MCP 异步发现阻塞；Web 模式 / 拉取失败时 refresh 天然空集，照常用内置工具集。
+    const wireTools = () => {
+      if (cancelled) return;
+      loop.registerTools(
+        toolRegistry.getSchemas() as any[],
+        // M2-5：透传 agentLoop 注入的 contextId，让 worktree 工具按本上下文定位活动 worktree（并行不串台）。
+        (name, args, contextId) => toolRegistry.execute(name, args, contextId),
+        // ★ M4-7 审查修复：传入动态取数函数，让 AgentLoop 每轮发请求前实时取最新 schema。
+        //   这样 SettingsPanel 启停 MCP server（改了 toolRegistry）后无需重建本 AgentLoop——启动的工具立即
+        //   进入下一轮请求的 schema 让 AI 主动调用，停止的工具同步移出快照（AI 不再调用已注销工具拿 'Tool not found'）。
+        () => toolRegistry.getSchemas() as any[],
+      );
+    };
+    wireTools();
+    void mcpBridge.refresh().then(wireTools).catch(() => { /* MCP 发现失败：保持内置工具集，不阻塞主对话 */ });
     // P1-3: 设置审批回调（弹出确认对话框）
     // ★ M3-1a medium#4：meta 携带子代理来源标识——后台子代理调用 write/command 级工具弹审批时，
     //   文案前缀「子代理「角色」请求…」，让用户分清是主代理还是哪个子代理发起（旧文案只说「AI 请求」无法区分）。
@@ -364,7 +380,7 @@ export function AgentPanel() {
       });
     }
     agentLoopRef.current = loop;
-    return () => { loop.stop(); };
+    return () => { cancelled = true; loop.stop(); };
   }, [aiClient, settings.safety]);
 
   // Auto-scroll to bottom

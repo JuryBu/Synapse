@@ -110,16 +110,16 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - 目标：桥接 MCP 工具进工具循环 + 默认配置 + 抽 compactNow（自动/手动并存）。
 - 依据：`Plan_5_M4-7_MCP真接.md`
 - 执行清单：
-  - [ ] **S1**(S) MCPServerProcess 健壮性：spawn `windowsHide:true`；initialize 与 error 竞速快速失败（不等 30s）；capabilities 补 `{tools:{}}`；listTools 失败 catch 空集
-  - [ ] **S2**(S) 默认 `mcp_config.json`：main.ts `ensureDefaultMCPConfig()`（不存在才写，指向三 server `dist/index.js` 绝对路径，memory-store=true 另两 false）；ipc/mcp.ts status 对 running server 填真实 tools
-  - [ ] **S3**(M) `src/services/mcpBridge.ts` 桥接：refresh() 拉 listTools→转 ToolSchema（名加 `mcp__<server>__<tool>`、inputSchema→parameters）→按分类表定审批→register 进 toolRegistry；toolRegistry 加 `unregister(name)`
-  - [ ] **S4**(M) 注入点接线：AgentPanel 构建 AgentLoop 时 `mcpBridge.refresh()`；子代理经 getSchemasForPermissions 纳入读类；SettingsPanel 删静态 mcpEntries 改动态列表 + 真实 tools 数 + 打开配置入口
-  - [ ] **S5**(S) 删 `mcpManager.ts` 死代码（grep 确认无引用）；补内置 memory 只读工具 `memory_read`/`memory_list`（approval read）
-  - [ ] **S6**(M) **抽 `compactNow(conversationId)`**：自动压缩路径（~90% 水位判定后）改调同一 compactNow，行为与现状一致**不删不降级**；手动路径（M4-6 /compact）也调 compactNow；**自动与手动并存复用同一套逻辑**；留系统模型钩子
-  - [ ] **S7**(M) 全量验证：build + electron:build；真机三 server 启停、AI 调 MCP 读工具、审批分类正确、子代理可用读类、/compact + 自动压缩并存照常
-- 验收：AI 能实调 `mcp__memory-store__memory_query` 返回外置库内容；sandbox/web 工具弹审批；/compact 手动压缩 + ~90% 自动压缩都正常。
-- ⚠️ transport 走 stdio，**不走** HTTP Broker 127.0.0.1:14588。
-- 证据/产物：
+  - [x] **S1**(S) MCPServerProcess 健壮性：spawn `windowsHide:true`；Promise.race(initialize,errorEvent) ENOENT 秒级失败；capabilities 补 `{tools:{}}`；listTools 失败 catch 空集
+  - [x] **S2**(S) 默认 `mcp_config.json`：`ensureDefaultMCPConfig()`(不存在才写，三 server dist/index.js 绝对路径，memory-store=true 另两 false)；ipc/mcp.ts status async 对 running server 填真实 tools
+  - [x] **S3**(M) `mcpBridge.ts` 桥接：refresh 拉 listTools→ToolSchema(`mcp__<server>__<tool>`+inputSchema→parameters)→classifyMcpTool 审批分类→register；toolRegistry 加 `unregister(name)`；callTool 路由 + content[] 扁平化
+  - [x] **S4**(M) 注入接线：AgentPanel 构建 AgentLoop 时 wireTools+mcpBridge.refresh().then(wireTools)；子代理 getSchemasForPermissions 自动纳入读类；SettingsPanel 删静态 mcpEntries 改全动态 getStatus+真实工具数+打开配置入口+启停走 mcpBridge
+  - [x] **S5**(S) 删 `mcpManager.ts` 死代码(grep 无 import 后 git rm)；补内置 `memory_list`/`memory_read` 只读工具(approval auto/read，复用 memoryStore)
+  - [x] **S6**(M) 抽 `compactNow(conversationId)` 为 AgentLoop 方法：自动压缩(~90%水位)切到调同一 compactNow 逐字节一致**不删不降级**；手动入口缺省段从 store 按 KEEP_RECENT=4 同口径自算；resolveClient 沿用 M4-5 systemModel
+  - [x] **S7**(M) 编译双过；桥接 mock 自测(mcp__ 前缀+审批分类+unregister)；memory-store stdio smoke 已过(listTools 返 11 工具)；三 server 启停+AI 实调 MCP 真机留主人侧
+- 验收：✅ 7 stage 实现，build+electron:build 双过；✅ 3 路对抗审查→3 medium 已修(读类 conversation_golden_extract 误判 write→白名单收窄；compactNow 职责边界 JSDoc；关键:AgentLoop schema 快照滞后→toolsProvider 动态取数，启停 MCP 下一轮 send 即生效)；🔸 三 server 启停+AI 调 MCP 真机留主人验。
+- ⚠️ transport stdio，不走 HTTP Broker；自动压缩保留+compactNow 自动手动并存。
+- 证据/产物：commit `feat(M4-7)`；新建 mcpBridge.ts；改 electron(MCPServerProcess/mcp/main)+toolRegistry/agentLoop/AgentPanel/SettingsPanel；删 mcpManager.ts。
 
 ---
 

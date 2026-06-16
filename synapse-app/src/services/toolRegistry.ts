@@ -92,6 +92,14 @@ class ToolRegistry {
     this.tools.set(schema.function.name, { schema, handler, category, approvalLevel, permissionCategory });
   }
 
+  /**
+   * ★ M4-7-S3：注销一个已注册工具（按工具名）。供 mcpBridge 在 MCP server 停用/重启时清理旧 MCP 工具，
+   *   避免「server 停了但工具仍挂在 registry 里、AI 调用必然路由失败」的悬空。返回是否确有删除。
+   */
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
   get(name: string): RegisteredTool | undefined {
     return this.tools.get(name);
   }
@@ -519,6 +527,91 @@ toolRegistry.register({
   });
   return `🧠 Synapse 记忆库命中 ${results.length} 条:\n\n${lines.join('\n\n')}`;
 }, 'custom', 'auto', 'search');
+
+// --- Memory 只读工具（M4-7-S5 完善内置记忆读路径）---
+// memory_query 只能按关键词检索；这两个补「列举」与「按 id 精读」能力，让 AI 不仅能搜、还能
+// 浏览全部记忆 + 拿单条完整正文（query 截断到 300 字预览，精读需 memory_read 取全文）。
+// 复用 memoryStore 已有的 listMemories / getMemory（仅之前未注册为工具），approval auto / category read。
+// ⚠️ 仍是 Synapse 内置记忆（本地 SQLite / localStorage），独立于外置 MCP mcp__memory-store__*。
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'memory_list',
+    description:
+      '列举 Synapse 内置记忆库中的记忆（按更新时间倒序，可过滤分类 / 仅置顶）。'
+      + '与 memory_query 的区别：memory_query 按关键词检索命中相关条目；'
+      + 'memory_list 不带关键词、用于【浏览全部】记忆概览（例如想看「我都记了些什么」）。'
+      + '正文同样只给预览，需要某条完整内容时用 memory_read(id) 精读。'
+      + '（Synapse 内置记忆，存本地 SQLite / localStorage，独立于外置 MCP memory-store，数据不互通。）',
+    parameters: {
+      type: 'object',
+      properties: {
+        category: {
+          type: 'string',
+          description: '按分类过滤（可选）',
+          enum: ['problem-solution', 'technical-note', 'conversation', 'general'],
+        },
+        pinnedOnly: { type: 'string', description: '仅列出置顶记忆（可选），传 "true" 只看置顶' },
+        limit: { type: 'number', description: '返回条数上限（可选，默认 20）' },
+      },
+      required: [],
+    },
+  },
+}, async (args) => {
+  const { listMemories } = await import('./memoryStore');
+  const limit = Number(args.limit) > 0 ? Number(args.limit) : 20;
+  const pinnedOnly = args.pinnedOnly === true || String(args.pinnedOnly).toLowerCase() === 'true';
+  const results = await listMemories({ category: args.category, pinnedOnly, limit });
+  if (!results.length) {
+    return pinnedOnly
+      ? 'Synapse 记忆库暂无置顶记忆。'
+      : 'Synapse 记忆库暂无记忆。';
+  }
+  const lines = results.map((m, i) => {
+    const tagStr = m.tags.length ? ` [${m.tags.join(', ')}]` : '';
+    const pin = m.pinned ? '📌 ' : '';
+    return `${i + 1}. ${pin}${m.title} (id=${m.id}, ${m.category})${tagStr}\n   ${m.content.replace(/\s+/g, ' ').slice(0, 200)}`;
+  });
+  return `🧠 Synapse 记忆库共列出 ${results.length} 条（按更新时间倒序）:\n\n${lines.join('\n\n')}\n\n提示：用 memory_read(id) 取某条完整正文。`;
+}, 'custom', 'auto', 'read');
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'memory_read',
+    description:
+      '按 id 精读 Synapse 内置记忆库中的【单条】记忆完整内容（含完整正文、标签、检索摘要、时间）。'
+      + 'memory_query / memory_list 返回的是截断预览，需要某条记忆的全文时用本工具按其 id 取回。'
+      + '（Synapse 内置记忆，存本地 SQLite / localStorage，独立于外置 MCP memory-store，数据不互通。）',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '记忆 id（取自 memory_query / memory_list 返回里的 id=...）' },
+      },
+      required: ['id'],
+    },
+  },
+}, async (args) => {
+  const id = typeof args.id === 'string' ? args.id.trim() : '';
+  if (!id) return '⚠️ memory_read 需要有效的记忆 id（取自 memory_query / memory_list 返回里的 id=...）。';
+  const { getMemory } = await import('./memoryStore');
+  const m = await getMemory(id);
+  if (!m) return `未在 Synapse 记忆库中找到 id=${id} 的记忆（可能已被删除或 id 有误）。`;
+  const tagStr = m.tags.length ? m.tags.join(', ') : '（无）';
+  const fmt = (sec: number) => (sec > 0 ? new Date(sec * 1000).toLocaleString() : '（未知）');
+  return [
+    `🧠 记忆全文 (id=${m.id})`,
+    `标题: ${m.title}`,
+    `分类: ${m.category}${m.pinned ? '（置顶）' : ''}`,
+    `标签: ${tagStr}`,
+    m.searchSummary ? `检索摘要: ${m.searchSummary}` : '',
+    `创建: ${fmt(m.createdAt)}   更新: ${fmt(m.updatedAt)}`,
+    '',
+    '正文:',
+    m.content,
+  ].filter(Boolean).join('\n');
+}, 'custom', 'auto', 'read');
 
 // --- Record Tools（M2-R3 渐进式读：按需展开骨架批次）---
 // record 历史摘要注入时，中段较老的批次被降级为「骨架」（只有标题 + 首行要点）以控制注入膨胀。
