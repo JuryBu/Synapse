@@ -9,6 +9,10 @@ export interface ConversationSummary {
   model: string;
   archived?: boolean;
   tags?: string[];
+  // M4-2-S4 工作区归属：以工作区 path 为稳定身份键（null = Global 无归属）。左右栏共用此数据源，
+  //   S6 左侧栏 / S7 右侧栏浮层据此显示工作区小标记并按归属三态过滤。listConversationSummaries
+  //   返回的 summary 已带 workspacePath（缺省/legacy 为 null=Global），dispatch 进来后两栏即时一致。
+  workspacePath?: string | null;
 }
 
 interface ConversationHistoryState {

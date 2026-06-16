@@ -551,6 +551,282 @@ html[data-wallpaper="enabled"] .settings-panel {
   color: white;
 }
 
+/* ★ M4-2-S7 紧凑对话切换器（header 下独立窄行） */
+.agent-conv-switch {
+  display: flex;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--syn-border);
+}
+
+.agent-conv-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--syn-border);
+  border-radius: 7px;
+  background: var(--syn-bg-surface);
+  color: var(--syn-text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--syn-transition-fast);
+}
+
+.agent-conv-trigger:hover,
+.agent-conv-trigger.active {
+  border-color: rgba(var(--syn-accent-rgb), 0.5);
+  background: rgba(var(--syn-accent-rgb), 0.1);
+}
+
+.agent-conv-trigger-icon {
+  flex-shrink: 0;
+  color: var(--syn-text-muted);
+}
+
+.agent-conv-trigger-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.agent-conv-ws {
+  flex-shrink: 0;
+  max-width: 88px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(var(--syn-accent-rgb), 0.16);
+  color: var(--syn-text-secondary);
+  font-size: 10px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-conv-chevron {
+  flex-shrink: 0;
+  color: var(--syn-text-muted);
+}
+
+/* ★ M4-2-S7 对话管理浮层（portal/fixed） */
+.agent-conv-panel {
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(540px, 72vh);
+  padding: 10px;
+  border: 1px solid var(--syn-border);
+  border-radius: 10px;
+  box-shadow: var(--glass-shadow);
+}
+
+.agent-conv-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 30px;
+  border: 1px solid var(--syn-border);
+  border-radius: 7px;
+  background: var(--syn-bg-elevated);
+  color: var(--syn-text-muted);
+}
+
+.agent-conv-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--syn-text-primary);
+  font-size: 12px;
+}
+
+.agent-conv-scope {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--syn-border);
+}
+
+.agent-conv-scope button {
+  flex: 1;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--syn-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--syn-transition-fast);
+}
+
+.agent-conv-scope button:hover {
+  color: var(--syn-text-primary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.agent-conv-scope button.active {
+  color: var(--syn-text-primary);
+  background: rgba(var(--syn-accent-rgb), 0.24);
+}
+
+.agent-conv-list {
+  flex: 1;
+  min-height: 60px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-conv-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--syn-text-secondary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-conv-row:hover,
+.agent-conv-row.active {
+  background: rgba(var(--syn-accent-rgb), 0.16);
+  color: var(--syn-text-primary);
+}
+
+.agent-conv-row-icon {
+  flex-shrink: 0;
+  color: var(--syn-text-muted);
+}
+
+.agent-conv-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-conv-row-ws {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  max-width: 84px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(var(--syn-accent-rgb), 0.14);
+  color: var(--syn-text-secondary);
+  font-size: 10px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.agent-conv-row-ws.global {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--syn-text-muted);
+}
+
+.agent-conv-row-ws svg {
+  flex-shrink: 0;
+}
+
+.agent-conv-empty {
+  padding: 20px 8px;
+  color: var(--syn-text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.agent-conv-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--syn-border);
+}
+
+.agent-conv-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 30px;
+  border: 1px solid var(--syn-border);
+  border-radius: 7px;
+  background: var(--syn-bg-surface);
+  color: var(--syn-text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--syn-transition-fast);
+}
+
+.agent-conv-action:hover:not(:disabled) {
+  border-color: rgba(var(--syn-accent-rgb), 0.5);
+  background: rgba(var(--syn-accent-rgb), 0.12);
+}
+
+.agent-conv-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.agent-conv-move {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.agent-conv-move-label {
+  font-size: 11px;
+  color: var(--syn-text-muted);
+}
+
+.agent-conv-move-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 130px;
+  padding: 3px 8px;
+  border: 1px solid var(--syn-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--syn-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-conv-move-btn:hover,
+.agent-conv-move-btn.active {
+  border-color: rgba(var(--syn-accent-rgb), 0.5);
+  background: rgba(var(--syn-accent-rgb), 0.16);
+  color: var(--syn-text-primary);
+}
+
+.agent-conv-move-btn svg {
+  flex-shrink: 0;
+}
+
 /* agent-messages 定义已迁移到 chat.css */
 
 .agent-welcome {

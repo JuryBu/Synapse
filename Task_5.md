@@ -32,15 +32,15 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - 目标：修问题9（切换选中错位）、问题2b（自动保存失败）；新增对话工作区归属 + 右侧栏顶部对话管理。
 - 依据：`Plan_5_M4-2_对话与工作区归属.md`
 - 执行清单：
-  - [ ] **S1**(M) 问题9：IPC+platform+persistence 三层支持「保存不刷 updated_at」(`systemTouch`)；切走保存改 `systemTouch:true` 去掉 `timestamp:Date.now()`
-  - [ ] **S2**(S) 问题2b：新建 `services/ids.ts` 共享 `crypto.randomUUID`（带回退保留 prefix）替换两处 generateId；`message:replaceConversation` INSERT 改 INSERT OR REPLACE
-  - [ ] **S3**(M) 工作区归属底座：DB `conversations.workspace_path` 懒迁移（ensureColumn+hasColumn 降级）；IPC create/update/读取接 workspace_path；`buildConversationFilters` 三态（具体 path/IS NULL/不限）；Web mock 对等
-  - [ ] **S4**(M) persistence+store 接归属：Snapshot/Summary/ListFilters 加 workspacePath；save/load/branch 透传；conversation slice 加字段 + `setConversationWorkspace`
-  - [ ] **S5**(M) 创建/恢复/分支链路带归属：新对话默认归 `workspace.currentPath`（null=global）；恢复回填；分支继承源
-  - [ ] **S6**(L) 左侧栏过滤 UI + 归属标记 + 抽 `useConversationManager` hook（保守：只数据/过滤/基础 switch-new，不动 M2-6 竞态修复）
-  - [ ] **S7**(L) 右侧栏顶部对话管理区：AgentPanel header 紧凑切换器 + portal 下拉浮层 + 点外关闭，复用 `useConversationManager`，与左侧栏数据一致
-- 验收：点对话不再跳第二；切换/退出不再弹保存失败；对话带工作区标记可过滤可改归属；右侧栏顶部可管理对话。
-- 证据/产物：
+  - [x] **S1**(M) 问题9：IPC+platform+persistence 三层 `systemTouch`「保存不刷 updated_at」；切走保存改 `systemTouch:true` 去掉刷时间
+  - [x] **S2**(S) 问题2b：新建 `services/ids.ts` 共享 `crypto.randomUUID`(带回退保留 prefix) 替换 agentLoop+AgentPanel 两处 generateId；`message:replaceConversation` INSERT→INSERT OR REPLACE
+  - [x] **S3**(M) 工作区归属底座：DB `conversations.workspace_path` 懒迁移(ensureColumn+hasColumn 降级)；IPC create/update/读取 + `buildConversationFilters` 三态(path/IS NULL=global/不限)；Web mock 对等
+  - [x] **S4**(M) persistence+store 接归属：Snapshot/Summary/ListFilters workspacePath；save/load/branch 透传；slice `setConversationWorkspace`(补 export)；**关键补：autosave debounce 漏 workspacePath(新对话首条归属首次落库路径)已补**
+  - [x] **S5**(M) 创建/恢复/分支链路带归属：新对话默认归 `workspace.currentPath`(null=global)；恢复回填；分支四处继承源；clearConversation 补 workspacePath=null
+  - [x] **S6**(L) 左栏过滤 UI + 归属标记 + `useConversationManager` hook(保守抽取)：范围切换器(当前/全局/全部 默认当前)、工作区小标记、「移动到…」改归属
+  - [x] **S7**(L) 右栏顶部对话管理区：AgentPanel header 紧凑切换器 + createPortal 浮层(点外/Esc 关)，搜索/范围/切换/新建/改归属；selectedId 共享同步
+- 验收：✅ 7 stage 实现，build+electron:build 双过；✅ 3 路对抗审查→5 项归 2 根因已修(删对话归属泄漏→clearConversation 清 null；右栏 archived:'all' 污染左栏视图→右栏改本地 state 解耦)；🔸 切换不跳第二/保存不失败/工作区过滤 真机留主人验。
+- 证据/产物：commit `feat(M4-2)`；改 electron(database/conversation/preload)+platform+persistence+slice+ConversationList+AgentPanel + 新建 ids.ts/useConversationManager.ts + css。
 
 ---
 

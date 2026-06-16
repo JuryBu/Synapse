@@ -49,10 +49,16 @@ function mapConversation(row: any) {
         reasoningEffort: row.reasoning_effort ?? null,
         // M3-1a 真子代理：子代理对话标记。列名带下划线需显式映射为布尔。旧行/普通对话为 0/null → false。
         isSubAgent: Boolean(row.is_subagent),
+        // M4-2-S3 对话工作区归属：列名带下划线需显式映射。旧行/缺列为 null → Global（无归属）。
+        workspacePath: row.workspace_path ?? null,
     };
 }
 
-function buildConversationFilters(opts?: { archived?: 'all' | 'active' | 'archived'; tags?: string[] }) {
+function buildConversationFilters(
+    opts?: { archived?: 'all' | 'active' | 'archived'; tags?: string[]; workspacePath?: string | null; globalOnly?: boolean },
+    // M4-2-S3：workspace_path 列存在性由调用方（注册闭包）传入；缺列时跳过工作区条件，避免 SQL 引用不存在的列报错。
+    hasWorkspacePath = false,
+) {
     const where: string[] = [];
     const values: unknown[] = [];
     const archived = opts?.archived ?? 'active';
@@ -61,6 +67,19 @@ function buildConversationFilters(opts?: { archived?: 'all' | 'active' | 'archiv
     for (const tag of normalizeTags(opts?.tags)) {
         where.push('c.tags_json LIKE ?');
         values.push(`%"${tag.replace(/"/g, '\\"')}"%`);
+    }
+    // M4-2-S3 工作区归属三态过滤（仅在列存在时生效，缺列降级为「不限/全部」）：
+    //   - globalOnly=true → 只显无归属（workspace_path IS NULL）的全局对话；
+    //   - workspacePath 为具体非空串 → 只显归属该工作区的对话；
+    //   - 两者都不满足 → 不加 workspace 条件（显示全部）。
+    //   globalOnly 优先于 workspacePath（语义互斥时取 Global 视图）。
+    if (hasWorkspacePath) {
+        if (opts?.globalOnly) {
+            where.push('c.workspace_path IS NULL');
+        } else if (typeof opts?.workspacePath === 'string' && opts.workspacePath) {
+            where.push('c.workspace_path = ?');
+            values.push(opts.workspacePath);
+        }
     }
     return { where, values };
 }
@@ -121,6 +140,12 @@ export function registerConversationHandlers(): void {
     try { ensureColumn(db, 'conversations', 'is_subagent', 'INTEGER NOT NULL DEFAULT 0'); } catch { /* 自愈失败则靠下方降级兜底 */ }
     const hasIsSubAgentColumn = hasColumn(db, 'conversations', 'is_subagent');
 
+    // ★ M4-2-S3 workspace_path 列同样防御性自愈 + 缺列降级（与 reasoning_effort / is_subagent 同口径）：
+    //   该列是 ensureColumn 后加的，旧库/迁移异常时可能缺失。注册期再补一次（幂等）；补不上则写入路径按
+    //   hasWorkspacePathColumn 降级（跳过该字段，至少不拖垮整条对话保存），读取路径缺列时返回 undefined（视为 Global）。
+    try { ensureColumn(db, 'conversations', 'workspace_path', 'TEXT'); } catch { /* 自愈失败则靠下方降级兜底 */ }
+    const hasWorkspacePathColumn = hasColumn(db, 'conversations', 'workspace_path');
+
     // 创建对话
     ipcMain.handle('conversation:create', (_e, data: {
         id: string; title?: string; model?: string; mode?: string; reasoningEffort?: string; workspaceId?: string;
@@ -131,6 +156,8 @@ export function registerConversationHandlers(): void {
         parentId?: string | null; branchedFromMessageId?: string | null;
         // M3-1a 真子代理：子代理对话 create 时带 true；普通对话 undefined → 落默认 0。
         isSubAgent?: boolean;
+        // M4-2-S3 对话工作区归属：path 作键；null/undefined → 落 NULL（Global）。
+        workspacePath?: string | null;
     }) => {
         // ★ 缺列降级：reasoning_effort 列缺失时，动态拼一条【不含该列】的 INSERT，
         //   保住 mode/messages 正常落库（不再因一个缺列整条失败）。列存在则带上（正常路径）。
@@ -169,6 +196,11 @@ export function registerConversationHandlers(): void {
             cols.push('is_subagent');
             vals.push(data.isSubAgent ? 1 : 0);
         }
+        if (hasWorkspacePathColumn) {
+            // M4-2-S3：缺列降级——列存在才写归属（path 或 NULL=Global），缺列则整列跳过（旧对话天然 Global）。
+            cols.push('workspace_path');
+            vals.push(data.workspacePath ?? null);
+        }
         const placeholders = cols.map(() => '?').join(', ');
         db.prepare(
             `INSERT INTO conversations (${cols.join(', ')}) VALUES (${placeholders})`,
@@ -177,9 +209,11 @@ export function registerConversationHandlers(): void {
     });
 
     // 获取对话列表
-    ipcMain.handle('conversation:list', (_e, opts?: { workspaceId?: string; limit?: number; archived?: 'all' | 'active' | 'archived'; tags?: string[] }) => {
+    ipcMain.handle('conversation:list', (_e, opts?: { workspaceId?: string; workspacePath?: string | null; globalOnly?: boolean; limit?: number; archived?: 'all' | 'active' | 'archived'; tags?: string[] }) => {
         const limit = opts?.limit || 50;
-        const filters = buildConversationFilters(opts);
+        // M4-2-S3：workspacePath / globalOnly 三态过滤经 buildConversationFilters 接入（缺列降级）。
+        const filters = buildConversationFilters(opts, hasWorkspacePathColumn);
+        // 既有 workspace_id（死字段）过滤保留兼容，与新 workspace_path 互不干扰。
         if (opts?.workspaceId) {
             filters.where.unshift('c.workspace_id = ?');
             filters.values.unshift(opts.workspaceId);
@@ -204,8 +238,15 @@ export function registerConversationHandlers(): void {
         parentId?: string | null; branchedFromMessageId?: string | null;
         // M3-1a：子代理标记一般 create 时写定；update 仅在显式回填时生效（undefined 不动）。
         isSubAgent?: boolean;
+        // M4-2-S3 对话工作区归属：undefined 不动（不覆盖既有归属）；显式传（含 null=Global）才改归属。
+        workspacePath?: string | null;
+        // ★ M4-2-S1 systemTouch：true 时本次保存不刷 updated_at（系统性保存，不改用户感知排序时间）。
+        //   若除 updated_at 外无任何字段要写，则空 set 直接 return，避免发出无意义/报错的空 UPDATE（风险4）。
+        systemTouch?: boolean;
     }) => {
-        const sets: string[] = ['updated_at = unixepoch()'];
+        const systemTouch = Boolean(data.systemTouch);
+        // systemTouch 时初始 set 为空；否则保留无条件刷 updated_at 的既有行为（用户主动保存正常置顶）。
+        const sets: string[] = systemTouch ? [] : ['updated_at = unixepoch()'];
         const vals: unknown[] = [];
         if (data.title !== undefined) { sets.push('title = ?'); vals.push(data.title); }
         if (data.model !== undefined) { sets.push('model = ?'); vals.push(data.model); }
@@ -235,6 +276,11 @@ export function registerConversationHandlers(): void {
         if (data.branchedFromMessageId !== undefined) { sets.push('branched_from_message_id = ?'); vals.push(data.branchedFromMessageId ?? null); }
         // M3-1a：缺列降级——列缺失时跳过该字段，避免整条 UPDATE throw 拖垮同批写入（同 reasoning_effort 口径）。
         if (hasIsSubAgentColumn && data.isSubAgent !== undefined) { sets.push('is_subagent = ?'); vals.push(data.isSubAgent ? 1 : 0); }
+        // M4-2-S3：工作区归属缺列降级 + undefined 不动（显式传含 null 才写；null 落 Global）。
+        if (hasWorkspacePathColumn && data.workspacePath !== undefined) { sets.push('workspace_path = ?'); vals.push(data.workspacePath ?? null); }
+        // ★ M4-2-S1：systemTouch 把 updated_at 移出 set 后，若没有任何实际字段要写，则 set 为空，
+        //   直接 return（不发空 UPDATE）。非 systemTouch 路径 sets 至少含 updated_at，永不为空。
+        if (sets.length === 0) return true;
         vals.push(id);
         db.prepare(`UPDATE conversations SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
         return true;
@@ -323,16 +369,22 @@ export function registerConversationHandlers(): void {
     });
 
     // 替换某个对话的全部消息，用于 autosave / rollback 后避免旧消息复活。
+    // ★ M4-2-S1 systemTouch：opts.systemTouch=true 时末尾 UPDATE 不刷 updated_at（用于「切走对话的自动保存」
+    //   这类系统性保存，不应改变用户感知的排序时间，根治问题9「切换后被点中条跳第二」）。
     ipcMain.handle('message:replaceConversation', (_e, conversationId: string, messages: Array<{
         id: string; role: string; content: string; timestamp: number;
         model?: string; toolCalls?: unknown[]; contentParts?: unknown[]; attachments?: unknown[];
         thinking?: unknown; streamState?: string; durationMs?: number; runId?: string;
         runEvents?: unknown[]; diffs?: unknown[]; rollbackSnapshotId?: string; error?: string;
-    }>) => {
+    }>, opts?: { systemTouch?: boolean }) => {
+        const systemTouch = Boolean(opts?.systemTouch);
         const tx = db.transaction(() => {
             db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(conversationId);
+            // ★ M4-2-S2 终极兜底：纯 INSERT 撞 messages.id UNIQUE 会整事务回滚（弹「自动保存失败」toast）。
+            //   改 INSERT OR REPLACE，即便运行态 id 仍碰撞（已由 services/ids.ts 收敛到 randomUUID 极大降概率），
+            //   也只覆盖同 id 行而非整批失败，与 message:add（早已是 OR REPLACE）口径统一。
             const insert = db.prepare(
-                `INSERT INTO messages (
+                `INSERT OR REPLACE INTO messages (
                   id, conversation_id, role, content, timestamp, tool_calls, model,
                   content_parts, attachments, thinking, stream_state, duration_ms,
                   run_id, run_events, diffs, rollback_snapshot_id, error
@@ -360,11 +412,11 @@ export function registerConversationHandlers(): void {
                 );
             }
             const last = messages[messages.length - 1];
+            // systemTouch 时省略 updated_at = unixepoch()，保持排序时间不变（仅刷 message_count / last_message）。
             db.prepare(
                 `UPDATE conversations
                  SET message_count = ?,
-                     last_message = ?,
-                     updated_at = unixepoch()
+                     last_message = ?${systemTouch ? '' : ',\n                     updated_at = unixepoch()'}
                  WHERE id = ?`,
             ).run(messages.length, last?.content?.slice(0, 200) ?? '', conversationId);
         });
@@ -381,8 +433,9 @@ export function registerConversationHandlers(): void {
     });
 
     // 搜索对话（全文）
-    ipcMain.handle('conversation:search', (_e, query: string, opts?: { archived?: 'all' | 'active' | 'archived'; tags?: string[]; limit?: number }) => {
-        const filters = buildConversationFilters(opts);
+    ipcMain.handle('conversation:search', (_e, query: string, opts?: { archived?: 'all' | 'active' | 'archived'; tags?: string[]; limit?: number; workspacePath?: string | null; globalOnly?: boolean }) => {
+        // M4-2-S3：搜索同样支持工作区三态过滤（与 list 同口径，缺列降级）。
+        const filters = buildConversationFilters(opts, hasWorkspacePathColumn);
         const limit = opts?.limit || 50;
         try {
             const whereSql = filters.where.length ? `AND ${filters.where.join(' AND ')}` : '';

@@ -189,6 +189,9 @@ interface ConversationState {
   //   parentId = 源对话 id；branchedFromMessageId = 在源对话哪条消息处「从此分支」。非分支对话为 null。
   parentId: string | null;
   branchedFromMessageId: string | null;
+  // M4-2-S4 当前对话工作区归属：以工作区 path 为稳定身份键（null = Global 无归属）。
+  //   新建对话默认归当前工作区（S5 接线），恢复/分支回填，UI 改归属经 setConversationWorkspace。
+  workspacePath: string | null;
 }
 
 const CONVERSATION_SCHEMA_VERSION = 1;
@@ -303,6 +306,7 @@ const initialState: ConversationState = {
   pendingMessage: '',
   parentId: null,
   branchedFromMessageId: null,
+  workspacePath: null,
 };
 
 export const conversationSlice = createSlice({
@@ -322,6 +326,9 @@ export const conversationSlice = createSlice({
       //   切换/加载/分支这类「换对话身份」的入口必须显式传（含 null）以正确刷新。
       parentId?: string | null;
       branchedFromMessageId?: string | null;
+      // M4-2-S4：工作区归属可选回填，沿用「undefined 不覆盖」语义——懒迁移回写等不带该字段的 setConversation
+      //   不会把已有归属清成 null。切换/加载/恢复这类「换对话身份」的入口须显式传（含 null=Global）以正确刷新。
+      workspacePath?: string | null;
     }>) {
       state.schemaVersion = CONVERSATION_SCHEMA_VERSION;
       state.id = action.payload.id;
@@ -335,6 +342,11 @@ export const conversationSlice = createSlice({
       if ('branchedFromMessageId' in action.payload) {
         state.branchedFromMessageId = action.payload.branchedFromMessageId ?? null;
       }
+      if ('workspacePath' in action.payload) state.workspacePath = action.payload.workspacePath ?? null;
+    },
+    // M4-2-S4：手动改当前对话工作区归属（S6/S7「移动到…」用）。null = 改归 Global。
+    setConversationWorkspace(state, action: PayloadAction<string | null>) {
+      state.workspacePath = action.payload ?? null;
     },
     addMessage(state, action: PayloadAction<Message>) {
       state.messages.push(normalizeMessage(action.payload));
@@ -560,6 +572,12 @@ export const conversationSlice = createSlice({
       // M2-3：新对话无分支来源。
       state.parentId = null;
       state.branchedFromMessageId = null;
+      // ★ M4-2 审查修复：clearConversation 必须把工作区归属重置为 null（Global），让注释（ConversationList /
+      //   AgentPanel S5 两处「clear 把 workspacePath 重置为 null」）与行为一致。新建入口紧跟的
+      //   setConversationWorkspace 仍会覆盖为当前工作区（不冲突）；而删当前对话 / 批量删含当前 / 清空全部历史
+      //   这三条 clear 后无 setConversationWorkspace 的路径，借此正确回到 Global 空态——否则 store 残留被删对话的
+      //   归属，导致 S7 切换器顶部仍显旧工作区徽标、且空态下发首条消息会让新对话错误继承被删对话的归属。
+      state.workspacePath = null;
     },
     setTitle(state, action: PayloadAction<string>) {
       state.title = action.payload;
@@ -592,7 +610,7 @@ export const conversationSlice = createSlice({
 });
 
 export const {
-  setConversation, addMessage, updateMessage,
+  setConversation, setConversationWorkspace, addMessage, updateMessage,
   updateMessageMeta, appendMessageContent, setMessageAttachments,
   appendMessageThinking, setMessageStreamState, setMessageReconnect,
   addMessageDiff, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,

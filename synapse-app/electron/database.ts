@@ -168,6 +168,12 @@ export function initDatabase(): Database.Database {
     // 旧行该列为 NULL/0（普通对话非子代理）；ensureColumn 懒迁移加列不破坏旧库；IPC 读回时映射为 isSubAgent。
     ensureColumn(db, 'conversations', 'is_subagent', 'INTEGER NOT NULL DEFAULT 0');
 
+    // M4-2-S3 对话工作区归属：以工作区 path 为稳定身份键（新增独立列，不动既有 workspace_id FK，
+    //   避免 ON DELETE SET NULL 级联误删）。NULL = 无归属（Global / 全局对话）；具体 path = 归属该工作区。
+    //   旧行该列为 NULL，天然表现为 Global，升级不丢对话；ensureColumn 懒迁移加列不破坏旧库；
+    //   IPC 读回时映射为 workspacePath，写入路径按 hasColumn 缺列降级（仿 reasoning_effort 三件套）。
+    ensureColumn(db, 'conversations', 'workspace_path', 'TEXT');
+
     ensureColumn(db, 'messages', 'model', 'TEXT');
     ensureColumn(db, 'messages', 'content_parts', 'TEXT');
     ensureColumn(db, 'messages', 'attachments', 'TEXT');

@@ -18,6 +18,7 @@ import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS, COMPRESSION_THRESHO
 import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type SynapseRecord } from './recordStore';
 import { generateBatch } from './recordGenerator';
 import { AUTOSAVE_ID, saveAutosaveSnapshot } from './conversationPersistence';
+import { generateId } from './ids';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 import { restoreApiMessagesAttachments, chatContentToTextWithPlaceholder } from './attachmentRefs';
 import { getModelContextWindow } from '../store/selectors/modelSelectors';
@@ -42,9 +43,8 @@ export interface ToolExecutor {
 
 const MAX_TOOL_ROUNDS = 25;
 
-function generateId(prefix = 'msg'): string {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
+// ★ M4-2-S2：运行态 id 生成收敛到共享 services/ids.ts（crypto.randomUUID + 回退，保留 prefix），
+//   治问题 2b(1) 弱熵同毫秒碰撞。原本地 generateId 已删，调用点签名不变（仍 generateId('run'/'evt'/...)）。
 
 function getMessageText(message: any): string {
   if (typeof message.content === 'string') return message.content;

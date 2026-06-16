@@ -46,6 +46,8 @@ export interface ConversationSummary {
   tags?: string[];
   // M3-1a：子代理对话标记。普通历史列表默认过滤掉（listConversationSummaries），仅 M3-3 卡片专门读取。
   isSubAgent?: boolean;
+  // M4-2-S4 工作区归属：path 作键（null = Global 无归属）。S6 左侧栏据此显示工作区小标记并按归属过滤。
+  workspacePath?: string | null;
 }
 
 export interface ConversationSnapshot {
@@ -69,6 +71,12 @@ export interface ConversationSnapshot {
   // M3-1a 真子代理：子代理跑完落库的独立 conversation 带 true（+ parentId=主对话 id），供卡片点进查看。
   //   普通对话保存为 undefined（落默认 false），不进 Redux 当前对话 slice、不污染主对话 UI。
   isSubAgent?: boolean;
+  // M4-2-S3 工作区归属：以工作区 path 为稳定身份键（null=Global 无归属）。
+  //   undefined 时 update 路径不覆盖既有归属（沿用 mode/reasoningEffort 的「undefined 不动」语义）。
+  workspacePath?: string | null;
+  // ★ M4-2-S1 systemTouch（控制位，不落库为数据列）：true 时本次保存不刷 updated_at。
+  //   用于「切走对话的自动保存」——系统性保存不应改变用户感知的排序时间（治问题9）。
+  systemTouch?: boolean;
 }
 
 export interface ConversationListFilters {
@@ -76,6 +84,12 @@ export interface ConversationListFilters {
   archived?: 'all' | 'active' | 'archived';
   tags?: string[];
   limit?: number;
+  // M4-2-S3 工作区归属三态过滤：
+  //   - workspacePath 为具体 path → 只显该工作区对话；
+  //   - globalOnly=true → 只显无归属（workspace_path IS NULL）的「全局对话」；
+  //   - 两者都不传 → 不加 workspace 条件，显示全部。
+  workspacePath?: string | null;
+  globalOnly?: boolean;
 }
 
 export interface ConversationExportBundle {
@@ -154,9 +168,12 @@ export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Prom
     pendingDiffs: snapshot.pendingDiffs ?? [],
     archived: snapshot.archived,
     tags: snapshot.tags === undefined ? undefined : normalizeTags(snapshot.tags),
+    // M4-2-S3/S4：autosave 行也带工作区归属，使刷新/重启从 autosave 恢复对话能拿回归属（S5 接线）。
+    workspacePath: snapshot.workspacePath,
   };
 
-  await persistPlatformSnapshot(id, metadata, sanitizedMessages);
+  // M4-2-S1：autosave 也支持透传 systemTouch（默认 false——用户正在该对话活动，刷新排序时间合理）。
+  await persistPlatformSnapshot(id, metadata, sanitizedMessages, Boolean(snapshot.systemTouch));
 }
 
 export async function clearAutosaveSnapshot(): Promise<void> {
@@ -187,7 +204,16 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
   if (!snapshot.messages.length) return null;
   const id = !snapshot.id || snapshot.id === AUTOSAVE_ID ? createConversationId() : snapshot.id;
   const title = snapshot.title || getFallbackTitle(snapshot.messages);
-  const timestamp = snapshot.timestamp ?? Date.now();
+  // ★ M4-2-S1 systemTouch（问题9）：DB 已不刷 updated_at，返回的 summary.timestamp 也必须反映「未刷新」，
+  //   否则调用方 dispatch(updateConversation(summary)) 会把 store 列表项时间刷成当前 → 排序照样跳第一。
+  //   故 systemTouch 时优先读 existing 行的 updatedAt 当返回 timestamp（保持旧排序时间）；
+  //   读不到（fork/新行）才回退 snapshot.timestamp ?? Date.now()。非 systemTouch 维持原行为。
+  let timestamp = snapshot.timestamp ?? Date.now();
+  if (snapshot.systemTouch) {
+    const existing = await platform.conversation.get(id).catch(() => null);
+    const existingTs = existing ? normalizeTimestamp(existing.updatedAt ?? existing.timestamp) : null;
+    if (existingTs) timestamp = existingTs;
+  }
   const metadata = {
     title,
     model: snapshot.model,
@@ -206,11 +232,13 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
     branchedFromMessageId: snapshot.branchedFromMessageId,
     // M3-1a：子代理对话落库带 true（create 时写定）；普通保存为 undefined → 落默认 false。
     isSubAgent: snapshot.isSubAgent,
+    // M4-2-S3/S4：工作区归属随对话落库（path 作键；undefined 时 update 不覆盖既有归属）。
+    workspacePath: snapshot.workspacePath,
   };
 
   // M2-R6：正式保存同样落库去 base64。
   const sanitizedMessages = sanitizeMessagesForPersistence(snapshot.messages);
-  await persistPlatformSnapshot(id, metadata, sanitizedMessages);
+  await persistPlatformSnapshot(id, metadata, sanitizedMessages, Boolean(snapshot.systemTouch));
   // ★ Codex P2-2 修复：子代理对话【不写 legacy map】——legacy metadata 不带 isSubAgent，
   //   写了就会被 listLegacyConversationSummaries 列进普通历史且无法过滤。子对话只走 platform 层（带 is_subagent 列），
   //   主路径按 isSubAgent 过滤即可彻底排除出普通列表。
@@ -225,6 +253,9 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
     model: snapshot.model || 'unknown',
     archived: Boolean(snapshot.archived),
     tags: normalizeTags(snapshot.tags),
+    // M4-2-S4：返回 summary 带工作区归属（snapshot.workspacePath，缺省 null=Global），
+    //   使调用方 dispatch(updateConversation(summary)) 后 store 列表项归属与 DB 一致（S6 标记/过滤即时正确）。
+    workspacePath: snapshot.workspacePath ?? null,
   };
 }
 
@@ -298,7 +329,9 @@ export async function branchConversation(
   messages: Message[],
   // M2-6：mode / reasoningEffort 可选——分支继承源对话当前设置并落到新分支 DB 行，
   //   使新分支「切走再切回」恢复出的设置与分支那一刻一致（缺省则 create 落默认 planning/auto）。
-  meta?: { title?: string; model?: string; mode?: string; reasoningEffort?: string; recordSrcId?: string; recordSnapshot?: SynapseRecord | null },
+  // M4-2-S4：meta.workspacePath 让新分支继承源对话工作区归属（S5 调用方传入源对话当前 workspacePath；
+  //   缺省则 create 落 NULL=Global）。其余字段语义不变。
+  meta?: { title?: string; model?: string; mode?: string; reasoningEffort?: string; workspacePath?: string | null; recordSrcId?: string; recordSnapshot?: SynapseRecord | null },
 ): Promise<BranchResult | null> {
   if (!srcId || !fromMessageId || !Array.isArray(messages) || messages.length === 0) return null;
   const cutIdx = messages.findIndex(m => m.id === fromMessageId);
@@ -368,6 +401,8 @@ export async function branchConversation(
     // M2-6：分支继承源对话 mode / reasoningEffort（调用方传入当前设置）。
     mode: meta?.mode,
     reasoningEffort: meta?.reasoningEffort,
+    // M4-2-S4：分支继承源对话工作区归属（调用方传入；缺省 undefined → create 落 NULL=Global）。
+    workspacePath: meta?.workspacePath,
     messages: subset,
     parentId: srcId,
     branchedFromMessageId: fromMessageId,
@@ -435,11 +470,16 @@ export async function listConversationSummaries(filters: string | ConversationLi
       archived: normalizedFilters.archived,
       tags: normalizedFilters.tags,
       limit: normalizedFilters.limit,
+      // M4-2-S4：工作区归属三态透传到 platform（Electron buildConversationFilters / Web filter 两端对等）。
+      workspacePath: normalizedFilters.workspacePath,
+      globalOnly: normalizedFilters.globalOnly,
     })
     : platform.conversation.list({
       archived: normalizedFilters.archived,
       tags: normalizedFilters.tags,
       limit: normalizedFilters.limit,
+      workspacePath: normalizedFilters.workspacePath,
+      globalOnly: normalizedFilters.globalOnly,
     })).catch(() => []);
   const summaries = platformRows
     .map(mapConversationSummary)
@@ -449,10 +489,16 @@ export async function listConversationSummaries(filters: string | ConversationLi
     // ★ Codex P2-2 修复：子代理对话是内部 transcript，仅 M3-3 卡片点进查看，不进普通历史列表/侧边栏/批量操作。
     .filter(summary => !summary.isSubAgent);
 
-  const legacy = listLegacyConversationSummaries(normalizedFilters);
-  const seen = new Set(summaries.map(summary => summary.id));
-  for (const summary of legacy) {
-    if (!seen.has(summary.id)) summaries.push(summary);
+  // ★ M4-2-S4：legacy 对话（localStorage map，建归属机制前的旧数据）无 workspace_path 概念，统一视为 Global。
+  //   故仅在「不限（全部）」或「Global」视图下合入；请求【具体工作区】时不混入 legacy（它们不属于任何工作区）。
+  //   合入后给它们补 workspacePath:null，使下游 UI 一致地把它们标为「全局」。
+  const includeLegacy = !normalizedFilters.workspacePath; // 具体 path 时为 false（globalOnly / 不限时为 true）
+  if (includeLegacy) {
+    const legacy = listLegacyConversationSummaries(normalizedFilters);
+    const seen = new Set(summaries.map(summary => summary.id));
+    for (const summary of legacy) {
+      if (!seen.has(summary.id)) summaries.push({ ...summary, workspacePath: null });
+    }
   }
 
   return summaries
@@ -604,7 +650,11 @@ async function runSnapshotMigration(
 
 export async function updateConversationMetadata(
   id: string,
-  metadata: { title?: string; archived?: boolean; tags?: string[] },
+  // ★ M4-2-S6 改归属：metadata 增加 workspacePath（具体 path = 改归该工作区；null = 改归 Global）。
+  //   IPC conversation:update 已支持 data.workspacePath !== undefined 时写 workspace_path（缺列降级），
+  //   Web mock conversation.update 亦对等（patch.workspacePath === undefined 时不覆盖）。这是 S6/S7
+  //   「移动到…」唯一落库口径——传 undefined 维持原样，传 string|null 才改归属。
+  metadata: { title?: string; archived?: boolean; tags?: string[]; workspacePath?: string | null },
 ): Promise<void> {
   const normalized = normalizeMetadataPatch(metadata);
   await platform.conversation.update(id, normalized).catch(() => false);
@@ -681,6 +731,9 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
       branchedFromMessageId: conversation.branchedFromMessageId ?? conversation.branched_from_message_id ?? null,
       // M3-1a：子代理标记随快照回带（两端 mapConversation/Web get 都映射成 isSubAgent，普通对话 false）。
       isSubAgent: Boolean(conversation.isSubAgent ?? conversation.is_subagent),
+      // M4-2-S4：工作区归属随快照回带（两端 workspacePath 驼峰 / workspace_path 下划线，旧对话为 null=Global）。
+      //   S5 恢复链路据此把归属回填进 store conversation.workspacePath。
+      workspacePath: conversation.workspacePath ?? conversation.workspace_path ?? null,
     };
   } catch {
     return null;
@@ -707,8 +760,13 @@ async function persistPlatformSnapshot(
     branchedFromMessageId?: string | null;
     // M3-1a 子代理标记（仅 create 时有意义；update 路径下若为 undefined，IPC / Web 端会跳过不覆盖）。
     isSubAgent?: boolean;
+    // M4-2-S3 工作区归属（path 作稳定身份键；null=Global，undefined 时 update 路径不覆盖旧值）。
+    workspacePath?: string | null;
   },
   messages: Message[],
+  // ★ M4-2-S1 systemTouch：true 时本次落库不刷 updated_at（仅 update 既有行 + replaceMessages 路径生效；
+  //   新建对话本就该有当前 updated_at，create 路径无视此参）。用于「切走对话的自动保存」不改用户感知排序。
+  systemTouch = false,
 ): Promise<void> {
   const existing = await platform.conversation.get(id).catch(() => null);
   let createdNew = false;
@@ -717,16 +775,18 @@ async function persistPlatformSnapshot(
   const safeMessages = sanitizeMessagesForPersistence(messages);
   try {
     if (existing) {
-      await platform.conversation.update(id, metadata);
+      // 更新既有行：systemTouch 随 metadata 透传给 IPC / Web update（true 时不刷 updated_at）。
+      await platform.conversation.update(id, { ...metadata, systemTouch });
     } else {
       await platform.conversation.create({ id, ...metadata });
       createdNew = true;
     }
 
+    // replaceMessages 末尾也会刷一次 conversation.updated_at，systemTouch 时一并跳过（治问题9关键）。
     await platform.conversation.replaceMessages(id, safeMessages.map(message => ({
       ...message,
       conversationId: id,
-    })));
+    })), { systemTouch });
   } catch (error) {
     if (createdNew) await platform.conversation.delete(id).catch(() => false);
     throw error;
@@ -746,6 +806,9 @@ function mapConversationSummary(row: any): ConversationSummary | null {
     tags: normalizeTags(row.tags),
     // M3-1a：两端 mapConversation/Web summary 都带 isSubAgent（驼峰）/ is_subagent（下划线），普通对话 false。
     isSubAgent: Boolean(row.isSubAgent ?? row.is_subagent),
+    // M4-2-S4：两端 mapConversation/Web summary 都带 workspacePath（驼峰）/ workspace_path（下划线）；
+    //   缺省/旧对话为 null（Global）。
+    workspacePath: row.workspacePath ?? row.workspace_path ?? null,
   };
 }
 
@@ -891,15 +954,21 @@ function normalizeFilters(filters: string | ConversationListFilters): Conversati
   archived: 'all' | 'active' | 'archived';
   tags: string[];
   limit: number;
+  // M4-2-S4 工作区归属三态（透传到 platform.list/search）：
+  //   workspacePath 为具体 path → 只显该工作区；globalOnly=true → 只显无归属；都不传 → 全部。
+  workspacePath: string | null;
+  globalOnly: boolean;
 } {
   if (typeof filters === 'string') {
-    return { query: filters, archived: 'active', tags: [], limit: 100 };
+    return { query: filters, archived: 'active', tags: [], limit: 100, workspacePath: null, globalOnly: false };
   }
   return {
     query: filters.query ?? '',
     archived: filters.archived ?? 'active',
     tags: normalizeTags(filters.tags),
     limit: filters.limit ?? 100,
+    workspacePath: filters.workspacePath ?? null,
+    globalOnly: Boolean(filters.globalOnly),
   };
 }
 

@@ -174,7 +174,8 @@ export interface SynapseAPI {
     batchDelete?: (ids: string[]) => Promise<boolean>;
     batchUpdate?: (ids: string[], data: any) => Promise<boolean>;
     addMessage: (message: any) => Promise<boolean>;
-    replaceMessages: (conversationId: string, messages: any[]) => Promise<boolean>;
+    // M4-2-S1：opts.systemTouch=true 时落库不刷 updated_at（切走对话的系统性保存，不改排序时间）。
+    replaceMessages: (conversationId: string, messages: any[], opts?: { systemTouch?: boolean }) => Promise<boolean>;
     listMessages: (conversationId: string) => Promise<any[]>;
     search: (query: string, opts?: any) => Promise<any[]>;
     // Record（M1 上下文 harness 过程日志）
@@ -324,6 +325,8 @@ function getWebMock(): SynapseAPI {
             branchedFromMessageId: data.branchedFromMessageId ?? null,
             // M3-1a 真子代理（Web 对等）：子代理对话标记，普通对话 false。
             isSubAgent: Boolean(data.isSubAgent),
+            // M4-2-S3 工作区归属（Web 对等）：path 作键，无归属为 null（Global）。
+            workspacePath: data.workspacePath ?? null,
           });
           writeWebConversationSummaries(summaries);
         }
@@ -335,26 +338,34 @@ function getWebMock(): SynapseAPI {
         const summaries = readWebConversationSummaries();
         const idx = summaries.findIndex((item: any) => item.id === id);
         if (idx >= 0) {
+          // ★ M4-2-S1 systemTouch（Web 对等）：true 时不刷 updatedAt（保持排序时间，治问题9）。
+          //   data.systemTouch 是控制位、非数据列，用前先从展开里剔除，避免写进 summary。
+          const { systemTouch, ...patch } = data ?? {};
           summaries[idx] = {
             ...summaries[idx],
-            ...data,
-            tags: data.tags === undefined ? summaries[idx].tags : normalizeWebTags(data.tags),
-            archived: data.archived === undefined ? Boolean(summaries[idx].archived) : Boolean(data.archived),
+            ...patch,
+            tags: patch.tags === undefined ? summaries[idx].tags : normalizeWebTags(patch.tags),
+            archived: patch.archived === undefined ? Boolean(summaries[idx].archived) : Boolean(patch.archived),
             // M2-6 对话级元数据（Web 对等）：undefined 不覆盖已有值（对齐 Electron IPC 跳过 undefined 列）。
-            mode: data.mode === undefined ? (summaries[idx].mode ?? 'planning') : data.mode,
-            reasoningEffort: data.reasoningEffort === undefined
+            mode: patch.mode === undefined ? (summaries[idx].mode ?? 'planning') : patch.mode,
+            reasoningEffort: patch.reasoningEffort === undefined
               ? (summaries[idx].reasoningEffort ?? 'auto')
-              : data.reasoningEffort,
+              : patch.reasoningEffort,
+            // M4-2-S3：工作区归属（Web 对等）。undefined 不覆盖；显式传（含 null=Global）才改归属。
+            workspacePath: patch.workspacePath === undefined
+              ? (summaries[idx].workspacePath ?? null)
+              : (patch.workspacePath ?? null),
             // M2-3：分支溯源仅在 create 时写定；update 传 undefined 时不覆盖已有值（对齐 Electron IPC 跳过 undefined 列）。
-            parentId: data.parentId === undefined ? (summaries[idx].parentId ?? null) : (data.parentId ?? null),
-            branchedFromMessageId: data.branchedFromMessageId === undefined
+            parentId: patch.parentId === undefined ? (summaries[idx].parentId ?? null) : (patch.parentId ?? null),
+            branchedFromMessageId: patch.branchedFromMessageId === undefined
               ? (summaries[idx].branchedFromMessageId ?? null)
-              : (data.branchedFromMessageId ?? null),
+              : (patch.branchedFromMessageId ?? null),
             // M3-1a：子代理标记，update 传 undefined 时不覆盖已有值（对齐 Electron IPC 跳过 undefined 列）。
-            isSubAgent: data.isSubAgent === undefined
+            isSubAgent: patch.isSubAgent === undefined
               ? Boolean(summaries[idx].isSubAgent)
-              : Boolean(data.isSubAgent),
-            updatedAt: Date.now(),
+              : Boolean(patch.isSubAgent),
+            // systemTouch 时保留旧 updatedAt（排序时间不变）；否则刷新为当前时间（用户主动保存正常置顶）。
+            updatedAt: systemTouch ? (summaries[idx].updatedAt ?? Date.now()) : Date.now(),
           };
           writeWebConversationSummaries(summaries);
         }
@@ -402,13 +413,15 @@ function getWebMock(): SynapseAPI {
         });
         return true;
       },
-      replaceMessages: async (conversationId: string, nextMessages: any[]) => {
+      replaceMessages: async (conversationId: string, nextMessages: any[], opts?: { systemTouch?: boolean }) => {
         const messages = readWebConversationMessages();
         messages[conversationId] = nextMessages.map(message => ({ ...message, conversationId }));
         localStorage.setItem('synapse:conversation:messages', JSON.stringify(messages));
+        // ★ M4-2-S1 systemTouch（Web 对等）：透传给内部 update，systemTouch 时不刷 updatedAt（治问题9）。
         await getWebMock().conversation.update(conversationId, {
           lastMessage: nextMessages[nextMessages.length - 1]?.content || '',
           messageCount: nextMessages.length,
+          systemTouch: opts?.systemTouch,
         });
         return true;
       },
@@ -632,6 +645,10 @@ function filterWebConversationSummaries(summaries: any[], opts?: any): any[] {
   const archived = opts?.archived ?? 'active';
   const tags = normalizeWebTags(opts?.tags).map(tag => tag.toLowerCase());
   const limit = Number(opts?.limit) > 0 ? Number(opts.limit) : 100;
+  // M4-2-S3 工作区归属三态（Web 对等）：globalOnly 优先（只显无归属）；否则 workspacePath 为具体非空串时
+  //   只显该工作区；两者都不满足则不限（全部）。老数据无 workspacePath 字段 → null/undefined 视为 Global。
+  const globalOnly = Boolean(opts?.globalOnly);
+  const wantWorkspacePath = typeof opts?.workspacePath === 'string' && opts.workspacePath ? opts.workspacePath : null;
   return summaries
     .map(summary => ({
       ...summary,
@@ -644,6 +661,13 @@ function filterWebConversationSummaries(summaries: any[], opts?: any): any[] {
       if (tags.length) {
         const summaryTags = new Set(normalizeWebTags(summary.tags).map(tag => tag.toLowerCase()));
         if (!tags.every(tag => summaryTags.has(tag))) return false;
+      }
+      // 归属过滤（与 Electron buildConversationFilters 三态对齐）。
+      const summaryWs = (typeof summary.workspacePath === 'string' && summary.workspacePath) ? summary.workspacePath : null;
+      if (globalOnly) {
+        if (summaryWs !== null) return false;
+      } else if (wantWorkspacePath) {
+        if (summaryWs !== wantWorkspacePath) return false;
       }
       return true;
     })

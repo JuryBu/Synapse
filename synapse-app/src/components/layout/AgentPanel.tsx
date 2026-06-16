@@ -1,4 +1,5 @@
-import { SendHorizontal, Sparkles, Zap, StopCircle, Plus, Download, PanelRightClose } from 'lucide-react';
+import { SendHorizontal, Sparkles, Zap, StopCircle, Plus, Download, PanelRightClose, MessageSquare, ChevronDown, Search, Globe, FolderInput } from 'lucide-react';
+import { createPortal } from 'react-dom';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import {
   setCurrentModel,
@@ -22,7 +23,7 @@ import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { toolRegistry } from '@/services/toolRegistry';
 import { addNotification } from '@/store/slices/notifications';
-import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setModel as setConversationModel, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setModel as setConversationModel, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
 // ★ M3-3a：generateWorkflowRunId 预生成稳定 runId，跑前先建占位 assistant 消息 + 关联卡片实时显示。
 import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@/services/multiAITrigger';
@@ -32,10 +33,16 @@ import { exitWorktree } from '@/store/slices/worktreeSession';
 import { countConversationTokens } from '@/services/systemPrompt';
 import { getModelContextWindowForOption } from '@/store/selectors/modelSelectors';
 import { conversationExporter } from '@/services/conversationExporter';
-import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, migrateSnapshotAttachments, branchConversation, beginConversationSwitch, endConversationSwitch, AUTOSAVE_ID } from '@/services/conversationPersistence';
+import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, loadConversationSnapshot, migrateSnapshotAttachments, branchConversation, beginConversationSwitch, endConversationSwitch, listConversationSummaries, AUTOSAVE_ID } from '@/services/conversationPersistence';
+// ★ M4-2-S7：右侧栏对话浮层复用共享 hook（同 conversationHistory 数据源 + 同套工作区范围过滤口径，
+//   与左侧栏 ConversationList 一致）。workspaceLabel 用于显示对话归属标记。
+import { useConversationManager, workspaceLabel } from '@/hooks/useConversationManager';
 import { platform } from '@/platform';
 import { releaseMessageAttachments, resolveAttachmentDataUrl, sanitizeMessagesForPersistence } from '@/services/attachmentRefs';
-import { setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
+// ★ M4-2-S2：运行态消息 id 收敛到共享 crypto.randomUUID 生成器（治问题 2b(1) 弱熵同毫秒碰撞），
+//   保留 prefix 习惯（user_/assistant_/msg_）。本地 generateMessageId 别名指向它，调用点零改动。
+import { generateId as generateMessageId } from '@/services/ids';
+import { setSelectedId, updateConversation, type ConversationSummary } from '@/store/slices/conversationHistory';
 import { openTab, setActiveTab as setActiveEditorTab } from '@/store/slices/editorTabs';
 import type { RootState } from '@/store';
 import { rollbackFileDiff } from '@/services/fileRollback';
@@ -50,11 +57,6 @@ const MAX_FILE_PAYLOAD_BYTES = 25 * 1024 * 1024;
 
 function generateAttachmentId(): string {
   return `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-// ★ M3-2b：@MultiAI 工作流分支用的消息 id 生成器（与 agentLoop 的 msg_ 前缀口径一致，供 user/assistant 汇总消息使用）。
-function generateMessageId(prefix = 'msg'): string {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function formatBytes(bytes?: number): string {
@@ -99,6 +101,11 @@ export function AgentPanel() {
   // 持有最新 conversation 供异步回调（如懒迁移 onMigrated）安全校验当前对话身份/消息数，不被 effect 闭包旧值误导。
   const conversationRef = useRef(conversation);
   conversationRef.current = conversation;
+  // ★ M4-2-S5 对话工作区归属：新对话默认归当前打开的工作区（state.workspace.currentPath，null=Global）。
+  //   用 ref 持有最新值——handleNewConversation 依赖数组只含 dispatch，不想因切工作区重建回调，故经 ref 读最新 path。
+  const workspaceCurrentPath = useAppSelector((s: RootState) => s.workspace.currentPath);
+  const workspaceCurrentPathRef = useRef(workspaceCurrentPath);
+  workspaceCurrentPathRef.current = workspaceCurrentPath;
   // ★ M3-2b 修复（high）：标记当前是否在跑 @MultiAI 工作流（走 agentOrchestrator 而非 agentLoop）。
   //   runWorkflowFromInput 进入置 true / finally 置 false；handleStop 据此分流到 agentOrchestrator.abortAll()。
   const isWorkflowRunningRef = useRef(false);
@@ -125,6 +132,80 @@ export function AgentPanel() {
     return () => document.removeEventListener('mousedown', handleDocMouseDown);
   }, [modelMenuOpen]);
   const [modelSearch, setModelSearch] = useState('');
+  // ★ M4-2-S7 右侧栏顶部对话管理浮层：复用共享 hook 取【scope 三态 + scopeFilters 映射 + 当前工作区 path +
+  //   改归属动作】，并与左侧栏共享 conversationHistory.selectedId（切换后两栏选中天然同步）。
+  //   ★ M4-2 审查修复（左右栏 slice 污染）：浮层列表【不再写共享 conversations slice】。原实现用
+  //   refreshConvList({ archived:'all', ... }) → dispatch(setConversations) 覆盖共享 slice，而左侧栏
+  //   ConversationList 直接渲染同一 slice 且默认 archived:'active'——打开一次右栏浮层就会把已归档对话灌进左栏
+  //   且左栏不自愈重拉，单向污染左栏视图。改为浮层用【组件本地 state】(convList) 承载自己的查询结果，
+  //   仅 selectedId 仍走共享 slice，彻底解耦两栏过滤口径，兑现注释里「浮层不污染左侧栏视图」的原意。
+  //   convMenuOpen 控制浮层开合；convSearch 为浮层内【本地内存过滤】关键词（不触发重拉）。
+  const {
+    selectedId: convSelectedId,
+    workspaceCurrentPath: agentWorkspacePath,
+    scope: convScope,
+    setScope: setConvScope,
+    scopeFilters: convScopeFilters,
+    moveToWorkspace: moveConvToWorkspace,
+  } = useConversationManager();
+  const [convMenuOpen, setConvMenuOpen] = useState(false);
+  const [convSearch, setConvSearch] = useState('');
+  // 浮层列表本地数据源（独立于共享 slice，不污染左侧栏）。
+  const [convList, setConvList] = useState<ConversationSummary[]>([]);
+  const convAnchorRef = useRef<HTMLButtonElement>(null);
+  const convPanelRef = useRef<HTMLDivElement>(null);
+  const [convMenuPos, setConvMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  // 浮层本地列表刷新：按当前范围拉全量（含归档，浮层语义是「全量切换器」），结果只写本地 state、不碰共享 slice。
+  const reloadConvMenu = useCallback(async () => {
+    try {
+      const summaries = await listConversationSummaries({ archived: 'all', limit: 200, ...convScopeFilters });
+      setConvList(summaries);
+    } catch {
+      dispatch(addNotification({ type: 'error', title: '加载失败', message: '无法读取对话历史' }));
+    }
+  }, [convScopeFilters, dispatch]);
+  // 浮层打开 / 范围切换时刷新本地列表。搜索为本地过滤，不在此触发。
+  useEffect(() => {
+    if (!convMenuOpen) return;
+    void reloadConvMenu();
+  }, [convMenuOpen, reloadConvMenu]);
+  // 点外关闭（同 modelMenu 口径，但 portal 浮层不在 anchor 子树内，故需同时排除 anchor 与 panel）。
+  useEffect(() => {
+    if (!convMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (convAnchorRef.current?.contains(t)) return;
+      if (convPanelRef.current?.contains(t)) return;
+      setConvMenuOpen(false);
+    };
+    const onEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') setConvMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [convMenuOpen]);
+  // 打开浮层时按 anchor 位置算 portal 浮层坐标（fixed 定位，挂 body，避开 header overflow 裁剪）。
+  const openConvMenu = useCallback(() => {
+    const rect = convAnchorRef.current?.getBoundingClientRect();
+    if (rect) {
+      const width = Math.min(360, Math.max(260, rect.width));
+      // 右对齐 anchor 右边缘，避免超出右侧栏；夹在视口内。
+      const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+      setConvMenuPos({ top: rect.bottom + 6, left, width });
+    }
+    setConvSearch('');
+    setConvMenuOpen(true);
+  }, []);
+  // 浮层内本地搜索过滤（不重拉 slice）：按标题 / 最近消息匹配。
+  const convFilteredList = useMemo(() => {
+    const q = convSearch.trim().toLowerCase();
+    if (!q) return convList;
+    return convList.filter(c =>
+      (c.title || '').toLowerCase().includes(q) ||
+      (c.lastMessage || '').toLowerCase().includes(q));
+  }, [convList, convSearch]);
   // M2-R1: 读取当前对话 record 各批次的 stepEnd（不含 tool 口径），用于在消息流按批次标出
   // 多条「压缩点」分隔线（展示仍完整原文）。空 record 时为空数组。
   // 问题1：新对话 id 为 null 时回退 AUTOSAVE_ID（autosave 落盘用同一 id），让 record 分隔线/回溯也对新对话生效。
@@ -331,6 +412,10 @@ export function AgentPanel() {
         assistantRuns: conversation.assistantRuns,
         fileSnapshots: conversation.fileSnapshots,
         pendingDiffs: conversation.pendingDiffs,
+        // ★ M4-2-S5 首次保存落归属（关键落库路径）：新对话发首条消息后，归属第一次落库就是经这条 autosave
+        //   （写到 AUTOSAVE_ID 行）。带上 store 当前归属，使刷新/重启从 autosave 恢复、及后续 fork 成正式 id 时
+        //   都拿到正确 workspacePath；不带则 autosave 行 workspace_path 为 NULL → 重启丢归属。
+        workspacePath: conversation.workspacePath,
         timestamp: Date.now(),
       }).catch(() => {
         try {
@@ -356,6 +441,8 @@ export function AgentPanel() {
     conversation.assistantRuns,
     conversation.fileSnapshots,
     conversation.pendingDiffs,
+    // ★ M4-2-S5：归属变化（新建置当前工作区 / 改归属）也要重落 autosave 行，使其 workspace_path 跟手。
+    conversation.workspacePath,
   ]);
 
   // Restore from autosave on mount
@@ -376,6 +463,9 @@ export function AgentPanel() {
             // M2-3：恢复对话也回填分支溯源（autosave 行的 parent 字段，普通对话为 null）。
             parentId: data?.parentId ?? null,
             branchedFromMessageId: data?.branchedFromMessageId ?? null,
+            // ★ M4-2-S5 恢复回填归属：从 autosave 快照回带工作区归属（S4 已让 autosave 行落库带 workspacePath；
+            //   旧 autosave / legacy 无此字段则为 null=Global），使重启后延续正确归属。
+            workspacePath: data?.workspacePath ?? null,
           }));
           // M2-6：恢复对话时同步其 mode / reasoningEffort 到全局 agentSettings（旧 autosave 无此字段则回退默认）。
           dispatch(setMode(data?.mode === 'fast' ? 'fast' : 'planning'));
@@ -446,7 +536,13 @@ export function AgentPanel() {
             assistantRuns: cur.assistantRuns,
             fileSnapshots: cur.fileSnapshots,
             pendingDiffs: cur.pendingDiffs,
-            timestamp: Date.now(),
+            // ★ M4-2-S5 首次保存落归属：把【切走对话】在 store 持有的工作区归属随对话落库（与
+            //   ConversationList.saveCurrentToHistory 口径一致）——autosave→fork 成正式 id 那一刻把归属固化进 DB。
+            workspacePath: cur.workspacePath,
+            // ★ M4-2-S1（问题9 根治）：新建对话时对【切走对话】的系统性保存，不刷其 updated_at。
+            //   改 systemTouch:true + 去掉硬传 timestamp:Date.now()，与 ConversationList.saveCurrentToHistory 口径一致，
+            //   避免切走对话被刷成当前时间跳到列表第一。
+            systemTouch: true,
           });
           if (summary) {
             dispatch(updateConversation(summary));
@@ -463,6 +559,10 @@ export function AgentPanel() {
         }
       }
       dispatch(clearConversation());
+      // ★ M4-2-S5 新对话默认归当前工作区：clearConversation 把 workspacePath 重置为 null（Global），
+      //   随即按当前打开的工作区 path 置归属（未打开工作区时 ref 为 null → 维持 Global）。须在 clear 之后，
+      //   否则被覆盖回 null。首条消息触发的 autosave / 切走保存会把该归属落库（与 ConversationList 两入口一致）。
+      dispatch(setConversationWorkspace(workspaceCurrentPathRef.current));
       // M2-6：新对话回默认设置（mode=planning / reasoningEffort=auto）。先落定旧对话设置再重置。
       dispatch(setMode('planning'));
       dispatch(setReasoningEffort('auto'));
@@ -472,6 +572,90 @@ export function AgentPanel() {
       endConversationSwitch();
     }
   }, [dispatch]);
+
+  // ★ M4-2-S7 右侧栏浮层「切换对话」：口径完全对齐 ConversationList.handleSwitchConversation——
+  //   置切换竞态闸门（beginConversationSwitch）+ worktree exit（离开对话 + AUTOSAVE_ID）覆盖整段异步窗口，
+  //   先把切走对话系统性保存（systemTouch:true 不刷排序时间 + 带 workspacePath / mode / reasoningEffort，
+  //   autosave 时 fork 成正式 id 后条件清 autosave 镜像），再 load 目标 → setConversation（回填归属/溯源）
+  //   → 同步 mode/reasoningEffort → setSelectedId。与左侧栏共用 conversationHistory.selectedId，切后两栏同步。
+  const handleSwitchConversationFromMenu = useCallback(async (id: string) => {
+    setConvMenuOpen(false);
+    if (id === (conversationRef.current.id as string | null)) return; // 已是当前对话，无需切换。
+    beginConversationSwitch();
+    {
+      const leavingContextId = (conversationRef.current.id as string | null) || AUTOSAVE_ID;
+      dispatch(exitWorktree({ contextId: leavingContextId }));
+      dispatch(exitWorktree({ contextId: AUTOSAVE_ID }));
+    }
+    try {
+      const cur = conversationRef.current;
+      if ((cur.messages?.length ?? 0) > 0) {
+        const wasAutosave = !cur.id || cur.id === AUTOSAVE_ID;
+        try {
+          const summary = await saveConversationSnapshot({
+            id: cur.id,
+            title: cur.title,
+            messages: cur.messages,
+            model: cur.model,
+            mode: agentMetaRef.current.mode,
+            reasoningEffort: agentMetaRef.current.reasoningEffort,
+            assistantRuns: cur.assistantRuns,
+            fileSnapshots: cur.fileSnapshots,
+            pendingDiffs: cur.pendingDiffs,
+            workspacePath: cur.workspacePath,
+            systemTouch: true,
+          });
+          if (summary) {
+            dispatch(updateConversation(summary));
+            if (wasAutosave && summary.id && summary.id !== AUTOSAVE_ID) {
+              await clearAutosaveSnapshot();
+            }
+          }
+        } catch {
+          dispatch(addNotification({ type: 'warning', title: '自动保存失败', message: '当前对话保存失败，但仍会打开所选对话' }));
+        }
+      }
+      const snapshot = await loadConversationSnapshot(id);
+      if (!snapshot) throw new Error('missing conversation');
+      dispatch(setConversation({
+        id,
+        title: snapshot.title || '对话',
+        messages: snapshot.messages,
+        model: snapshot.model,
+        assistantRuns: snapshot.assistantRuns,
+        fileSnapshots: snapshot.fileSnapshots,
+        pendingDiffs: snapshot.pendingDiffs,
+        parentId: snapshot.parentId ?? null,
+        branchedFromMessageId: snapshot.branchedFromMessageId ?? null,
+        workspacePath: snapshot.workspacePath ?? null,
+      }));
+      dispatch(setMode(snapshot.mode === 'fast' ? 'fast' : 'planning'));
+      dispatch(setReasoningEffort(snapshot.reasoningEffort || 'auto'));
+      dispatch(setSelectedId(id));
+    } catch {
+      dispatch(addNotification({ type: 'error', title: '加载失败', message: '无法加载所选对话' }));
+    } finally {
+      endConversationSwitch();
+    }
+  }, [dispatch]);
+
+  // ★ M4-2-S7 浮层内「当前对话改归属」：经共享 hook 落库（moveToWorkspace 内回写共享 slice 供左侧栏即时反映），
+  //   并同步 store conversation.workspacePath 使当前对话内后续保存延续正确归属。target=null → 改归 Global。
+  //   ★ M4-2 审查修复：浮层列表已改为本地 state（不读共享 slice），故改归属后另刷一次本地列表，
+  //   让浮层里当前对话那条的归属徽标即时更新（仅浮层开着时有意义）。
+  const handleMoveCurrentConversation = useCallback(async (target: string | null) => {
+    const id = conversationRef.current.id as string | null;
+    if (!id || id === AUTOSAVE_ID) {
+      // 未落正式 id 的新对话：仅改 store 归属（下次保存自然落库），不调 update（无行可改）。
+      dispatch(setConversationWorkspace(target ?? null));
+      dispatch(addNotification({ type: 'info', title: '已设置归属', message: `当前对话归属「${workspaceLabel(target)}」（发消息后保存生效）` }));
+      if (convMenuOpen) void reloadConvMenu();
+      return;
+    }
+    await moveConvToWorkspace(id, target);
+    dispatch(setConversationWorkspace(target ?? null));
+    if (convMenuOpen) void reloadConvMenu();
+  }, [dispatch, moveConvToWorkspace, convMenuOpen, reloadConvMenu]);
 
   const buildUserContentParts = useCallback((text: string, attachments: AttachmentRef[]): MessageContentPart[] => {
     const parts: MessageContentPart[] = [];
@@ -789,6 +973,9 @@ export function AgentPanel() {
       try {
         const snapshotMessages = conversationRef.current.messages;
         if (!snapshotMessages.length) return;
+        // ★ M4-2-S5 分支继承归属：抓一份稳定的源对话工作区归属（null=Global），供 promotion 落库 / 新分支
+        //   create / 两处 setConversation 回填复用——新分支与源对话同归属（path 作键）。
+        const srcWorkspacePath = conversationRef.current.workspacePath ?? null;
 
         // 1. 确定稳定的源 id：autosave 源先 fork 成真实 id（与「新对话」fork 同款，clearAutosave 不 release，refCount 守恒）。
         //    recordSrcId 记住 record 当前实际所在的 id（promotion 前的 id）——fork 不迁移 record，故 copyRecord 须从这里读。
@@ -825,6 +1012,9 @@ export function AgentPanel() {
             assistantRuns: conversationRef.current.assistantRuns,
             fileSnapshots: conversationRef.current.fileSnapshots,
             pendingDiffs: conversationRef.current.pendingDiffs,
+            // ★ M4-2-S5：promotion（autosave 源提升为真实对话）随对话落工作区归属，使源对话保留其归属，
+            //   下方 branchConversation 也据此继承。
+            workspacePath: srcWorkspacePath,
             timestamp: Date.now(),
           });
           // 前置条件：autosave 源必须先 promotion 成稳定真实 id 才能作为 parent。
@@ -850,6 +1040,8 @@ export function AgentPanel() {
             assistantRuns: conversationRef.current.assistantRuns,
             fileSnapshots: conversationRef.current.fileSnapshots,
             pendingDiffs: conversationRef.current.pendingDiffs,
+            // ★ M4-2-S5：promotion 切到真实源 id 时保持源对话工作区归属（身份变化的 setConversation 须显式带）。
+            workspacePath: srcWorkspacePath,
           }));
           dispatch(setSelectedId(srcId));
         }
@@ -863,6 +1055,8 @@ export function AgentPanel() {
           // M2-6：把当前 mode / reasoningEffort 传入，新分支 DB 行一开始即继承源设置（切回不退回默认）。
           mode: agentMetaRef.current.mode,
           reasoningEffort: agentMetaRef.current.reasoningEffort,
+          // ★ M4-2-S5：新分支 DB 行一开始即继承源对话工作区归属（path 作键，缺省 null=Global）。
+          workspacePath: srcWorkspacePath,
           recordSrcId,
           ...(wasAutosave ? { recordSnapshot } : {}),
         });
@@ -881,6 +1075,8 @@ export function AgentPanel() {
           // M2-3：切到新分支时回填溯源（DB 已由 branchConversation 写入 parentId/branchedFromMessageId）。
           parentId: result.parentId,
           branchedFromMessageId: result.branchedFromMessageId,
+          // ★ M4-2-S5：切到新分支时回填工作区归属（继承源对话，DB 已由 branchConversation 写入 workspace_path）。
+          workspacePath: srcWorkspacePath,
         }));
         // M2-6：分支继承源对话当前的 mode / reasoningEffort（全局 agentSettings 此刻即源设置，无需改动）。
         //   新分支落库时 branchConversation 未带 mode/reasoningEffort → DB 取默认；下次该分支被保存
@@ -1286,6 +1482,103 @@ export function AgentPanel() {
           </button>
         </div>
       </div>
+
+      {/* ★ M4-2-S7 紧凑对话切换器（独立窄行，不挤压顶栏三按钮）：当前对话标题 + 下拉 → 打开 portal 管理浮层。 */}
+      <div className="agent-conv-switch">
+        <button
+          ref={convAnchorRef}
+          className={`agent-conv-trigger ${convMenuOpen ? 'active' : ''}`}
+          onClick={() => (convMenuOpen ? setConvMenuOpen(false) : openConvMenu())}
+          title="切换 / 管理对话"
+        >
+          <MessageSquare size={13} className="agent-conv-trigger-icon" />
+          <span className="agent-conv-trigger-title">{conversation.title || '新对话'}</span>
+          {conversation.workspacePath && (
+            <span className="agent-conv-ws" title={conversation.workspacePath}>
+              {workspaceLabel(conversation.workspacePath)}
+            </span>
+          )}
+          <ChevronDown size={13} className="agent-conv-chevron" />
+        </button>
+      </div>
+
+      {/* ★ M4-2-S7 对话管理浮层（portal 到 body，避开 header overflow 裁剪；点外/Esc 关闭）。 */}
+      {convMenuOpen && convMenuPos && createPortal(
+        <div
+          ref={convPanelRef}
+          className="agent-conv-panel glass-panel"
+          style={{ position: 'fixed', top: convMenuPos.top, left: convMenuPos.left, width: convMenuPos.width }}
+        >
+          {/* 搜索（本地内存过滤，不污染左侧栏视图） */}
+          <div className="agent-conv-search">
+            <Search size={13} />
+            <input
+              autoFocus
+              value={convSearch}
+              onChange={e => setConvSearch(e.target.value)}
+              placeholder="搜索对话..."
+            />
+          </div>
+          {/* 工作区范围三态（与左侧栏同口径） */}
+          <div className="agent-conv-scope">
+            <button className={convScope === 'current' ? 'active' : ''} onClick={() => setConvScope('current')}>当前</button>
+            <button className={convScope === 'global' ? 'active' : ''} onClick={() => setConvScope('global')}>全局</button>
+            <button className={convScope === 'all' ? 'active' : ''} onClick={() => setConvScope('all')}>全部</button>
+          </div>
+          {/* 列表（点选切换，共用 selectedId 高亮） */}
+          <div className="agent-conv-list">
+            {convFilteredList.length === 0 ? (
+              <div className="agent-conv-empty">{convSearch ? '未找到匹配的对话' : '该范围暂无对话'}</div>
+            ) : (
+              convFilteredList.map(c => (
+                <button
+                  key={c.id}
+                  className={`agent-conv-row ${convSelectedId === c.id ? 'active' : ''}`}
+                  onClick={() => void handleSwitchConversationFromMenu(c.id)}
+                  title={c.title}
+                >
+                  <MessageSquare size={12} className="agent-conv-row-icon" />
+                  <span className="agent-conv-row-title">{c.title}</span>
+                  <span className={`agent-conv-row-ws ${c.workspacePath ? '' : 'global'}`}>
+                    {c.workspacePath ? <FolderInput size={9} /> : <Globe size={9} />}
+                    {workspaceLabel(c.workspacePath)}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+          {/* 底部：新建 + 当前对话改归属 */}
+          <div className="agent-conv-footer">
+            <button
+              className="agent-conv-action"
+              onClick={() => { setConvMenuOpen(false); void handleNewConversation(); }}
+              disabled={isStreaming}
+            >
+              <Plus size={13} /> 新建对话
+            </button>
+            <div className="agent-conv-move">
+              <span className="agent-conv-move-label">当前归属</span>
+              <button
+                className={`agent-conv-move-btn ${!conversation.workspacePath ? 'active' : ''}`}
+                onClick={() => void handleMoveCurrentConversation(null)}
+                title="改归全局（无归属）"
+              >
+                <Globe size={11} /> 全局
+              </button>
+              {agentWorkspacePath && (
+                <button
+                  className={`agent-conv-move-btn ${conversation.workspacePath === agentWorkspacePath ? 'active' : ''}`}
+                  onClick={() => void handleMoveCurrentConversation(agentWorkspacePath)}
+                  title={agentWorkspacePath}
+                >
+                  <FolderInput size={11} /> {workspaceLabel(agentWorkspacePath)}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
 
       <div className="agent-messages">
         {activeAgentTab === 'chat' && (

@@ -110,8 +110,9 @@ contextBridge.exposeInMainWorld('synapse', {
     batchDelete: (ids: string[]) => ipcRenderer.invoke('conversation:batchDelete', ids),
     batchUpdate: (ids: string[], data: any) => ipcRenderer.invoke('conversation:batchUpdate', ids, data),
     addMessage: (message: any) => ipcRenderer.invoke('message:add', message),
-    replaceMessages: (conversationId: string, messages: any[]) =>
-      ipcRenderer.invoke('message:replaceConversation', conversationId, messages),
+    // M4-2-S1：透传 opts.systemTouch（切走对话的系统性保存不刷 updated_at）。
+    replaceMessages: (conversationId: string, messages: any[], opts?: { systemTouch?: boolean }) =>
+      ipcRenderer.invoke('message:replaceConversation', conversationId, messages, opts),
     listMessages: (conversationId: string) => ipcRenderer.invoke('message:list', conversationId),
     search: (query: string, opts?: any) => ipcRenderer.invoke('conversation:search', query, opts),
     // Record（M1 上下文 harness 过程日志）

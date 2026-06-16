@@ -408,3 +408,150 @@
   color: #ef4444;
   background: rgba(239, 68, 68, 0.1);
 }
+
+.conv-item-action.active {
+  color: var(--syn-text);
+  background: rgba(var(--syn-accent-rgb, 139, 92, 246), 0.2);
+}
+
+/* ★ M4-2-S6 工作区范围切换器 */
+.conv-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.conv-scope-icon {
+  flex-shrink: 0;
+  color: var(--syn-text-muted);
+}
+
+.conv-scope-tabs {
+  display: flex;
+  flex: 1;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.conv-scope-tab {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--syn-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.conv-scope-tab:hover {
+  color: var(--syn-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.conv-scope-tab.active {
+  color: var(--syn-text);
+  background: rgba(var(--syn-accent-rgb, 139, 92, 246), 0.24);
+}
+
+/* ★ M4-2-S6 所属工作区小标记（conv-item-meta 内） */
+.conv-ws-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 96px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(var(--syn-accent-rgb, 139, 92, 246), 0.14);
+  color: var(--syn-text);
+  opacity: 0.85;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.conv-ws-badge.global {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--syn-text-muted);
+}
+
+.conv-ws-badge svg {
+  flex-shrink: 0;
+}
+
+/* ★ M4-2-S6「移动到…」内联菜单 */
+.conv-move-menu {
+  position: absolute;
+  top: 30px;
+  right: 8px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 150px;
+  max-width: 220px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 8px;
+}
+
+.conv-move-menu-title {
+  padding: 2px 6px 4px;
+  font-size: 10px;
+  color: var(--syn-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.conv-move-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--syn-text-secondary, var(--syn-text));
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conv-move-option:hover,
+.conv-move-option.active {
+  background: rgba(var(--syn-accent-rgb, 139, 92, 246), 0.16);
+  color: var(--syn-text);
+}
+
+.conv-move-option svg {
+  flex-shrink: 0;
+}
+
+.conv-move-option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.conv-move-option small {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--syn-text-muted);
+}
+
+.conv-move-empty {
+  padding: 8px;
+  font-size: 11px;
+  color: var(--syn-text-muted);
+  text-align: center;
+}

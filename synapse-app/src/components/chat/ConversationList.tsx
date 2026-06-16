@@ -7,7 +7,7 @@ import type { MouseEvent } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import type { ConversationSummary } from '@/store/slices/conversationHistory';
 import { removeConversation, setConversations, setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
-import { clearConversation, setConversation } from '@/store/slices/conversation';
+import { clearConversation, setConversation, setConversationWorkspace } from '@/store/slices/conversation';
 import { setMode, setReasoningEffort } from '@/store/slices/agentSettings';
 import { exitWorktree } from '@/store/slices/worktreeSession';
 import { addNotification } from '@/store/slices/notifications';
@@ -30,12 +30,19 @@ import {
   type ConversationListFilters,
 } from '@/services/conversationPersistence';
 import {
+  useConversationManager,
+  workspaceLabel,
+  type WorkspaceTarget,
+} from '@/hooks/useConversationManager';
+import {
   Archive,
   ArchiveRestore,
   Check,
   CheckSquare,
   Download,
   Edit3,
+  FolderInput,
+  Globe,
   MessageSquare,
   Plus,
   Search,
@@ -75,12 +82,35 @@ function downloadJson(fileName: string, data: unknown): void {
 
 export function ConversationList() {
   const dispatch = useAppDispatch();
+  // ★ M4-2-S6：共享 hook 提供工作区范围三态 scope + scopeFilters 映射 + moveToWorkspace（改归属）
+  //   + recentPaths（「移动到…」候选）。conversations/selectedId 仍由本组件直接读 slice（与 hook 同源），
+  //   切换/新建/保存等带竞态闸门的敏感逻辑保留在组件内（保守路线，见 Plan_5 M4-2 第七节 #5）。
+  const {
+    scope,
+    setScope,
+    scopeFilters,
+    moveToWorkspace,
+    recentPaths,
+    workspaceCurrentPath,
+  } = useConversationManager();
+  // 「移动到…」候选工作区：当前工作区（若有）置顶 + recentPaths 去重，全部以 path 为键。
+  const moveTargets = useMemo<string[]>(() => {
+    const set = new Set<string>();
+    if (workspaceCurrentPath) set.add(workspaceCurrentPath);
+    recentPaths.forEach(p => { if (p) set.add(p); });
+    return [...set];
+  }, [workspaceCurrentPath, recentPaths]);
   const conversations = useAppSelector((s) => s.conversationHistory.conversations);
   const selectedId = useAppSelector((s) => s.conversationHistory.selectedId);
   const currentConversation = useAppSelector((s) => s.conversation);
   // 持有最新 conversation 供异步懒迁移 onMigrated 回调安全校验，避免 useCallback 闭包旧值误导。
   const currentConversationRef = useRef(currentConversation);
   currentConversationRef.current = currentConversation;
+  // ★ M4-2-S5 对话工作区归属：新对话默认归当前工作区（state.workspace.currentPath，null=Global）。
+  //   用 ref 持有最新值——既不把它塞进 handleNewConversation 的依赖数组（避免切工作区时重建回调），
+  //   也防 useCallback 闭包读到旧 path。复用 useConversationManager 暴露的 workspaceCurrentPath（同源）。
+  const workspaceCurrentPathRef = useRef(workspaceCurrentPath);
+  workspaceCurrentPathRef.current = workspaceCurrentPath;
   // M2-6：保存当前对话时需把【当前全局 agentSettings 的 mode / reasoningEffort】随对话落库。
   //   用 ref 持有最新值，既避免把这两个高频可变项塞进 saveCurrentToHistory 的依赖数组，也防闭包旧值。
   const agentMode = useAppSelector((s) => s.agentSettings.mode);
@@ -97,13 +127,19 @@ export function ConversationList() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [tagDraft, setTagDraft] = useState('');
+  // ★ M4-2-S6「移动到…」：当前展开归属菜单的对话 id（null = 未展开）。点条目 FolderInput 按钮切换。
+  const [movingId, setMovingId] = useState<string | null>(null);
+  const moveMenuRef = useRef<HTMLDivElement | null>(null);
 
   const activeFilters = useMemo<ConversationListFilters>(() => ({
     query: searchQuery,
     archived: archiveFilter,
     tags: splitTags(tagFilter),
     limit: 200,
-  }), [archiveFilter, searchQuery, tagFilter]);
+    // ★ M4-2-S6：把工作区范围三态（scope→workspacePath/globalOnly）并入过滤。activeFilters 变化（含 scope 切换）
+    //   会触发既有 useEffect 重新 listConversationSummaries，列表即时按范围刷新。
+    ...scopeFilters,
+  }), [archiveFilter, searchQuery, tagFilter, scopeFilters]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const allVisibleSelected = conversations.length > 0 && conversations.every(conv => selectedSet.has(conv.id));
@@ -170,7 +206,14 @@ export function ConversationList() {
         assistantRuns: currentConversation.assistantRuns,
         fileSnapshots: currentConversation.fileSnapshots,
         pendingDiffs: currentConversation.pendingDiffs,
-        timestamp: Date.now(),
+        // ★ M4-2-S5 首次保存落归属：把当前对话在 store 持有的工作区归属随对话落库（新建时由
+        //   handleNewConversation 已置入 state.conversation.workspacePath，恢复/分支时已回填）。这是
+        //   autosave→fork 成正式 id 那一刻把归属固化进 DB 的关键一环——否则 fork 出的新行 workspace_path 为 NULL。
+        workspacePath: currentConversation.workspacePath,
+        // ★ M4-2-S1（问题9 根治）：这是「切走对话的系统性自动保存」，不应改变其排序时间。
+        //   改 systemTouch:true（落库不刷 updated_at）+ 去掉硬传 timestamp:Date.now()——
+        //   否则切走对话被刷成当前时间，按时间降序时它跳第一、被点中的对话被挤到第二位。
+        systemTouch: true,
       });
       if (summary) {
         dispatch(updateConversation(summary));
@@ -199,6 +242,10 @@ export function ConversationList() {
     try {
       await saveCurrentToHistory();
       dispatch(clearConversation());
+      // ★ M4-2-S5 新对话默认归当前工作区：clearConversation 把 workspacePath 重置为 null（Global），
+      //   随即按当前打开的工作区 path 置归属（未打开工作区时 ref 为 null → 维持 Global）。须放在 clear 之后，
+      //   否则被 clearConversation 覆盖回 null。首条消息触发的 saveCurrentToHistory 会把该归属落库。
+      dispatch(setConversationWorkspace(workspaceCurrentPathRef.current));
       // M2-6：新对话回默认设置（mode=planning / reasoningEffort=auto）。先 saveCurrentToHistory 落定旧对话设置再重置。
       dispatch(setMode('planning'));
       dispatch(setReasoningEffort('auto'));
@@ -238,6 +285,9 @@ export function ConversationList() {
         // M2-3：切换对话时把分支溯源回填进 store（此前未接 → 渲染显示 null，DB 一直是对的）。
         parentId: snapshot.parentId ?? null,
         branchedFromMessageId: snapshot.branchedFromMessageId ?? null,
+        // ★ M4-2-S5 恢复回填归属：切到历史对话时把其 DB 归属回填进 store（旧对话/legacy 为 null=Global），
+        //   使后续在该对话内的保存延续正确归属，且 S6/S7 UI 标记/范围过滤即时一致。
+        workspacePath: snapshot.workspacePath ?? null,
       }));
       // M2-6：把该对话各自的 mode / reasoningEffort 同步进全局 agentSettings（agentLoop 仍读 agentSettings，
       //   口径不变）。已在 saveCurrentToHistory 把切换前对话的设置落库，故此处切走旧设置不丢。
@@ -462,6 +512,34 @@ export function ConversationList() {
     await refreshConversations();
   }, [currentConversation, editingTitle, refreshConversations, dispatch]);
 
+  // ★ M4-2-S6 改归属：经共享 hook 落库 + 回写 slice；若改的是当前打开对话，同步 store conversation.workspacePath
+  //   使其内后续保存延续正确归属；随后 refresh 让当前范围视图即时剔除/纳入该条。
+  const handleMoveConversation = useCallback(async (id: string, target: WorkspaceTarget) => {
+    setMovingId(null);
+    await moveToWorkspace(id, target);
+    if (currentConversationRef.current.id === id) {
+      dispatch(setConversationWorkspace(target ?? null));
+    }
+    await refreshConversations();
+  }, [moveToWorkspace, refreshConversations, dispatch]);
+
+  const toggleMoveMenu = useCallback((id: string, event: MouseEvent) => {
+    stop(event);
+    setMovingId(prev => (prev === id ? null : id));
+  }, []);
+
+  // 点外关闭移动菜单（与 modelMenu 同口径的 mousedown 监听）。
+  useEffect(() => {
+    if (!movingId) return;
+    const onDown = (e: globalThis.MouseEvent) => {
+      if (moveMenuRef.current && !moveMenuRef.current.contains(e.target as Node)) {
+        setMovingId(null);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [movingId]);
+
   return (
     <div className="conversation-list">
       <div className="conversation-list-header">
@@ -490,6 +568,34 @@ export function ConversationList() {
             <X size={12} />
           </button>
         )}
+      </div>
+
+      {/* ★ M4-2-S6 工作区范围切换器：显著可见，默认「当前工作区」，对冲老用户「对话不见了」恐慌。 */}
+      <div className="conv-scope-row" title="按所属工作区过滤对话">
+        <Globe size={12} className="conv-scope-icon" />
+        <div className="conv-scope-tabs">
+          <button
+            className={`conv-scope-tab ${scope === 'current' ? 'active' : ''}`}
+            onClick={() => setScope('current')}
+            title="只显当前工作区的对话"
+          >
+            当前
+          </button>
+          <button
+            className={`conv-scope-tab ${scope === 'global' ? 'active' : ''}`}
+            onClick={() => setScope('global')}
+            title="只显无归属（全局）的对话"
+          >
+            全局
+          </button>
+          <button
+            className={`conv-scope-tab ${scope === 'all' ? 'active' : ''}`}
+            onClick={() => setScope('all')}
+            title="显示全部对话"
+          >
+            全部
+          </button>
+        </div>
       </div>
 
       <div className="conv-filter-row">
@@ -599,6 +705,14 @@ export function ConversationList() {
                 <div className="conv-item-meta">
                   <span>{conv.messageCount} 条消息</span>
                   <span>{new Date(conv.timestamp).toLocaleDateString('zh-CN')}</span>
+                  {/* ★ M4-2-S6 所属工作区小标记：有 path 显 basename，无归属显「全局」。 */}
+                  <span
+                    className={`conv-ws-badge ${conv.workspacePath ? '' : 'global'}`}
+                    title={conv.workspacePath ? conv.workspacePath : '全局对话（无工作区归属）'}
+                  >
+                    {conv.workspacePath ? <FolderInput size={9} /> : <Globe size={9} />}
+                    {workspaceLabel(conv.workspacePath)}
+                  </span>
                 </div>
               </div>
               <div className="conv-item-actions">
@@ -608,6 +722,14 @@ export function ConversationList() {
                   title={editingId === conv.id ? '保存标题' : '编辑标题'}
                 >
                   {editingId === conv.id ? <Check size={12} /> : <Edit3 size={12} />}
+                </button>
+                {/* ★ M4-2-S6「移动到…」：改对话工作区归属。点开内联菜单选 全局 / 当前工作区 / 历史工作区。 */}
+                <button
+                  className={`conv-item-action ${movingId === conv.id ? 'active' : ''}`}
+                  onClick={(event) => toggleMoveMenu(conv.id, event)}
+                  title="移动到工作区…"
+                >
+                  <FolderInput size={12} />
                 </button>
                 <button
                   className="conv-item-action"
@@ -641,6 +763,32 @@ export function ConversationList() {
                   <Trash2 size={12} />
                 </button>
               </div>
+              {movingId === conv.id && (
+                <div className="conv-move-menu glass-panel" ref={moveMenuRef} onClick={stop}>
+                  <div className="conv-move-menu-title">移动到工作区</div>
+                  <button
+                    className={`conv-move-option ${!conv.workspacePath ? 'active' : ''}`}
+                    onClick={() => void handleMoveConversation(conv.id, null)}
+                  >
+                    <Globe size={12} /> 全局（无归属）
+                  </button>
+                  {moveTargets.map(path => (
+                    <button
+                      key={path}
+                      className={`conv-move-option ${conv.workspacePath === path ? 'active' : ''}`}
+                      onClick={() => void handleMoveConversation(conv.id, path)}
+                      title={path}
+                    >
+                      <FolderInput size={12} />
+                      <span className="conv-move-option-label">{workspaceLabel(path)}</span>
+                      {path === workspaceCurrentPath && <small>当前</small>}
+                    </button>
+                  ))}
+                  {moveTargets.length === 0 && (
+                    <div className="conv-move-empty">暂无可选工作区，先打开一个工作区</div>
+                  )}
+                </div>
+              )}
             </div>
           ))
         )}
