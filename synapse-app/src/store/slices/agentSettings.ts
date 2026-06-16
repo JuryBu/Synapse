@@ -44,6 +44,13 @@ export interface SynopsisSettings {
 interface AgentSettingsState {
   mode: AgentMode;
   currentModel: string;
+  /**
+   * ★ M4-5-S1：系统模型（后台任务专用），空字符串 = 跟随 currentModel。
+   * 历史压缩摘要（recordGenerator）、自动标题等【后台 LLM 任务】走这条独立通路，
+   * 与主对话模型（currentModel）解耦。统一通过 resolveSystemModel（services/modelResolution.ts）解析，
+   * 口径恒为 systemModel || currentModel。靠 agentSettings 整 slice 自动持久化，无需改持久化代码。
+   */
+  systemModel: string;
   availableModels: AIModelOption[];
   connectionStatus: ConnectionStatus;
   maxToolRounds: number;
@@ -66,6 +73,7 @@ interface AgentSettingsState {
 const initialState: AgentSettingsState = {
   mode: 'planning',
   currentModel: '',
+  systemModel: '', // M4-5-S1：空 = 跟随 currentModel
   availableModels: [],
   connectionStatus: 'unknown',
   maxToolRounds: 25,
@@ -171,6 +179,13 @@ export const agentSettingsSlice = createSlice({
     },
     setCurrentModel(state, action: PayloadAction<string>) {
       state.currentModel = action.payload;
+    },
+    /**
+     * ★ M4-5-S1：设置系统模型（后台任务专用）。空字符串 = 跟随 currentModel。
+     * 失效回退（模型从端点下线）由 SettingsPanel.fetchModels 成功后并列校验、store 加载期校验处理。
+     */
+    setSystemModel(state, action: PayloadAction<string>) {
+      state.systemModel = action.payload;
     },
     setAvailableModels(state, action: PayloadAction<AIModelOption[]>) {
       state.availableModels = action.payload;
@@ -289,7 +304,7 @@ export const agentSettingsSlice = createSlice({
 });
 
 export const {
-  setMode, setCurrentModel, setMaxToolRounds,
+  setMode, setCurrentModel, setSystemModel, setMaxToolRounds,
   setAvailableModels, setConnectionStatus,
   setEnableStreaming, setOutputStrategy, setPseudoStreamSpeed,
   setShowStreamCursor, setShowGeneratingPlaceholder, setStreamThinking,

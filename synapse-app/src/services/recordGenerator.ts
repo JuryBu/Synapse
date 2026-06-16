@@ -19,6 +19,7 @@
 import { AIClient, type ChatMessage } from './aiClient';
 import { store } from '@/store';
 import { extractSkeleton } from './recordStore';
+import { resolveSystemModel } from './modelResolution';
 
 /** 参与生成的单条消息（取自 store 的 Message 子集，避免耦合完整类型） */
 export interface RecordSourceMessage {
@@ -203,10 +204,10 @@ ${body}`;
 function resolveClient(): AIClient | null {
   const state = store.getState() as any;
   const settings = state?.settings;
-  const agentSettings = state?.agentSettings;
   const apiKey = settings?.apiKeys?.openai || '';
   const baseUrl = settings?.apiEndpoints?.openai || 'https://api.openai.com/v1';
-  const model = agentSettings?.currentModel || '';
+  // ★ M4-5-S1：后台压缩走【系统模型】通路（systemModel || currentModel），与主对话模型解耦。
+  const model = resolveSystemModel(state);
   if (!apiKey || !model) return null;
   // 低 temperature + 关闭流式，稳定一次性产出
   return new AIClient({

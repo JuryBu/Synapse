@@ -18,6 +18,7 @@ import {
   setBackgroundSettings,
   setConnectionStatus,
   setCurrentModel,
+  setSystemModel,
   setOutputStrategy,
   setPseudoStreamSpeed,
   setShowGeneratingPlaceholder,
@@ -257,6 +258,11 @@ export function SettingsPanel() {
         if (!models.some(m => m.id === agentSettings.currentModel)) {
           dispatch(setCurrentModel(''));
         }
+        // ★ M4-5-S1：系统模型同款失效回退——已存系统模型不在新列表（端点下线）则回退空（跟随默认模型），
+        // 防止后台任务（历史压缩、自动标题）静默用下线模型报错。
+        if (agentSettings.systemModel && !models.some(m => m.id === agentSettings.systemModel)) {
+          dispatch(setSystemModel(''));
+        }
         dispatch(addNotification({ type: 'info', title: '请选择默认模型', message: '模型列表已刷新，请显式选择需要使用的模型。' }));
       } else {
         dispatch(setConnectionStatus('failed'));
@@ -269,7 +275,7 @@ export function SettingsPanel() {
     } finally {
       setLoadingModels(false);
     }
-  }, [settings.apiKeys?.openai, settings.apiEndpoints?.openai, agentSettings.currentModel, dispatch]);
+  }, [settings.apiKeys?.openai, settings.apiEndpoints?.openai, agentSettings.currentModel, agentSettings.systemModel, dispatch]);
 
   const refreshMcpStatus = useCallback(async () => {
     if (!isElectron) return;
@@ -907,6 +913,21 @@ export function SettingsPanel() {
                   {loadingModels ? '⏳ 获取中...' : '🔄 获取模型'}
                 </button>
               </div>
+            </div>
+            {/* ★ M4-5-S1：系统模型（后台任务用）——历史压缩摘要、自动标题等后台 LLM 任务走它，留空跟随默认模型。 */}
+            <div className="setting-item">
+              <label>系统模型（后台任务用）</label>
+              <select
+                value={availableModels.some(m => m.id === agentSettings.systemModel) ? agentSettings.systemModel : ''}
+                onChange={e => dispatch(setSystemModel(e.target.value))}>
+                <option value="">跟随默认模型</option>
+                {availableModels.map(m => (
+                  <option key={m.id} value={m.id}>{m.name || m.id}</option>
+                ))}
+              </select>
+            </div>
+            <div className="setting-item" style={{ fontSize: 12, color: 'var(--syn-text-muted)' }}>
+              <span className="setting-hint">用于历史压缩、自动标题等后台任务，留空则跟随默认模型。</span>
             </div>
             {availableModels.length > 0 && (
               <div className="setting-item" style={{ fontSize: 12, color: 'var(--syn-text-muted)' }}>

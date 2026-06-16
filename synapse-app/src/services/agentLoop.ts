@@ -14,9 +14,10 @@ import {
 } from '../store/slices/conversation';
 import { setConnectionStatus } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
-import { promptBuilder, compressContext, MAX_CONTEXT_TOKENS, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
+import { promptBuilder, renderOpenFilesSection, compressContext, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
 import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type SynapseRecord } from './recordStore';
 import { generateBatch } from './recordGenerator';
+import { runSystemModelOnce } from './systemModelClient';
 import { AUTOSAVE_ID, saveAutosaveSnapshot } from './conversationPersistence';
 import { generateId } from './ids';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
@@ -42,6 +43,64 @@ export interface ToolExecutor {
 }
 
 const MAX_TOOL_ROUNDS = 25;
+
+/**
+ * ★ M4-5-S3 工作区感知：<open_files> 注入的打开文件数上限（已决 20）。
+ * 超出只列前 20，并标注「等 N 个」，避免几十个 tab 时 prompt 膨胀（M4-5 风险4）。
+ */
+const OPEN_FILES_LIMIT = 20;
+
+/**
+ * ★ M4-5 审查 medium#1：<open_files> 过滤的【非文件视图 tab type 黑名单】。
+ * 这些 tab 不对应可读文件，filePath 要么为空（welcome/settings），要么是非文件协议/blob
+ * （review='review://changes'、attachment=blob objectUrl）——一律不得注入 <open_files>，
+ * 否则误导模型去读不存在/读不了的「文件」，attachment 的 objectUrl 还会随机漂移破坏 cache 前缀。
+ */
+const NON_FILE_TAB_TYPES = new Set<string>([
+  'welcome', 'settings', 'workflow', 'review', 'showcase', 'unsupported', 'attachment',
+]);
+
+/** ★ M4-5-S4 自动标题：截断占位字符上限（首条消息立即可见的临时标题）。 */
+const TITLE_PLACEHOLDER_CHARS = 30;
+/** ★ M4-5-S4 自动标题：系统模型生成目标 ≤15 字，清洗时硬截留余量到此上限，防截断丢字（已决 ~20）。 */
+const TITLE_HARD_CHARS = 20;
+/** ★ M4-5-S4 自动标题：失败重试次数（已决 1 次）。 */
+const TITLE_RETRY = 1;
+/** ★ M4-5-S4 自动标题：重试间隔（毫秒，已决 ~800ms）。 */
+const TITLE_RETRY_INTERVAL_MS = 800;
+/** ★ M4-5-S4 自动标题：生成提示词（≤15 字、仅输出标题、无标点/引号/前缀）。 */
+const TITLE_SYSTEM_PROMPT = '你是对话标题助手。只输出一个不超过 15 个汉字的中文短标题概括用户这轮提问的主题，不要任何标点、引号、书名号、前缀或解释，只输出标题本身。';
+
+/**
+ * ★ M4-5-S4：清洗系统模型生成的标题。
+ * - trim；去掉外层成对引号 / 书名号 / 反引号；去掉「标题：」「Title:」类前缀；去换行只取首行；
+ * - 硬截到 TITLE_HARD_CHARS（防超长）。清洗后为空返回 null（调用方据此走降级保留占位）。
+ */
+function sanitizeTitle(raw: string | null): string | null {
+  if (!raw) return null;
+  let t = raw.trim();
+  if (!t) return null;
+  // 只取首行（模型偶尔多吐解释行）
+  t = t.split(/\r?\n/)[0].trim();
+  // 去掉常见前缀（标题：/ 题目：/ Title:）
+  t = t.replace(/^(标题|题目|title)\s*[:：]\s*/i, '').trim();
+  // 去掉外层成对引号 / 书名号 / 反引号（可能嵌套，循环剥）
+  let changed = true;
+  while (changed && t.length >= 2) {
+    changed = false;
+    const pairs: Array<[string, string]> = [['"', '"'], ["'", "'"], ['「', '」'], ['『', '』'], ['《', '》'], ['`', '`'], ['"', '"'], ["'", "'"]];
+    for (const [open, close] of pairs) {
+      if (t.startsWith(open) && t.endsWith(close) && t.length > open.length + close.length) {
+        t = t.slice(open.length, t.length - close.length).trim();
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (!t) return null;
+  if (t.length > TITLE_HARD_CHARS) t = t.slice(0, TITLE_HARD_CHARS);
+  return t || null;
+}
 
 // ★ M4-2-S2：运行态 id 生成收敛到共享 services/ids.ts（crypto.randomUUID + 回退，保留 prefix），
 //   治问题 2b(1) 弱熵同毫秒碰撞。原本地 generateId 已删，调用点签名不变（仍 generateId('run'/'evt'/...)）。
@@ -230,12 +289,26 @@ function truncateOverLongHistory(
   return result;
 }
 
-/** record 注入分级策略常量（M2-R3 渐进式读） */
-const RECORD_HEAD_FULL = 1;   // 头部保底全文批数（最老 N 批）
-const RECORD_TAIL_FULL = 2;   // 尾部保底全文批数（最新 N 批）
-/** record 注入总量预算占当前模型 contextWindow 的比例 */
-const RECORD_BUDGET_RATIO = 0.4;
+/** record 注入批拼接分隔符 */
 const BATCH_JOIN = '\n\n---\n\n';
+
+/**
+ * ★ M4-5-S2 prompt cache 稳定化：稳定渲染头部全文批数（最老 N 批）。
+ * 方案 B 固定规则：头 N 批全文 + 其余批一律骨架（带 record_read 可展开标注）。
+ * 取 2（合理小值）：保住开头背景与早期关键决策，其余走骨架确定性渲染、cache 友好。
+ *
+ * ★ M4-5-S2 删死代码说明：原 buildRecordPrefix（按 contextWindow 预算动态骨架↔全文升降级）是
+ *   prompt-cache 前缀漂移真因，已被 buildStableRecordPrefix 全量取代、无任何调用方，连同其独占的
+ *   RECORD_HEAD_FULL / RECORD_TAIL_FULL / RECORD_BUDGET_RATIO 常量一并删除。record_read 工具的按需
+ *   单批展开是独立路径（不经此函数），功能不回退。renderSkeletonBatch 仍由稳定版复用故保留。
+ */
+const STABLE_HEAD_FULL = 2;
+
+/**
+ * ★ M4-5-S2：压缩注入到 apiMessages[1] 的固定文案前缀（常量化，确保前缀字符串本身永不漂移）。
+ * 与 buildStableRecordPrefix 的确定性渲染配合，让「record 批集合不变 → apiMessages[1].content 逐字不变」。
+ */
+const RECORD_INJECTION_PREFIX = '[对话历史摘要]\n\n';
 
 /** 渲染一个被降级为骨架的批次：明确标注可用 record_read 展开全文 */
 function renderSkeletonBatch(batch: RecordBatch): string {
@@ -245,79 +318,35 @@ function renderSkeletonBatch(batch: RecordBatch): string {
 }
 
 /**
- * M2-R3 渐进式读：把多批 record 分级拼成注入前缀（替代 R1 临时态「头骨架 + 末批全文」全批拼接）。
+ * ★ M4-5-S2 prompt cache 稳定化：record 注入前缀的【确定性渲染】版本（已落批确定性形态）。
  *
- * 分级规则：
- *   ① 头 RECORD_HEAD_FULL 批（最老）全文保底——保住开头背景。
- *   ② 尾 RECORD_TAIL_FULL 批（最新）全文保底——保住最近进展。
- *   ③ 中间批默认降级为【骨架】，并明确标注「可用 record_read 展开全文」让 AI 知道能按需取回。
- *   ④ token 预算 = contextWindow * RECORD_BUDGET_RATIO；先扣除头尾全文占用，
- *      再从最新中间批往前累加全文，预算内的中间批升级为全文、超预算的保持骨架。
- *   批次少（≤ 头+尾，即 ≤3）时全部全文，无中间批。
+ * 真因（被本函数根治）：原 buildRecordPrefix 按 contextWindow 预算在【骨架 ↔ 全文】之间动态升降级
+ *   （line 274-282 markFull 受 budget 约束），导致同一 record 在「窗口 / 批数」变化时渲染不同 →
+ *   压缩注入拼到 apiMessages[1] 的前缀漂移 → prompt cache 失效。
  *
- * @param contextWindow 当前模型真实上下文窗口（token），用于预算；缺省回退 MAX_CONTEXT_TOKENS。
+ * 修法 = 与窗口预算彻底解耦的固定规则（方案 B）：
+ *   - 头 STABLE_HEAD_FULL 批（最老）全文：保住开头背景与早期关键决策。
+ *   - 其余所有批一律骨架：渲染规则固定（renderSkeletonBatch，带 record_read 可展开标注，功能不回退）。
+ *   - 完全不接受 contextWindow / 不跑 RECORD_BUDGET_RATIO / 不做任何动态升降级。
+ *
+ * 由此「record 批集合不变（contentMd / skeleton / index 不变）」时，本函数输出【逐字不变】——
+ * apiMessages[1] 前缀稳定，是 cache 命中的前提（端点是否真命中由端点决定，见 Plan_5 openQuestion 5）。
+ *
+ * 边界（与 buildRecordPrefix 同口径，保确定性）：
+ *   - 零批 → record.contentMd（旧单文档态兼容）。
+ *   - 单批 → 该批全文。
+ *
+ * 服务对象：自动压缩（现有 ~90% 水位）与未来 /compact 手动压缩共用此稳定前缀。
  */
-function buildRecordPrefix(record: SynapseRecord, contextWindow?: number): string {
+function buildStableRecordPrefix(record: SynapseRecord): string {
   const batches = record.batches ?? [];
   if (batches.length === 0) return record.contentMd ?? '';
   if (batches.length === 1) return batches[0].contentMd;
 
-  const win = contextWindow && contextWindow > 0 ? contextWindow : MAX_CONTEXT_TOKENS;
-  const budget = Math.max(0, Math.floor(win * RECORD_BUDGET_RATIO));
-
-  const n = batches.length;
-  // 标记哪些 index 用全文
-  const fullIdx = new Set<number>();
-  // 预算约束的是【总注入量】而非仅全文量：骨架批的输出文本也占 token，
-  // 先把所有批的骨架占用预扣进 usedTokens（基线），再用剩余预算把批从骨架升级为全文，
-  // 升级增量 = 全文 token - 骨架 token（避免重复计费）。
-  let usedTokens = 0;
-  const skeletonCost = (b: RecordBatch) => estimateTokens(renderSkeletonBatch(b));
-  for (const b of batches) usedTokens += skeletonCost(b);
-
-  /** 把批从骨架升级为全文：累加「全文 - 骨架」增量。force=true 时无视预算（用于尾批保底）。 */
-  const markFull = (b: RecordBatch, force = false): boolean => {
-    if (fullIdx.has(b.index)) return true;
-    const delta = Math.max(0, estimateTokens(b.contentMd) - skeletonCost(b));
-    if (!force && usedTokens + delta > budget) return false;
-    fullIdx.add(b.index);
-    usedTokens += delta;
-    return true;
-  };
-
-  // 批次足够少（头+尾即覆盖全部）→ 默认全部全文；但仍跑预算约束（聚焦点④：预算用真实 contextWindow）。
-  // 保底优先：从最新批往最老批升级全文，预算内的升级、超预算的降级为骨架；
-  // 至少强制保留尾 1 批全文（即便超预算也不能丢最近进展）。
-  if (n <= RECORD_HEAD_FULL + RECORD_TAIL_FULL) {
-    let downgraded = 0;
-    for (let i = n - 1; i >= 0; i--) {
-      const isLastTail = i === n - 1;            // 最新一批：强制全文保底
-      if (!markFull(batches[i], isLastTail)) downgraded++;
-    }
-    if (downgraded > 0) {
-      console.warn(
-        `[agentLoop] buildRecordPrefix: 小批次(${n}≤${RECORD_HEAD_FULL + RECORD_TAIL_FULL})全文超预算(${budget} tokens)，` +
-        `已将 ${downgraded} 个较老批降级为骨架（尾批强制全文保底）。`,
-      );
-    }
-    return batches
-      .map(b => (fullIdx.has(b.index) ? b.contentMd : renderSkeletonBatch(b)))
-      .filter(Boolean)
-      .join(BATCH_JOIN);
-  }
-
-  // 头尾保底：先放头 RECORD_HEAD_FULL 批 + 尾 RECORD_TAIL_FULL 批为全文（强制，保住背景与最近进展）
-  for (let i = 0; i < RECORD_HEAD_FULL; i++) markFull(batches[i], true);
-  for (let i = n - RECORD_TAIL_FULL; i < n; i++) markFull(batches[i], true);
-
-  // 中间批（头尾之间）从最新往最老，剩余预算内逐个升级为全文（升级增量已扣除骨架基线）
-  for (let i = n - RECORD_TAIL_FULL - 1; i >= RECORD_HEAD_FULL; i--) {
-    markFull(batches[i]);
-    // 超预算的中间批保持骨架（不 break：更老的批可能更短仍放得下，继续尝试）
-  }
-
+  // 固定规则：批序位 < STABLE_HEAD_FULL 的（最老 N 批）走全文，其余一律骨架。
+  // 仅依赖批在数组中的位置与各批内容，不依赖 contextWindow / 批数预算 → 确定性。
   return batches
-    .map(b => (fullIdx.has(b.index) ? b.contentMd : renderSkeletonBatch(b)))
+    .map((b, i) => (i < STABLE_HEAD_FULL ? b.contentMd : renderSkeletonBatch(b)))
     .filter(Boolean)
     .join(BATCH_JOIN);
 }
@@ -419,11 +448,48 @@ export class AgentLoop {
     const promptInjection = (rootState as any).settings?.promptInjection;
     const toolsEnabled = promptInjection?.injectTools ?? true;
 
+    // ★ M4-5-S3 工作区感知：从 editorTabs 读当前打开的【文件 tab】，过滤非文件视图后映射为 openFiles 概要。
+    //   - 只取路径/名/类型，绝不读正文（正文走读文件工具按需取）。
+    //   - 上限 OPEN_FILES_LIMIT(20)：超出只列前 20，追加一个「等 N 个」占位项（path/type 空，渲染时优雅省略）。
+    //   ★ M4-5 审查 medium#1：过滤判据从「filePath 非空」收紧为「filePath 非空 且 type 不属于非文件视图」。
+    //     根因：原假设「非文件视图 filePath 必为空」与代码现实不符——review tab 的 filePath='review://changes'、
+    //     attachment tab 的 filePath=blob objectUrl，均非空，会绕过原过滤被当成「可读文件」注入 <open_files>，
+    //     诱导模型调读文件工具去读不存在的 review:// 协议 / 读不了的 blob URL；且 objectUrl 每次打开都变，
+    //     会让该段内容随机漂移、进一步破坏 cache 前缀稳定性。故按 type 黑名单一并排除这些非文件视图 tab。
+    const editorTabs = (rootState as any).editorTabs;
+    const activeTabId: string | null = editorTabs?.activeTabId ?? null;
+    const allTabs: Array<{ id: string; filePath?: string; fileName?: string; type?: string }> = Array.isArray(editorTabs?.tabs) ? editorTabs.tabs : [];
+    const fileTabs = allTabs.filter(t =>
+      typeof t.filePath === 'string'
+      && t.filePath.trim().length > 0
+      && !NON_FILE_TAB_TYPES.has(t.type ?? ''),
+    );
+    const activeTab = activeTabId ? fileTabs.find(t => t.id === activeTabId) : undefined;
+    const activeFilePath = activeTab?.filePath || undefined;
+    const openFiles = fileTabs.slice(0, OPEN_FILES_LIMIT).map(t => ({
+      path: t.filePath as string,
+      name: t.fileName || (t.filePath as string),
+      type: t.type || 'file',
+    }));
+    if (fileTabs.length > OPEN_FILES_LIMIT) {
+      // 溢出占位项：name 承载「等 N 个」提示，path/type 留空（systemPrompt 渲染时省略方括号与第二行）。
+      openFiles.push({ path: '', name: `…等 ${fileTabs.length - OPEN_FILES_LIMIT} 个文件未列出`, type: '' });
+    }
+
     const systemPrompt = promptBuilder.build({
       workspaceName: workspaceName || undefined,
       mode: currentMode,
       promptInjection,
     });
+
+    // ★ M4-5 审查 medium#2：<open_files> 不再进 system prompt(apiMessages[0])，改注入 messages【最末尾】。
+    //   渲染受 injectContext 控制（与原 systemPrompt 内部 gating 等价）。空串表示无可注入项。
+    //   实际拼接到最后一条 user 消息见下方 apiMessages 组装后（restore 之后）。
+    const injectOpenFiles = promptInjection?.injectContext ?? true;
+    const openFilesSection = injectOpenFiles ? renderOpenFilesSection(
+      openFiles.length > 0 ? openFiles : undefined,
+      activeFilePath,
+    ) : '';
 
     // Apply context compression before sending
     const requestHistory: ChatMessage[] = opts?.skipUserMessage
@@ -440,7 +506,9 @@ export class AgentLoop {
     // 多模态修复（问题2）：历史里非文本 part（图片/附件）会随请求体发送，文本侧 countConversationTokens
     // 计不到，这里用 estimateNonTextPartsTokens 单独累加计入 assembledTokens，避免带图/附件对话组装量偏小、压缩偏晚。
     const requestHistoryText = requestHistory.map(m => ({ role: m.role, content: chatContentToText(m.content) }));
-    const systemTokens = estimateTokens(systemPrompt);
+    // ★ M4-5 审查 medium#2：<open_files> 已从 systemPrompt 挪到 messages 末尾，systemTokens 不再涵盖它；
+    //   但它仍随请求体发送、占用输入 token，故单独把 openFilesSection 的 token 计入估算口径，保持组装量准确。
+    const systemTokens = estimateTokens(systemPrompt) + estimateTokens(openFilesSection);
     const toolsTokens = (toolsEnabled && currentMode !== 'fast' && this.tools.length > 0)
       ? estimateTokens(JSON.stringify(this.tools))
       : 0;
@@ -507,7 +575,8 @@ export class AgentLoop {
           const priorRounds = existingRecord?.totalRounds ?? 0;     // = 末批 roundEnd
           const batchSlice = coveredEligible.slice(priorSteps);     // 本批切片（不含 tool，与上一批不重叠）
 
-          recordMd = existingRecord ? buildRecordPrefix(existingRecord, modelContextWindow) : null;
+          // ★ M4-5-S2：压缩注入改用确定性稳定前缀（不随 contextWindow 动态升降级），杜绝 apiMessages[1] 前缀漂移。
+          recordMd = existingRecord ? buildStableRecordPrefix(existingRecord) : null;
 
           if (batchSlice.length > 0) {
             const batchUserCount = batchSlice.filter(m => m.role === 'user').length;
@@ -545,7 +614,8 @@ export class AgentLoop {
                 timeSpan: batchResult.timeSpan,
               });
               if (updated) {
-                recordMd = buildRecordPrefix(updated, modelContextWindow);
+                // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性。
+                recordMd = buildStableRecordPrefix(updated);
                 // ★ R5 修复（问题3：record 水位 vs messages 缺口）：appendBatch 已把【本批覆盖到的 step】落库，
                 // 但触发本轮压缩的新 user 消息此刻可能还没被 autosave（700ms 防抖 + 压缩期同步占住事件循环，
                 // 且压缩成功后立即进 while 重新点亮 isStreaming 关掉 autosave 闸门）。这里主动同步持久化一次
@@ -578,7 +648,8 @@ export class AgentLoop {
         }
       }
       apiHistory = recordMd
-        ? [{ role: 'system', content: `[对话历史摘要]\n\n${recordMd}` } as ChatMessage, ...requestHistory.slice(-keepCount)]
+        // ★ M4-5-S2：前缀文案常量化（RECORD_INJECTION_PREFIX），与确定性 recordMd 配合保证 apiMessages[1] 逐字稳定。
+        ? [{ role: 'system', content: `${RECORD_INJECTION_PREFIX}${recordMd}` } as ChatMessage, ...requestHistory.slice(-keepCount)]
         : [compressed[0] as ChatMessage, ...requestHistory.slice(-(compressed.length - 1))];
       store.dispatch(addNotification({
         type: 'info',
@@ -616,6 +687,25 @@ export class AgentLoop {
     const restoreResult = await restoreApiMessagesAttachments(apiMessages)
       .catch(() => ({ messages: apiMessages, skippedInvalidImages: 0 }));
     apiMessages = restoreResult.messages;
+
+    // ★ M4-5 审查 medium#2：把 <open_files> 注入到整个 messages 数组【最末尾的最后一条 user 消息】内，
+    //   而非 system prompt(apiMessages[0]) 末尾。这样 system prompt + record 摘要(apiMessages[1]) + 旧历史
+    //   构成的稳定大前缀不受切 tab 影响，prompt cache 严格前缀匹配得以命中（与 S2 record 稳定化收益叠加）。
+    //   注入在 attachment 还原之后：仅追加一个文本 part / 文本片段，不触碰已还原的 image_url / file part。
+    //   ★ 绝不原地 mutate：apiMessages 元素可能是 store message 对象的浅拷贝引用，直接改 .content 会污染 store。
+    //     故定位到目标消息后【替换为新对象】，新 content 仅活在本次发送的局部 apiMessages。
+    if (openFilesSection) {
+      for (let i = apiMessages.length - 1; i >= 0; i--) {
+        const msg = apiMessages[i];
+        if (msg.role !== 'user') continue;
+        if (typeof msg.content === 'string') {
+          apiMessages[i] = { ...msg, content: `${msg.content}\n\n${openFilesSection}` };
+        } else if (Array.isArray(msg.content)) {
+          apiMessages[i] = { ...msg, content: [...msg.content, { type: 'text', text: `\n\n${openFilesSection}` }] };
+        }
+        break; // 只注入最后一条 user 消息
+      }
+    }
     // ★ M2-S 任务1：发送前图片有效性预检剔除了无效图（损坏/非图片字节），提示用户——
     // 避免「历史里混进一张坏图 → 上游对整条请求整体 400 → 有效图与正常对话一起被拖垮」。
     if (restoreResult.skippedInvalidImages > 0) {
@@ -627,10 +717,42 @@ export class AgentLoop {
       }));
     }
 
-    // Auto-generate title from first message
+    // ★ M4-5-S4 自动标题（截断占位 + 异步系统模型语义标题）：
+    //   1. 首条消息立即设【截断占位】标题（即时可见，不依赖任何网络）。
+    //   2. 截断占位后【fire-and-forget】调系统模型生成 ≤15 字语义标题，成功清洗后回写、失败 retry 1 次、
+    //      最终降级保留截断占位。★铁律：绝不 await——标题异步绝不阻塞首轮流式回复。
+    //   3. 竞态守卫：回写前比对发起时的 conversation.id 快照一致 + 标题仍是占位（未被用户手改），否则不覆盖。
+    //   4. 首条纯图片/附件（无可概括文本）：降级保留占位，不调系统模型。
     if (!opts?.skipUserMessage && (store.getState() as RootState).conversation.messages.length <= 1) {
-      const title = userMessage.slice(0, 30) + (userMessage.length > 30 ? '...' : '');
-      store.dispatch(setTitle(title));
+      const placeholderTitle = userMessage.slice(0, TITLE_PLACEHOLDER_CHARS)
+        + (userMessage.length > TITLE_PLACEHOLDER_CHARS ? '...' : '');
+      store.dispatch(setTitle(placeholderTitle));
+
+      // 仅当首条有可概括文本时才异步生成（纯图片/附件无文本 → 保留占位降级）。
+      const titleSource = userMessage.trim();
+      if (titleSource) {
+        // 发起时快照：用于回写竞态守卫（对话已切换/清空则不回写）。
+        const conversationIdSnapshot = (store.getState() as RootState).conversation.id;
+        // ★ fire-and-forget：包在自执行 async IIFE，void 丢弃 promise，绝不被主流式 await。
+        void (async () => {
+          const prompt = `请为下面这轮用户提问拟一个不超过 15 个汉字的中文标题，只输出标题：\n\n${titleSource.slice(0, 2000)}`;
+          let generated: string | null = null;
+          for (let attempt = 0; attempt <= TITLE_RETRY; attempt++) {
+            generated = sanitizeTitle(await runSystemModelOnce(prompt, { system: TITLE_SYSTEM_PROMPT }));
+            if (generated) break;
+            if (attempt < TITLE_RETRY) await new Promise(r => setTimeout(r, TITLE_RETRY_INTERVAL_MS));
+          }
+          if (!generated) return; // 全失败 → 保留已设的截断占位（不再 dispatch）
+
+          // 竞态守卫：回写前再读 live conversation——
+          //   - id 必须与发起时快照一致（对话未切换/未清空）；
+          //   - 当前标题必须仍是占位（未被用户在生成期间手动改过），否则尊重用户手改、不覆盖。
+          const live = (store.getState() as RootState).conversation;
+          if (live.id !== conversationIdSnapshot) return;
+          if (live.title !== placeholderTitle) return;
+          store.dispatch(setTitle(generated));
+        })();
+      }
     }
 
     // ★ M4-8-S4 端到端计时：记录本次 agent loop 的起点（用户发出此刻）。

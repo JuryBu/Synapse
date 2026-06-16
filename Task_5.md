@@ -81,12 +81,12 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - 目标：新增系统模型配置；自动标题模型生成；工作区感知注入；prompt cache 稳定化。
 - 依据：`Plan_5_M4-5_系统模型与感知.md`
 - 执行清单：
-  - [ ] **S1**(S) 系统模型：agentSettings 加 `systemModel`+`setSystemModel`；`resolveSystemModel` 纯函数；recordGenerator.resolveClient 改 `systemModel||currentModel`；SettingsPanel 加「系统模型(后台任务用)」下拉（含「跟随默认模型」空选项）；fetchModels 后失效回退
-  - [ ] **S2**(M) prompt cache 稳定化：`buildStableRecordPrefix`（方案 B 头 N 批全文 + 其余骨架固定，骨架保留 record_read 可展开，不依赖 contextWindow）；压缩注入路径改用稳定版；注入文案常量化
-  - [ ] **S3**(M) 工作区感知 `<open_files>`：PromptContext 加 openFiles/activeFilePath；SystemPromptBuilder 受 injectContext 控制渲染（置 system prompt 末尾保 cache）；agentLoop.run 从 editorTabs 读、过滤非文件视图、上限 20、只注路径/名/类型不注正文
-  - [ ] **S4**(M) 自动标题异步化：抽 `runSystemModelOnce`(非流式 helper)；agentLoop.ts:593-597 保留截断占位后 fire-and-forget 调系统模型生成 ≤15 字、成功清洗 setTitle、失败 retry 1 次(~800ms)、降级保留；竞态守卫（id 快照 + 未被手改）；首条纯图降级保留占位
-- 验收：系统模型可配可持久化、空值回退；record 压缩用系统模型；同 record 两次压缩前缀逐字一致；AI 知道当前打开文件；首条立即占位 + 1-2 秒语义标题替换。
-- 证据/产物：
+  - [x] **S1**(S) 系统模型：agentSettings 加 `systemModel`+`setSystemModel`；新建 `modelResolution.ts` `resolveSystemModel`(systemModel||currentModel)；recordGenerator.resolveClient 改读；SettingsPanel 加「系统模型(后台任务用)」下拉(含「跟随默认模型」空选项)；fetchModels+store 加载期双补失效回退
+  - [x] **S2**(M) prompt cache 稳定化：`buildStableRecordPrefix`(确定性，头 2 批全文+其余骨架固定，不依赖 contextWindow)；两处压缩注入改用；删动态 buildRecordPrefix 死代码；注入文案常量化
+  - [x] **S3**(M) 工作区感知 `<open_files>`：`renderOpenFilesSection`(只路径/名/类型不注正文)；agentLoop 从 editorTabs 过滤非文件视图(黑名单含 review/attachment 等)、上限 20；**审查纠正：从 system prompt 末尾挪到 messages 末尾(最后一条 user 消息内)，否则切 tab 仍破坏 apiMessages[0] 稳定前缀 cache**
+  - [x] **S4**(M) 自动标题异步化：新建 `systemModelClient.runSystemModelOnce`(非流式 maxTokens32 低温)；首条截断占位后 fire-and-forget(void IIFE 不 await)生成 ≤15 字+清洗+retry 1 次(~800ms)+降级保留；竞态守卫(id 快照+未手改)；纯图降级占位
+- 验收：✅ 4 stage 实现，build+electron:build 双过；✅ 3 路对抗审查→2 medium 已修(open_files 过滤漏 review/attachment tab→黑名单收紧；open_files 放 system prompt 末尾仍破坏 cache→挪到 messages 末尾)；🔸 系统模型/标题生成/工作区感知 真机留主人验。
+- 证据/产物：commit `feat(M4-5)`；改 agentSettings/recordGenerator/SettingsPanel/agentLoop/systemPrompt + 新建 modelResolution.ts/systemModelClient.ts。
 
 ---
 

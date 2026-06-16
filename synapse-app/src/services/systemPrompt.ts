@@ -12,6 +12,8 @@ interface PromptContext {
   learningMode?: string;
   synopsis?: string;
   mode?: 'fast' | 'planning';
+  // ★ M4-5 审查 medium#2：原 openFiles / activeFilePath 字段已移除——<open_files> 不再由 build 注入 system prompt，
+  //   改由 renderOpenFilesSection（导出函数）渲染、agentLoop 注入到 messages 末尾以保 cache 前缀稳定。
   promptInjection?: {
     injectIdentity?: boolean;
     injectSkills?: boolean;
@@ -107,8 +109,42 @@ ${context.userRules}
 </guidelines>`);
     }
 
+    // ★ M4-5-S3 工作区感知：<open_files> 段【不再注入 system prompt(apiMessages[0])】。
+    //   M4-5 审查（medium#2）根因：prompt cache 是对序列化 messages 的【严格前缀匹配】，
+    //   apiMessages[0] 在 apiMessages[1](record 摘要) 之前。把易变的 <open_files>（含「（当前活动）」标注）
+    //   放 system prompt 末尾，会在用户切 tab / 开关 tab 时改变 apiMessages[0] 尾部，连带 apiMessages[1]
+    //   及后续历史这一整段稳定前缀全部 cache 失效——与 S2 record 摘要逐字稳定化的收益互相抵消。
+    //   治本：渲染逻辑抽到 renderOpenFilesSection（见下），由调用方(agentLoop) 注入到整个 messages 数组的
+    //   【最末尾】（最新一轮 user 消息内），使 system prompt + record 摘要 + 旧历史 构成的大前缀真正可缓存。
+    //   此处 build 不再产出 <open_files>，injectContext gating 与注入位置统一由调用方负责。
+
     return sections.join('\n\n');
   }
+}
+
+/**
+ * ★ M4-5 审查 medium#2：渲染 <open_files> 段（与 system prompt 解耦，供 agentLoop 注入到 messages 末尾）。
+ *   - 只列【路径 / 名 / 类型】，不含正文——明确告知模型正文未注入、需要时用读文件工具按需读取。
+ *   - openFiles 已由调用方（agentLoop）过滤非文件视图、做上限裁剪（超出标注「等 N 个」由调用方追加占位项）。
+ *   - 无可渲染项时返回空串（调用方据此跳过注入）。
+ */
+export function renderOpenFilesSection(
+  openFiles?: Array<{ path: string; name: string; type: string }>,
+  activeFilePath?: string,
+): string {
+  if (!openFiles || openFiles.length === 0) return '';
+  const lines = openFiles.map(f => {
+    // 溢出占位项（path/type 空，仅 name 承载「等 N 个」）：只渲染 name 一行，省略方括号与路径行。
+    if (!f.path) return `- ${f.name}`;
+    const typeMark = f.type ? ` [${f.type}]` : '';
+    const activeMark = activeFilePath && f.path === activeFilePath ? '（当前活动）' : '';
+    return `- ${f.name}${typeMark}${activeMark}\n  ${f.path}`;
+  });
+  return `<open_files>
+用户当前在编辑器中打开的文件（仅路径/名称/类型概要，正文未注入）：
+${lines.join('\n')}
+需要某个文件的完整内容时，请用读文件工具按需读取，不要臆测正文。
+</open_files>`;
 }
 
 export const promptBuilder = new SystemPromptBuilder();

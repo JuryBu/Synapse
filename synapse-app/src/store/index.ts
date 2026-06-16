@@ -75,6 +75,12 @@ function sanitizePersistedAgentSettings(agentSettings: any) {
       ...(agentSettings.synopsisSettings ?? {}),
     },
   };
+  // ★ M4-5-S1：系统模型（systemModel）加载期失效回退，与 currentModel 同款——
+  // 持久化里若存了已从端点下线的模型，启动即回退空（跟随 currentModel），防后台任务静默报错。
+  // systemModel 校验独立于 currentModel（即便 currentModel 为空也要校验 systemModel）。
+  if (normalized.systemModel && !availableModels.some((model: any) => model?.id === normalized.systemModel)) {
+    normalized.systemModel = '';
+  }
   if (!normalized.currentModel) return normalized;
   const hasCurrentModel = availableModels.some((model: any) => model?.id === agentSettings.currentModel);
   if (!hasCurrentModel) {
