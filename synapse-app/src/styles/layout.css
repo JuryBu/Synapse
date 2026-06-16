@@ -941,6 +941,8 @@ html[data-wallpaper="enabled"] .settings-panel {
 }
 
 .agent-input-container {
+  /* ★ M4-6-S1：作为内联补全浮层（.inline-completion-menu，bottom:100% 上方弹出）的定位基准。 */
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 8px;
@@ -960,6 +962,83 @@ html[data-wallpaper="enabled"] .settings-panel {
   gap: 6px;
   padding: 6px 2px;
   overflow-x: auto;
+}
+
+/* ★ M4-6-S2：对话引用条（@对话 引用 chip）。 */
+.agent-ref-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 2px;
+}
+.agent-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  padding: 3px 6px 3px 8px;
+  font-size: 12px;
+  color: var(--syn-text-secondary);
+  background: var(--syn-bg-tertiary);
+  border: 1px solid var(--syn-border);
+  border-radius: 999px;
+}
+.agent-ref-chip-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-ref-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: none;
+  color: var(--syn-text-muted);
+  cursor: pointer;
+  border-radius: 50%;
+  font-size: 13px;
+  line-height: 1;
+}
+.agent-ref-chip-remove:hover {
+  background: var(--syn-bg-hover);
+  color: var(--syn-text);
+}
+
+/* ★ M4-6-S4：手动 /compact 压缩摘要点（消息流里 role='system' 的紧凑卡片，非 AI 气泡）。 */
+.message-compact-summary {
+  margin: 8px 0;
+  padding: 0 8px;
+}
+.compact-summary-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--syn-text-muted);
+  background: var(--syn-bg-tertiary);
+  border: 1px dashed var(--syn-border);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.compact-summary-toggle:hover {
+  color: var(--syn-text-secondary);
+  background: var(--syn-bg-hover);
+}
+.compact-summary-body {
+  margin-top: 6px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--syn-text-secondary);
+  border-radius: 8px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 .attachment-chip {

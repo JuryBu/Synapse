@@ -174,6 +174,11 @@ export function initDatabase(): Database.Database {
     //   IPC 读回时映射为 workspacePath，写入路径按 hasColumn 缺列降级（仿 reasoning_effort 三件套）。
     ensureColumn(db, 'conversations', 'workspace_path', 'TEXT');
 
+    // M4-6-S4 对话目标（/goal 设定）：随对话持久化的目标文本，设目标后每轮注入系统提示 <current_goal> 段。
+    //   NULL = 未设目标；旧行该列为 NULL，升级不丢对话；ensureColumn 懒迁移加列不破坏旧库；
+    //   IPC 读回时映射为 goal，写入路径按 hasColumn 缺列降级（仿 reasoning_effort / workspace_path 三件套）。
+    ensureColumn(db, 'conversations', 'goal', 'TEXT');
+
     ensureColumn(db, 'messages', 'model', 'TEXT');
     ensureColumn(db, 'messages', 'content_parts', 'TEXT');
     ensureColumn(db, 'messages', 'attachments', 'TEXT');

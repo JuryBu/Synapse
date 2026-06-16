@@ -16,7 +16,9 @@ import {
   setTemperature,
   setTopP,
 } from '@/store/slices/agentSettings';
-import { toggleAgentPanel } from '@/store/slices/layout';
+import { toggleAgentPanel, setSidebarVisible } from '@/store/slices/layout';
+// ★ M4-6-S2：@设置选中后跳转——切到设置分区（sidebar）+ 展开侧栏（layout）。
+import { setActiveView } from '@/store/slices/sidebar';
 import { MessageBubble } from '@/components/chat/MessageBubble';
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
@@ -25,7 +27,7 @@ import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
 import { mcpBridge } from '@/services/mcpBridge';
 import { addNotification } from '@/store/slices/notifications';
-import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setModel as setConversationModel, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setGoal, applyManualCompact, setModel as setConversationModel, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
 // ★ M3-3a：generateWorkflowRunId 预生成稳定 runId，跑前先建占位 assistant 消息 + 关联卡片实时显示。
 import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@/services/multiAITrigger';
@@ -46,10 +48,19 @@ import { releaseMessageAttachments, resolveAttachmentDataUrl, sanitizeMessagesFo
 import { generateId as generateMessageId } from '@/services/ids';
 import { setSelectedId, updateConversation, type ConversationSummary } from '@/store/slices/conversationHistory';
 import { openTab, setActiveTab as setActiveEditorTab } from '@/store/slices/editorTabs';
-import type { RootState } from '@/store';
+import { type RootState } from '@/store';
 import { rollbackFileDiff } from '@/services/fileRollback';
 import { describeCapabilities } from '@/services/modelCapabilities';
-import { getRecord, clampToBatch } from '@/services/recordStore';
+import { getRecord, clampToBatch, getRecordSkeleton } from '@/services/recordStore';
+// ★ M4-6 输入区命令层：触发检测（@艾特 / 斜杠命令）+ 内联补全浮层 + @数据源 + /命令注册表/执行器。
+import { detectTrigger, type TriggerKind } from '@/services/inputCommands/triggerDetect';
+import { InlineCompletionMenu } from '@/components/chat/InlineCompletionMenu';
+import type { CompletionItem } from '@/services/inputCommands/types';
+import { getAtCompletions } from '@/services/inputCommands/atSources';
+import { commandRegistry } from '@/services/inputCommands/commandRegistry';
+import { parseAndDispatch } from '@/services/inputCommands/commandExecutor';
+// ★ M4-6-S4：/loop 最小循环驱动器（串行重发 N 次，可 handleStop 中断）。
+import { loopRunner } from '@/services/inputCommands/loopRunner';
 
 const MAX_IMAGE_PAYLOAD_BYTES = 8 * 1024 * 1024;
 // M4-3-S3：非图片（文档/文本/压缩包等）附件也走 sha256 内容寻址落地，与图片同一契约，
@@ -121,6 +132,21 @@ export function AgentPanel() {
   const apiTokenCount = useAppSelector((s: RootState) => s.conversation.tokenCount);
   const [input, setInput] = useState('');
   const [activeAgentTab, setActiveAgentTab] = useState<'chat' | 'plan' | 'context'>('chat');
+
+  // ★ M4-6 输入区命令层状态：
+  //   - menu：当前内联补全浮层状态（open + 触发类型 + query + token 起点 + 候选 + 高亮）。
+  //   - isComposing：IME 中文输入法 composition 期间抑制触发检测（S5 边界，先在 S1 接好骨架避免误弹）。
+  //   - refs：本轮【对话引用表】（@对话 选中后插可见 token + 记一条引用，发送时注入；发送后清空）。
+  const [menu, setMenu] = useState<{
+    open: boolean;
+    kind: TriggerKind;
+    query: string;
+    tokenStart: number;
+    items: CompletionItem[];
+    activeIndex: number;
+  }>({ open: false, kind: 'at', query: '', tokenStart: 0, items: [], activeIndex: 0 });
+  const isComposingRef = useRef(false);
+  const [refs, setRefs] = useState<{ kind: 'conversation'; id: string; title: string }[]>([]);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -432,6 +458,8 @@ export function AgentPanel() {
         //   （写到 AUTOSAVE_ID 行）。带上 store 当前归属，使刷新/重启从 autosave 恢复、及后续 fork 成正式 id 时
         //   都拿到正确 workspacePath；不带则 autosave 行 workspace_path 为 NULL → 重启丢归属。
         workspacePath: conversation.workspacePath,
+        // ★ M4-6-S4：autosave 行带对话目标，使刷新/重启从 autosave 恢复对话能拿回 goal 继续注入。
+        goal: conversation.goal,
         timestamp: Date.now(),
       }).catch(() => {
         try {
@@ -459,6 +487,8 @@ export function AgentPanel() {
     conversation.pendingDiffs,
     // ★ M4-2-S5：归属变化（新建置当前工作区 / 改归属）也要重落 autosave 行，使其 workspace_path 跟手。
     conversation.workspacePath,
+    // ★ M4-6-S4：goal 变化（/goal 设/清）也要重落 autosave 行，使其 goal 跟手持久化。
+    conversation.goal,
   ]);
 
   // Restore from autosave on mount
@@ -482,6 +512,9 @@ export function AgentPanel() {
             // ★ M4-2-S5 恢复回填归属：从 autosave 快照回带工作区归属（S4 已让 autosave 行落库带 workspacePath；
             //   旧 autosave / legacy 无此字段则为 null=Global），使重启后延续正确归属。
             workspacePath: data?.workspacePath ?? null,
+            // ★ M4-6-S4 恢复回填目标：从 autosave 快照回带 goal（旧 autosave 无此字段则 undefined=未设），
+            //   使重启后延续目标注入。
+            goal: data?.goal || undefined,
           }));
           // M2-6：恢复对话时同步其 mode / reasoningEffort 到全局 agentSettings（旧 autosave 无此字段则回退默认）。
           dispatch(setMode(data?.mode === 'fast' ? 'fast' : 'planning'));
@@ -528,6 +561,8 @@ export function AgentPanel() {
     // ★ M2-6 切换竞态：置闸覆盖 save(可能 fork+clearAutosave) → clearConversation/重置 整段窗口，
     //   挡住旧对话迟到 autosave debounce 复活 AUTOSAVE_ID 草稿（与 ConversationList 两入口口径一致）。finally 复位。
     beginConversationSwitch();
+    // ★ M4-6-S5：新建对话前中断在跑的 /loop 循环，避免循环继续往新对话发指令（串台）。
+    loopRunner.stop();
     // ★ M2-5 worktree 止血：新建对话即回主工作区——清掉【离开的对话】+ AUTOSAVE_ID 的活动 worktree 条目，
     //   防新对话（共用 AUTOSAVE_ID contextId）继承上一条 autosave 对话的 worktree 重定向（串台）。
     {
@@ -555,6 +590,8 @@ export function AgentPanel() {
             // ★ M4-2-S5 首次保存落归属：把【切走对话】在 store 持有的工作区归属随对话落库（与
             //   ConversationList.saveCurrentToHistory 口径一致）——autosave→fork 成正式 id 那一刻把归属固化进 DB。
             workspacePath: cur.workspacePath,
+            // ★ M4-6-S4：新建对话时把【切走对话】的目标随对话落库，切回时能恢复 goal 继续注入。
+            goal: cur.goal,
             // ★ M4-2-S1（问题9 根治）：新建对话时对【切走对话】的系统性保存，不刷其 updated_at。
             //   改 systemTouch:true + 去掉硬传 timestamp:Date.now()，与 ConversationList.saveCurrentToHistory 口径一致，
             //   避免切走对话被刷成当前时间跳到列表第一。
@@ -598,6 +635,8 @@ export function AgentPanel() {
     setConvMenuOpen(false);
     if (id === (conversationRef.current.id as string | null)) return; // 已是当前对话，无需切换。
     beginConversationSwitch();
+    // ★ M4-6-S5：切换对话前中断在跑的 /loop 循环，避免循环继续往切走的对话发指令（串台）。
+    loopRunner.stop();
     {
       const leavingContextId = (conversationRef.current.id as string | null) || AUTOSAVE_ID;
       dispatch(exitWorktree({ contextId: leavingContextId }));
@@ -619,6 +658,8 @@ export function AgentPanel() {
             fileSnapshots: cur.fileSnapshots,
             pendingDiffs: cur.pendingDiffs,
             workspacePath: cur.workspacePath,
+            // ★ M4-6-S4：切走对话时把其目标随对话落库，切回时能恢复 goal 继续注入。
+            goal: cur.goal,
             systemTouch: true,
           });
           if (summary) {
@@ -643,6 +684,8 @@ export function AgentPanel() {
         pendingDiffs: snapshot.pendingDiffs,
         parentId: snapshot.parentId ?? null,
         branchedFromMessageId: snapshot.branchedFromMessageId ?? null,
+        // ★ M4-6-S4：切到目标对话时回填其 goal（snapshot 从 DB goal 列读回；未设则 undefined）。
+        goal: snapshot.goal || undefined,
         workspacePath: snapshot.workspacePath ?? null,
       }));
       dispatch(setMode(snapshot.mode === 'fast' ? 'fast' : 'planning'));
@@ -780,6 +823,239 @@ export function AgentPanel() {
     }
   }, [dispatch]);
 
+  // ============ M4-6 输入区命令层：浮层取数 / 触发更新 / 选中插入 ============
+
+  // 关闭浮层（统一收口，便于各处复用）。
+  const closeMenu = useCallback(() => {
+    setMenu(m => (m.open ? { ...m, open: false, items: [], activeIndex: 0 } : m));
+  }, []);
+
+  // 移除一条对话引用（同时把输入框里对应的「@对话:标题」可见 token 删除，保持 token 与引用表一致）。
+  const removeRef = useCallback((id: string, title: string) => {
+    setRefs(prev => prev.filter(r => r.id !== id));
+    // 删除输入框里第一处匹配的 token 文本（含尾随空格）。token 已被用户改坏则删不到，无副作用。
+    setInput(prev => {
+      const token = `@对话:${title}`;
+      const idx = prev.indexOf(token);
+      if (idx < 0) return prev;
+      const after = prev.slice(idx + token.length);
+      const trimmedAfter = after.startsWith(' ') ? after.slice(1) : after;
+      return prev.slice(0, idx) + trimmedAfter;
+    });
+  }, []);
+
+  // 按触发类型取候选：at → 合并三源；slash → 命令注册表过滤。
+  const computeMenuItems = useCallback((kind: TriggerKind, query: string): CompletionItem[] => {
+    return kind === 'at' ? getAtCompletions(query) : commandRegistry.filter(query);
+  }, []);
+
+  // onChange / 光标移动后：检测触发上下文并刷新浮层。IME composition 期间抑制（S5 边界，先接好）。
+  const refreshMenu = useCallback((text: string, caretPos: number) => {
+    if (isComposingRef.current) return; // 中文拼音未上屏，不弹菜单。
+    const detected = detectTrigger(text, caretPos);
+    if (!detected) { closeMenu(); return; }
+    const items = computeMenuItems(detected.kind, detected.query);
+    if (items.length === 0) { closeMenu(); return; }
+    setMenu({
+      open: true,
+      kind: detected.kind,
+      query: detected.query,
+      tokenStart: detected.tokenStart,
+      items,
+      activeIndex: 0,
+    });
+  }, [closeMenu, computeMenuItems]);
+
+  // 把输入框 [tokenStart, caret) 这段（即 @query / /query token）替换为 replacement，并把光标置于替换串之后。
+  const replaceTokenInInput = useCallback((tokenStart: number, replacement: string) => {
+    const el = inputRef.current;
+    const caret = el?.selectionStart ?? input.length;
+    const before = input.slice(0, tokenStart);
+    const after = input.slice(caret);
+    const next = before + replacement + after;
+    setInput(next);
+    // 置光标到替换串末尾（下一帧 DOM 已更新）。
+    const nextCaret = (before + replacement).length;
+    requestAnimationFrame(() => {
+      const node = inputRef.current;
+      if (node) {
+        node.focus();
+        node.setSelectionRange(nextCaret, nextCaret);
+      }
+    });
+  }, [input]);
+
+  // 选中候选：按 group 落三类插入语义。
+  const applyCompletion = useCallback((item: CompletionItem) => {
+    const meta = item.meta || {};
+    if (item.group === '对话') {
+      // @对话 = 插可见 token「@对话:标题」+ 记一条引用（发送时注入，S4 落地）。
+      const title = String(meta.title ?? item.label);
+      const id = String(meta.conversationId ?? '');
+      replaceTokenInInput(menu.tokenStart, `@对话:${title} `);
+      if (id) {
+        setRefs(prev => prev.some(r => r.id === id) ? prev : [...prev, { kind: 'conversation', id, title }]);
+      }
+    } else if (item.group === '工作流') {
+      // @工作流 = 糖衣：整段替换成 @MultiAI:模式名（复用既有链路），光标停模式名后让用户补任务。
+      const modeName = String(meta.modeName ?? item.label);
+      setInput(`@MultiAI:${modeName} `);
+      const caret = `@MultiAI:${modeName} `.length;
+      requestAnimationFrame(() => {
+        const node = inputRef.current;
+        if (node) { node.focus(); node.setSelectionRange(caret, caret); }
+      });
+    } else if (item.group === '设置') {
+      // @设置 = 纯跳转：openSettings + 发 focus-section 事件；删除输入框里的 @query 片段（不插 token）。
+      const sectionId = String(meta.sectionId ?? '');
+      replaceTokenInInput(menu.tokenStart, '');
+      dispatch(setActiveView('settings'));
+      dispatch(setSidebarVisible(true));
+      if (sectionId) {
+        // ★ M4-6-S5：SettingsPanel 此刻可能刚由 setActiveView 触发挂载（监听 useEffect 在 React commit 后才注册）。
+        //   用 rAF 把事件推迟到下一帧派发，让监听先就绪，首次打开也能定位到分区。SettingsPanel 未挂载时事件无监听者 → 天然 no-op。
+        requestAnimationFrame(() => {
+          window.dispatchEvent(new CustomEvent('synapse:settings-focus-section', { detail: sectionId }));
+        });
+      }
+    } else if (item.group === '命令') {
+      // / 命令 = 补全命令名（不执行；执行在 handleSend 经 parseAndDispatch）。保留参数提示让用户补参数。
+      const name = String(meta.name ?? item.label.replace(/^\//, ''));
+      replaceTokenInInput(menu.tokenStart, `/${name} `);
+    }
+    closeMenu();
+  }, [menu.tokenStart, replaceTokenInInput, dispatch, closeMenu]);
+
+  // ★ M4-6-S4 @对话引用注入组装：把本轮引用表 refs 的每条历史对话，按【record 摘要优先、无 record 回退最近 N 条原文】
+  //   组装成一段 <referenced_conversation> 注入文本（经 agentLoop.run 的 opts.injectedContext 透传，不污染可见流）。
+  //   - record 摘要：getRecordSkeleton(id)（token 友好的批次骨架概览）。
+  //   - 回退：loadConversationSnapshot(id) 取最近 REF_FALLBACK_RECENT 条非-tool 消息原文，每条截断到预算内。
+  //   - 总预算 REF_TOTAL_CHAR_BUDGET 字符硬上限（防引用大对话撑爆上下文，Plan_5 风险2）。
+  //   引用对话已不存在 / 读取失败 → 跳过该条（不阻塞发送）。返回空串表示无可注入内容。
+  const buildInjectedContext = useCallback(async (
+    references: { kind: 'conversation'; id: string; title: string }[],
+  ): Promise<string> => {
+    if (references.length === 0) return '';
+    const REF_FALLBACK_RECENT = 8;     // 无 record 时回退取最近 N 条原文
+    const REF_PER_MSG_CHARS = 600;     // 单条原文截断上限
+    const REF_PER_REF_BUDGET = 4000;   // 单条引用对话注入字符预算
+    const REF_TOTAL_CHAR_BUDGET = 12000; // 本轮所有引用合计字符硬上限
+
+    const blocks: string[] = [];
+    let used = 0;
+    for (const ref of references) {
+      if (used >= REF_TOTAL_CHAR_BUDGET) break;
+      let body = '';
+      try {
+        // ① record 摘要优先（token 友好）。
+        const skeleton = await getRecordSkeleton(ref.id).catch(() => '');
+        if (skeleton && skeleton.trim()) {
+          body = skeleton.trim().slice(0, REF_PER_REF_BUDGET);
+        } else {
+          // ② 无 record → 回退取最近 N 条原文（截断）。
+          const snapshot = await loadConversationSnapshot(ref.id).catch(() => null);
+          const msgs = (snapshot?.messages ?? []).filter((m: any) => m.role !== 'tool');
+          const recent = msgs.slice(-REF_FALLBACK_RECENT);
+          const lines = recent.map((m: any) => {
+            const role = m.role === 'user' ? '用户' : m.role === 'assistant' ? 'AI' : String(m.role);
+            const text = (typeof m.content === 'string' ? m.content : '').trim();
+            const clipped = text.length > REF_PER_MSG_CHARS ? `${text.slice(0, REF_PER_MSG_CHARS)}…` : text;
+            return clipped ? `[${role}] ${clipped}` : '';
+          }).filter(Boolean);
+          body = lines.join('\n').slice(0, REF_PER_REF_BUDGET);
+        }
+      } catch {
+        body = '';
+      }
+      if (!body) continue;
+      const remaining = REF_TOTAL_CHAR_BUDGET - used;
+      const clippedBody = body.length > remaining ? `${body.slice(0, remaining)}…` : body;
+      blocks.push(`# 引用对话：${ref.title}\n${clippedBody}`);
+      used += clippedBody.length;
+    }
+    return blocks.join('\n\n');
+  }, []);
+
+  // / 命令执行所需的 helpers（注入 commandExecutor）。命令体不直接 import store，经此拿能力。
+  const buildSlashHelpers = useCallback(() => ({
+    runAgent: (text: string) => {
+      agentLoopRef.current?.run(text).catch((err: any) => {
+        dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err?.message || '未知错误' }));
+      });
+    },
+    notify: (payload: { type: 'info' | 'success' | 'warning' | 'error'; title: string; message: string }) =>
+      dispatch(addNotification(payload)),
+    openSettings: (sectionId?: string) => {
+      dispatch(setActiveView('settings'));
+      dispatch(setSidebarVisible(true));
+      // ★ M4-6-S5：rAF 推迟事件到下一帧，让 SettingsPanel 监听先就绪（同 applyCompletion @设置分支口径）。
+      //   未挂载时事件无监听者 → 天然 no-op，安全。
+      if (sectionId) {
+        requestAnimationFrame(() => {
+          window.dispatchEvent(new CustomEvent('synapse:settings-focus-section', { detail: sectionId }));
+        });
+      }
+    },
+    clearConversation: () => { dispatch(clearConversation()); },
+    // ★ M4-6-S4 /goal：设/清当前对话目标（写 conversation.goal，随对话持久化 + 每轮注入 <current_goal>）。
+    setGoal: (text: string) => { dispatch(setGoal(text)); },
+    getGoal: () => (conversationRef.current.goal as string | undefined),
+    // ★ M4-6-S4 /compact 完整手动闭环（见 agentLoop.compactNow JSDoc 职责边界）：
+    //   compactNow 只生成 record 批次 + 落库 + 同步 autosave，【不】动 store.messages。手动入口须补一步：
+    //   (1) 截断 store.messages + 刷新注入前缀：dispatch(applyManualCompact) 把历史收敛为
+    //       「头部 1 条 system 压缩摘要消息(content=recordMd) + 最近 N 条」——摘要物化进消息，下一轮 run 作历史前缀发出。
+    //   ★ M4-6 审查修复（问题6）：曾有第 (2) 步 clampToBatch「对齐水位」——【已删除】。/compact 是头部压缩，record
+    //     水位由 compactNow 的 appendBatch 正确前进即可；clampToBatch 是尾部截断/编辑专用，在此会把刚写的批误删（详见下方）。
+    compactNow: async () => {
+      const loop = agentLoopRef.current;
+      if (!loop) {
+        dispatch(addNotification({ type: 'warning', title: '无法压缩', message: 'AI 未就绪' }));
+        return;
+      }
+      const KEEP_RECENT = 4; // 与 agentLoop.compactNow 内部 KEEP_RECENT 同口径
+      const convId = (conversationRef.current.id as string | null) || AUTOSAVE_ID;
+      // 可压段太短（消息数 <= keep）→ 无需压缩，直接提示。
+      const msgCount = (conversationRef.current.messages ?? []).filter((m: any) => m.role !== 'tool' && m.role !== 'system').length;
+      if (msgCount <= KEEP_RECENT) {
+        dispatch(addNotification({ type: 'info', title: '无需压缩', message: '当前对话历史较短，暂无可压缩内容' }));
+        return;
+      }
+      try {
+        // 1. 生成 record 批次 + 落库（compactNow 内部自算 compressedSegment = 全历史去最近 KEEP_RECENT 条）。
+        const recordMd = await loop.compactNow(convId);
+        if (!recordMd) {
+          dispatch(addNotification({ type: 'info', title: '手动压缩', message: '本次没有可压缩为摘要的历史（已是最新）' }));
+          return;
+        }
+        // 2. 截断 store.messages + 把摘要物化进 system 消息（刷新注入前缀）。
+        dispatch(applyManualCompact({ summaryPrefix: recordMd, keepRecent: KEEP_RECENT }));
+        // ★ M4-6 审查修复（问题6 根因）：手动 /compact 【不能】再调 clampToBatch。
+        //   clampToBatch 是为「尾部截断/编辑/回溯消息」设计的——keptSteps=保留的消息条数，record 覆盖区超过它说明
+        //   覆盖了被删消息要裁掉。但 /compact 是「头部压缩」：record 覆盖的恰是刚被压走、从 store 移除的前缀，而 store
+        //   可见区（keep 尾）的 step 编号在 record 覆盖区【之后】。此时 keptSteps（最近4条）必 < record.totalSteps
+        //   （累计压缩量），clampToBatch 会把刚 append 的新批判为「超界」当场删除（白跑一次 LLM 压缩 + record 失效，
+        //   即审查问题6 现象）。/compact 后 record 水位由 compactNow 的 appendBatch 正确前进，本就与 store「摘要前缀 +
+        //   keep 尾」一致，下一轮 run 的 record 注入天然对齐，无需任何 clamp。故此处删除 clampToBatch 调用。
+        dispatch(addNotification({ type: 'success', title: '已手动压缩', message: '历史已压缩为摘要（保留最近若干条原文）' }));
+      } catch (err: any) {
+        dispatch(addNotification({ type: 'error', title: '手动压缩失败', message: err?.message || '未知错误' }));
+      }
+    },
+    // ★ M4-6-S4 /loop：最小循环驱动器（串行重发 N 次同指令，硬上限，可 handleStop 中断）。
+    startLoop: (times: number, instruction: string) => {
+      loopRunner.start(times, instruction, {
+        runAgent: (text: string) => {
+          agentLoopRef.current?.run(text).catch((err: any) => {
+            dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err?.message || '未知错误' }));
+          });
+        },
+        // conversationRef 持有最新 conversation（每 render 同步），异步轮询读 .current 总拿最新流式态。
+        isStreaming: () => Boolean(conversationRef.current.isStreaming),
+        notify: (payload) => dispatch(addNotification(payload)),
+      });
+    },
+  }), [dispatch]);
+
   const handleSend = useCallback(() => {
     const text = input.trim();
     const readyAttachments = pendingAttachments.filter(att => att.status === 'ready');
@@ -812,6 +1088,23 @@ export function AgentPanel() {
       return;
     }
 
+    // ★ M4-6-S3/S5：斜杠命令分流——先 parseAndDispatch（命中即 handled，由命令体经 helpers 执行）。
+    //   ★ 主人决策「命令未知不误吞(走普通消息)」：未命中的 `/xxx`【不 return】，继续往下走普通发送链路
+    //     （把整条 /xxx 当普通消息发给模型，用户能看到自己发了什么），仅给一条轻提示告知。这与「吞掉/拦截」
+    //     相反——「不误吞」的精确语义是不把未知命令静默拦下，而是照常发出去。命令路径（handled）才不消费附件。
+    {
+      const dispatchResult = parseAndDispatch(text, buildSlashHelpers());
+      if (dispatchResult.handled) {
+        setInput('');
+        setMenu(m => ({ ...m, open: false, items: [], activeIndex: 0 }));
+        return;
+      }
+      if (dispatchResult.suggestion) {
+        // 未知命令：仅提示，不拦截——落入下方普通发送链路当作普通消息发出。
+        dispatch(addNotification({ type: 'info', title: '未知命令', message: `${dispatchResult.suggestion}，已作为普通消息发送` }));
+      }
+    }
+
     // ★ M3-2b：检测 @MultiAI:模式名 前缀 → 分流到固定工作流（不走普通 agentLoop.run）。
     //   parseMultiAITrigger 返回 null（非触发）时完全走下方原有发送链路，普通对话零改动。
     if (parseMultiAITrigger(text)) {
@@ -826,16 +1119,55 @@ export function AgentPanel() {
       }
       setPendingAttachments([]);
       setPreviewAttachment(null);
+      setRefs([]);
+      setMenu(m => ({ ...m, open: false, items: [], activeIndex: 0 }));
       void runWorkflowFromInput(text);
       return;
     }
 
+    // ★ M4-6-S5 引用一致性校验（以引用表为准，不盲信输入框文本）：发送前对每条引用核对输入框里
+    //   对应的可见 token「@对话:标题」是否仍存在。被用户手改/删坏的引用予以丢弃（不注入），保证
+    //   「引用表 ↔ token 文本」一致——只注入用户当前确实保留 token 的那些引用。
+    const validRefs = refs.filter(r => input.includes(`@对话:${r.title}`));
+    const droppedRefCount = refs.length - validRefs.length;
+
     setInput('');
     setPendingAttachments([]);
     setPreviewAttachment(null);
+    // ★ M4-6：发送后清空本轮引用表 + 关闭浮层（引用是本轮一次性的，发完即清，不跨轮残留）。
+    setRefs([]);
+    setMenu(m => ({ ...m, open: false, items: [], activeIndex: 0 }));
+    if (droppedRefCount > 0) {
+      dispatch(addNotification({
+        type: 'warning',
+        title: '部分引用已忽略',
+        message: `${droppedRefCount} 条对话引用的标记已被改动，本次未注入`,
+        duration: 3000,
+      }));
+    }
+
+    const contentParts = buildUserContentParts(text, readyAttachments);
+    const attachmentsForRun = readyAttachments.map(att => ({ ...att, status: 'sent' as const }));
+    // ★ M4-6-S4 @对话引用：有有效引用时先组装 injectedContext（record 摘要优先 / 回退最近 N 条），
+    //   经 opts.injectedContext → <referenced_conversation> 注入（不污染可见流）。无引用时走原同步路径。
+    if (validRefs.length > 0) {
+      void (async () => {
+        const injectedContext = await buildInjectedContext(validRefs).catch(() => '');
+        try {
+          await agentLoopRef.current!.run(text, {
+            contentParts,
+            attachments: attachmentsForRun,
+            injectedContext: injectedContext || undefined,
+          });
+        } catch (err: any) {
+          dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err?.message || '未知错误' }));
+        }
+      })();
+      return;
+    }
     agentLoopRef.current.run(text, {
-      contentParts: buildUserContentParts(text, readyAttachments),
-      attachments: readyAttachments.map(att => ({ ...att, status: 'sent' as const })),
+      contentParts,
+      attachments: attachmentsForRun,
     }).catch((err: any) => {
       dispatch(addNotification({
         type: 'error',
@@ -843,7 +1175,7 @@ export function AgentPanel() {
         message: err.message || '未知错误',
       }));
     });
-  }, [input, pendingAttachments, isStreaming, hasApiKey, hasModel, buildUserContentParts, runWorkflowFromInput, dispatch]);
+  }, [input, refs, pendingAttachments, isStreaming, hasApiKey, hasModel, buildUserContentParts, buildInjectedContext, runWorkflowFromInput, buildSlashHelpers, dispatch]);
 
   const handleStop = useCallback(() => {
     // ★ M3-2b 修复（high）：Stop 按钮要同时管「普通对话」与「@MultiAI 工作流」两条路。
@@ -857,6 +1189,9 @@ export function AgentPanel() {
     if (isWorkflowRunningRef.current) {
       agentOrchestrator.abortAll();
     }
+    // ★ M4-6-S5 /loop 中途 Stop：循环驱动器请求中断——置 aborted 后循环在下个检查点退出，
+    //   正在跑的那一轮由上面 agentLoopRef.current.stop() 中止。无运行循环时 stop() 内部 no-op，安全。
+    loopRunner.stop();
   }, []);
 
   // Plan_4 M2-1：编辑/重试/回溯会截断后续消息。把 record 水位线 clamp 到保留范围（替代此前的整条删）：
@@ -1139,11 +1474,41 @@ export function AgentPanel() {
   }, [dispatch]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // ★ M4-6 审查修复（medium 问题5，S5「IME 必过项」）：IME 中文输入法 composition 期间，keydown 必须整体放行。
+    //   复现：键入 @ 打开菜单 → 切中文输入法打拼音（composing 期间 onChange 被 isComposingRef 抑制、菜单保持旧候选）
+    //   → 按 Enter 确认拼音候选时 keydown 仍携 isComposing===true，会命中下方 Enter/Tab 分支被 preventDefault + 插入
+    //   一个 stale 候选，同时劫持输入法上屏。故 composing 期间（含 keyCode 229 兼容旧浏览器）直接 return，让上屏不被劫持。
+    if ((e.nativeEvent as any).isComposing || (e as any).keyCode === 229) return;
+    // ★ M4-6-S1：浮层 open 时优先处理导航键（ArrowUp/Down/Enter/Tab/Esc）。
+    //   Ctrl+Enter 始终走发送（即使浮层开着，用户想直接发就发），其余 Enter/Tab 在浮层 open 时选中候选。
+    if (menu.open && menu.items.length > 0 && !(e.key === 'Enter' && e.ctrlKey)) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMenu(m => ({ ...m, activeIndex: Math.min(m.activeIndex + 1, m.items.length - 1) }));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMenu(m => ({ ...m, activeIndex: Math.max(m.activeIndex - 1, 0) }));
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        const item = menu.items[menu.activeIndex];
+        if (item) applyCompletion(item);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeMenu();
+        return;
+      }
+    }
     if (e.key === 'Enter' && e.ctrlKey) {
       e.preventDefault();
       handleSend();
     }
-  }, [handleSend]);
+  }, [menu.open, menu.items, menu.activeIndex, applyCompletion, closeMenu, handleSend]);
 
   const hasMessages = messages.length > 0;
 
@@ -1705,6 +2070,15 @@ export function AgentPanel() {
         {activeAgentTab === 'context' && (
           <div className="agent-context-view">
             <h3 style={{ fontSize: 14, color: 'var(--syn-text-primary)', margin: '8px 12px' }}>📖 上下文信息</h3>
+            {/* ★ M4-6-S4：当前对话目标（/goal 设定）。设了则展示，让用户看到每轮注入给 AI 的目标；未设引导。 */}
+            <div className="context-section">
+              <div className="context-label">🎯 对话目标</div>
+              <div className="context-value">
+                {conversation.goal
+                  ? conversation.goal
+                  : <span style={{ color: 'var(--syn-text-muted)' }}>未设定（用 /goal &lt;目标&gt; 设定，每轮自动注入）</span>}
+              </div>
+            </div>
             <div className="context-section">
               <div className="context-label">模式</div>
               <div className="context-value">{mode === 'fast' ? '⚡ 快速模式' : '✨ 规划模式'}</div>
@@ -1772,6 +2146,24 @@ export function AgentPanel() {
             {mode === 'fast' ? '⚡ Fast' : '✨ Planning'}
           </button>
         </div>
+        {/* ★ M4-6-S2：本轮对话引用条（@对话 选中后记录的引用，与输入框可见 token 关联；× 同步删 token）。
+            发送时注入引用内容是 S4 的活，本阶段先呈现引用表并支持移除（token/引用一致性见 S5）。 */}
+        {refs.length > 0 && (
+          <div className="agent-ref-tray">
+            {refs.map(r => (
+              <span key={r.id} className="agent-ref-chip" title={`引用对话：${r.title}`}>
+                <MessageSquare size={11} />
+                <span className="agent-ref-chip-title">{r.title}</span>
+                <button
+                  className="agent-ref-chip-remove"
+                  onClick={() => removeRef(r.id, r.title)}
+                  aria-label="移除引用"
+                  title="移除引用"
+                >×</button>
+              </span>
+            ))}
+          </div>
+        )}
         {pendingAttachments.length > 0 && (
           <div className="attachment-tray">
             {pendingAttachments.map(att => (
@@ -1814,14 +2206,40 @@ export function AgentPanel() {
           </div>
         )}
         <div className="agent-input-container">
+          {/* ★ M4-6-S1：输入区内联补全浮层（@ 艾特 / 斜杠命令）。受控展示，键盘交互由 handleKeyDown 拦截。 */}
+          <InlineCompletionMenu
+            open={menu.open}
+            items={menu.items}
+            activeIndex={menu.activeIndex}
+            onSelect={applyCompletion}
+            onActiveIndexChange={(idx) => setMenu(m => ({ ...m, activeIndex: idx }))}
+          />
           <textarea
             ref={inputRef}
             className="agent-input"
-            placeholder={!hasApiKey ? "请先配置 API Key..." : !hasModel ? "请先选择模型..." : "输入消息... (Ctrl+Enter 发送；@MultiAI:模式名 触发工作流)"}
+            placeholder={!hasApiKey ? "请先配置 API Key..." : !hasModel ? "请先选择模型..." : "输入消息... (Ctrl+Enter 发送；@ 引用对话/工作流/设置，/ 命令)"}
             rows={1}
             value={input}
-            onChange={e => { setInput(e.target.value); autoResizeTextarea(e.target); }}
+            onChange={e => {
+              setInput(e.target.value);
+              autoResizeTextarea(e.target);
+              // ★ M4-6：实时触发检测刷新浮层（IME composing 期间 refreshMenu 内部已抑制）。
+              refreshMenu(e.target.value, e.target.selectionStart ?? e.target.value.length);
+            }}
             onKeyDown={handleKeyDown}
+            onCompositionStart={() => { isComposingRef.current = true; }}
+            onCompositionEnd={(e) => {
+              // 中文上屏：composition 结束后再做一次触发检测（拼音上屏后才是真实文本）。
+              isComposingRef.current = false;
+              const el = e.target as HTMLTextAreaElement;
+              refreshMenu(el.value, el.selectionStart ?? el.value.length);
+            }}
+            onBlur={() => { closeMenu(); }}
+            onClick={(e) => {
+              // 点击移动光标后重新检测（光标移出/移入 token 时同步浮层）。
+              const el = e.currentTarget;
+              refreshMenu(el.value, el.selectionStart ?? el.value.length);
+            }}
           />
           {isStreaming ? (
             <button className="agent-send-btn" onClick={handleStop} title="停止">

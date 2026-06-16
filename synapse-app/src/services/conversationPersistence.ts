@@ -74,6 +74,10 @@ export interface ConversationSnapshot {
   // M4-2-S3 工作区归属：以工作区 path 为稳定身份键（null=Global 无归属）。
   //   undefined 时 update 路径不覆盖既有归属（沿用 mode/reasoningEffort 的「undefined 不动」语义）。
   workspacePath?: string | null;
+  // ★ M4-6-S4 对话目标（/goal）：随对话落 DB goal 列（缺列降级跳过）。
+  //   undefined 时 update 路径不覆盖既有 goal（沿用 mode/workspacePath 的「undefined 不动」语义）；
+  //   显式空串 '' 表示清空目标。
+  goal?: string;
   // ★ M4-2-S1 systemTouch（控制位，不落库为数据列）：true 时本次保存不刷 updated_at。
   //   用于「切走对话的自动保存」——系统性保存不应改变用户感知的排序时间（治问题9）。
   systemTouch?: boolean;
@@ -170,6 +174,8 @@ export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Prom
     tags: snapshot.tags === undefined ? undefined : normalizeTags(snapshot.tags),
     // M4-2-S3/S4：autosave 行也带工作区归属，使刷新/重启从 autosave 恢复对话能拿回归属（S5 接线）。
     workspacePath: snapshot.workspacePath,
+    // ★ M4-6-S4：autosave 行也带对话目标，使刷新/重启从 autosave 恢复对话能拿回 goal 继续注入。
+    goal: snapshot.goal,
   };
 
   // M4-2-S1：autosave 也支持透传 systemTouch（默认 false——用户正在该对话活动，刷新排序时间合理）。
@@ -234,6 +240,8 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
     isSubAgent: snapshot.isSubAgent,
     // M4-2-S3/S4：工作区归属随对话落库（path 作键；undefined 时 update 不覆盖既有归属）。
     workspacePath: snapshot.workspacePath,
+    // ★ M4-6-S4：对话目标随对话落库（DB goal 列；undefined 时 update 不覆盖既有 goal，显式 '' 清空）。
+    goal: snapshot.goal,
   };
 
   // M2-R6：正式保存同样落库去 base64。
@@ -734,6 +742,9 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
       // M4-2-S4：工作区归属随快照回带（两端 workspacePath 驼峰 / workspace_path 下划线，旧对话为 null=Global）。
       //   S5 恢复链路据此把归属回填进 store conversation.workspacePath。
       workspacePath: conversation.workspacePath ?? conversation.workspace_path ?? null,
+      // ★ M4-6-S4：对话目标随快照回带（两端 goal 驼峰 / 下划线同名；旧对话/缺列为 null/'' → undefined=未设目标）。
+      //   恢复链路据此把 goal 回填进 store conversation.goal，使重启后继续每轮注入。
+      goal: (conversation.goal ?? '') || undefined,
     };
   } catch {
     return null;
@@ -762,6 +773,8 @@ async function persistPlatformSnapshot(
     isSubAgent?: boolean;
     // M4-2-S3 工作区归属（path 作稳定身份键；null=Global，undefined 时 update 路径不覆盖旧值）。
     workspacePath?: string | null;
+    // ★ M4-6-S4 对话目标（DB goal 列；undefined 时 update 路径不覆盖旧值，缺列降级跳过）。
+    goal?: string;
   },
   messages: Message[],
   // ★ M4-2-S1 systemTouch：true 时本次落库不刷 updated_at（仅 update 既有行 + replaceMessages 路径生效；

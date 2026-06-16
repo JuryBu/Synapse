@@ -185,6 +185,12 @@ class ExtensionManager {
     );
   }
 
+  /**
+   * @deprecated M4-6-S3 废弃。本方法无任何调用方（死代码），且 `/review` `//collect` 已迁入
+   *   输入区命令注册表（services/inputCommands/commandRegistry.ts，由该模块加载时从
+   *   getWorkflows() 注册为可真正执行的 SlashCommand，经 commandExecutor.parseAndDispatch 分发）。
+   *   输入框对斜杠命令的识别/执行统一走命令注册表，不再用此前缀匹配。保留签名仅为兼容性，勿新增调用。
+   */
   matchWorkflow(input: string): WorkflowDefinition | undefined {
     return this.workflows.find(w => input.startsWith(w.slashCommand));
   }
@@ -249,9 +255,13 @@ ${enabledSkills.map(s => `- ${s.name}: ${s.description}`).join('\n')}
     }
 
     // Workflows injection
+    // ★ M4-6-S3：this.workflows（BUILT_IN_WORKFLOWS）是【单一数据源】——输入区命令注册表
+    //   （commandRegistry）正是从 getWorkflows() 注册这些工作流为可执行斜杠命令，两者读同一份数据，
+    //   不存在「两处定义漂移」。故提示仍由此处从 this.workflows 生成，措辞标明这些斜杠命令现已可在
+    //   输入框直接键入触发（经命令注册表执行），不再是仅供模型阅读的展示型文字。
     if (injectWorkflows && this.workflows.length > 0) {
       parts.push(`<workflows>
-可用工作流（斜杠命令）:
+可用工作流斜杠命令（用户可在输入框开头键入触发，由命令注册表执行）:
 ${this.workflows.map(w => `- ${w.slashCommand}: ${w.description}`).join('\n')}
 </workflows>`);
     }

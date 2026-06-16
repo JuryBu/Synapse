@@ -180,6 +180,8 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
   const [thinkingOpen, setThinkingOpen] = useState(!thinking?.collapsed);
   // ★ M3-3a：工作流卡片消息默认折叠纯文本汇总（卡片是主视图，文本汇总作为可展开 fallback）。
   const [workflowSummaryOpen, setWorkflowSummaryOpen] = useState(false);
+  // ★ M4-6-S4 手动 /compact 压缩摘要点（role='system'）默认折叠——摘要可能较长，折叠态只显一行说明。
+  const [collapsed, setCollapsed] = useState(true);
   const [now, setNow] = useState(() => Date.now());
   const editRef = useRef<HTMLTextAreaElement>(null);
   const live = isStreaming || streamState === 'pending' || streamState === 'streaming';
@@ -291,6 +293,29 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
             <pre className="tool-result-content">{content}</pre>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  // ★ M4-6-S4 手动 /compact：压缩摘要点（role='system' 的 content 是 record 摘要前缀）。
+  //   渲染为紧凑可折叠卡片而非 AI 气泡——让用户清楚「此处历史已被手动压缩为摘要，AI 后续看摘要 + 最近对话」。
+  if (role === 'system') {
+    return (
+      <div className="message message-compact-summary">
+        <button
+          className="compact-summary-toggle"
+          onClick={() => setCollapsed(c => !c)}
+          title={collapsed ? '展开压缩摘要' : '折叠压缩摘要'}
+        >
+          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+          <ListChecks size={13} />
+          <span>历史已手动压缩为摘要（AI 后续看摘要 + 最近对话）</span>
+        </button>
+        {!collapsed && (
+          <div className="compact-summary-body glass-panel">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+          </div>
+        )}
       </div>
     );
   }

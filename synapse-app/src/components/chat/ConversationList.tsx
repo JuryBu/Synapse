@@ -210,6 +210,11 @@ export function ConversationList() {
         //   handleNewConversation 已置入 state.conversation.workspacePath，恢复/分支时已回填）。这是
         //   autosave→fork 成正式 id 那一刻把归属固化进 DB 的关键一环——否则 fork 出的新行 workspace_path 为 NULL。
         workspacePath: currentConversation.workspacePath,
+        // ★ M4-6 审查修复（medium/regression 问题4）：autosave→fork 那一刻把对话目标固化进新对话行（与 AgentPanel
+        //   等价保存路径 line ~594/~662 口径一致）。普通 update 路径靠「undefined 不动」尚能保住 DB 既有 goal，
+        //   但当前对话是 autosave 草稿（wasAutosave=true）且刚用 /goal 设了目标时，fork 出的新对话走 create/insert
+        //   路径若不传 goal 会落 NULL → goal 丢失。故显式随快照带上。
+        goal: currentConversation.goal,
         // ★ M4-2-S1（问题9 根治）：这是「切走对话的系统性自动保存」，不应改变其排序时间。
         //   改 systemTouch:true（落库不刷 updated_at）+ 去掉硬传 timestamp:Date.now()——
         //   否则切走对话被刷成当前时间，按时间降序时它跳第一、被点中的对话被挤到第二位。
@@ -288,6 +293,10 @@ export function ConversationList() {
         // ★ M4-2-S5 恢复回填归属：切到历史对话时把其 DB 归属回填进 store（旧对话/legacy 为 null=Global），
         //   使后续在该对话内的保存延续正确归属，且 S6/S7 UI 标记/范围过滤即时一致。
         workspacePath: snapshot.workspacePath ?? null,
+        // ★ M4-6 审查修复（high/regression 问题3）：切对话时随对话身份刷新 goal（与 AgentPanel 右栏切换器 line ~685
+        //   口径一致）。slice 用「'goal' in payload 才覆盖」语义，省略 goal 会让上一对话的 state.goal 残留并继续
+        //   注入进新对话每轮 <current_goal>（跨对话泄漏），且新对话自身持久化的 goal 也加载不回来。必须显式传。
+        goal: snapshot.goal || undefined,
       }));
       // M2-6：把该对话各自的 mode / reasoningEffort 同步进全局 agentSettings（agentLoop 仍读 agentSettings，
       //   口径不变）。已在 saveCurrentToHistory 把切换前对话的设置落库，故此处切走旧设置不丢。

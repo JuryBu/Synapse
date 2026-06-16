@@ -704,6 +704,22 @@ export function SettingsPanel() {
     });
   }, []);
 
+  // ★ M4-6-S2：@设置 跳转定位——监听 `synapse:settings-focus-section`，按 sectionId 切到对应分区 tab。
+  //   sectionId 来自 atSources/settingsIndex（已与本组件 tabs[].id 对齐：general/ai/conversation/...）。
+  //   未知 sectionId 安全忽略（no-op），未挂载时本 effect 不存在天然不触发（事件无监听者 → no-op）。
+  useEffect(() => {
+    const onFocusSection = (event: Event) => {
+      const sectionId = (event as CustomEvent<string | undefined>).detail;
+      if (!sectionId) return;
+      if (tabs.some(t => t.id === sectionId)) {
+        setActiveTab(sectionId);
+      }
+    };
+    window.addEventListener('synapse:settings-focus-section', onFocusSection);
+    return () => window.removeEventListener('synapse:settings-focus-section', onFocusSection);
+    // tabs 是组件内每次渲染重建的常量数组，但内容稳定；依赖留空只在挂载/卸载时绑定监听。
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div className="settings-panel">
       <div className="settings-tabs-shell">

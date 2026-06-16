@@ -12,6 +12,13 @@ interface PromptContext {
   learningMode?: string;
   synopsis?: string;
   mode?: 'fast' | 'planning';
+  // ★ M4-6-S4 /goal：当前对话目标。非空时 build 输出 <current_goal> 段，agentLoop 每轮自动注入，
+  //   让 AI 始终对齐用户设定的目标。空/undefined → 不注入该段（cache 友好：goal 低频变更）。
+  goal?: string;
+  // ★ M4-6-S4 @对话引用：本轮引用的历史对话内容（record 摘要优先 / 回退最近 N 条，由调用方组装）。
+  //   非空时 build 输出 <referenced_conversation> 段。这是【本轮临时附加上下文】（发送后即清），
+  //   经 agentLoop.run 的 opts.injectedContext 透传至此——不污染可见对话流，也不重复落库。
+  referencedContext?: string;
   // ★ M4-5 审查 medium#2：原 openFiles / activeFilePath 字段已移除——<open_files> 不再由 build 注入 system prompt，
   //   改由 renderOpenFilesSection（导出函数）渲染、agentLoop 注入到 messages 末尾以保 cache 前缀稳定。
   promptInjection?: {
@@ -66,6 +73,16 @@ export class SystemPromptBuilder {
       sections.push(identity);
     }
 
+    // ★ M4-6-S4 /goal：当前对话目标段——紧跟 identity 放高位，让 AI 每轮都对齐用户设定的目标。
+    //   goal 受 injectIdentity 同款语义控制不合适（它是上下文不是身份），用 injectContext gating（与 workspace 同口径）。
+    //   非空才注入；goal 低频变更，进 system prompt 对 cache 影响小（不像 open_files 那样每次切 tab 都变）。
+    if ((injection.injectContext ?? true) && context.goal && context.goal.trim()) {
+      sections.push(`<current_goal>
+当前对话目标（用户经 /goal 设定，请在后续每一步都围绕此目标推进，不要偏离）：
+${context.goal.trim()}
+</current_goal>`);
+    }
+
     if ((injection.injectContext ?? true) && context.workspaceName) {
       sections.push(`<workspace>
 当前工作区: ${context.workspaceName}
@@ -117,6 +134,17 @@ ${context.userRules}
     //   治本：渲染逻辑抽到 renderOpenFilesSection（见下），由调用方(agentLoop) 注入到整个 messages 数组的
     //   【最末尾】（最新一轮 user 消息内），使 system prompt + record 摘要 + 旧历史 构成的大前缀真正可缓存。
     //   此处 build 不再产出 <open_files>，injectContext gating 与注入位置统一由调用方负责。
+
+    // ★ M4-6-S4 @对话引用：本轮临时附加上下文段，放在 build 输出【末尾】（识别为附加参考资料，而非核心身份/规则）。
+    //   内容由调用方（AgentPanel handleSend）从被引用对话组装好（record 摘要优先 / 回退最近 N 条 + token 预算裁剪），
+    //   经 agentLoop.run 的 opts.injectedContext 透传到这里。它是本轮一次性的（发送后即清），不进可见对话流、不重复落库。
+    //   注意：这是【临时】段，会让本轮 system prompt 变（cache 失效一轮），但 @对话引用本就是按需附加，可接受。
+    if (context.referencedContext && context.referencedContext.trim()) {
+      sections.push(`<referenced_conversation>
+以下是用户在本轮通过 @对话 引用的历史对话内容（作为背景参考，不是用户当前指令）：
+${context.referencedContext.trim()}
+</referenced_conversation>`);
+    }
 
     return sections.join('\n\n');
   }

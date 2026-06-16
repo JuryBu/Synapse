@@ -110,3 +110,42 @@
   border-radius: 4px; font-family: monospace;
 }
 .cmd-empty { padding: 16px; text-align: center; color: var(--syn-text-muted); font-size: 13px; }
+
+/* ========== 输入区内联补全浮层（M4-6-S1） ========== */
+/* 复用 .cmd-item / .cmd-list 视觉，定位为输入框上方的相对浮层（非全屏 overlay）。 */
+.inline-completion-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 50;
+  max-height: 280px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--syn-bg-secondary);
+  border: 1px solid var(--syn-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+}
+
+.inline-completion-menu .cmd-list {
+  max-height: 280px;
+  padding: 4px;
+}
+
+.inline-completion-group {
+  padding: 6px 12px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--syn-text-muted);
+  letter-spacing: 0.02em;
+}
+
+.inline-completion-desc {
+  flex: 0 1 auto;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

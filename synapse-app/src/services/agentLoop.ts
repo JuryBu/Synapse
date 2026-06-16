@@ -424,7 +424,17 @@ export class AgentLoop {
     this.compressControllers.clear();
   }
 
-  async run(userMessage: string, opts?: { skipUserMessage?: boolean; contentParts?: MessageContentPart[]; attachments?: AttachmentRef[] }): Promise<void> {
+  async run(userMessage: string, opts?: {
+    skipUserMessage?: boolean;
+    contentParts?: MessageContentPart[];
+    attachments?: AttachmentRef[];
+    /**
+     * ★ M4-6-S4 @对话引用：本轮一次性注入的附加上下文（被引用历史对话的 record 摘要 / 最近 N 条原文，
+     *   由 AgentPanel handleSend 组装）。经 promptBuilder.build 的 context.referencedContext 渲染成
+     *   <referenced_conversation> 系统段——不进可见对话流、不重复落库。仅本轮生效（下轮无引用则自然消失）。
+     */
+    injectedContext?: string;
+  }): Promise<void> {
     // ★ R5 修复（重入闸，问题1/2 核心防线）：run() 已在跑时拒绝二次进入。
     // 背景：压缩窗口期（可达 60s 的 generateBatch）原先 isStreaming 仍为 false——它要进 while 循环才首次
     // dispatch(setStreaming(true))，而压缩分支在它之前。UI 的 handleSend/autosave 都以 isStreaming 为闸门，
@@ -509,6 +519,13 @@ export class AgentLoop {
       workspaceName: workspaceName || undefined,
       mode: currentMode,
       promptInjection,
+      // ★ M4-6-S4 /goal：每轮读 conversation.goal 注入 <current_goal>，使设目标后 AI 每轮自动对齐。
+      //   goal 为空/未设时 build 跳过该段（无副作用）。
+      goal: (rootState as any).conversation?.goal || undefined,
+      // ★ M4-6-S4 @对话引用：本轮一次性附加上下文 → <referenced_conversation> 段（不污染可见流）。
+      //   含在 systemPrompt 内 → systemTokens 估算天然计入它（设计风险2：引用须计入 token 判定），
+      //   引用过大时与压缩阈值正常联动，不会绕过判定。
+      referencedContext: opts?.injectedContext || undefined,
     });
 
     // ★ M4-5 审查 medium#2：<open_files> 不再进 system prompt(apiMessages[0])，改注入 messages【最末尾】。
@@ -1163,13 +1180,20 @@ export class AgentLoop {
   ): Promise<string | null> {
     if (!conversationId) return null;
 
-    // 被压缩段：自动路径由 run 传入；手动 /compact 缺省时从 store 当前对话历史自算（与自动同口径）。
+    // 被压缩段：自动路径由 run 传入（从 store 头部累计的【全量】被压段）；
+    //   手动 /compact 缺省时从 store 当前对话历史自算（store 已被上次手动压缩截断，只剩【本次新增】被压段）。
+    //   这两种语义不同，下方 batchSlice 计算必须分别处理（见 isManualEntry）。
     let compressedSegment = opts?.compressedSegment;
+    const isManualEntry = !compressedSegment; // 缺省 compressedSegment == 手动 /compact 入口（run 自动路径总会传入）。
     if (!compressedSegment) {
       // 手动入口：保留最近 KEEP_RECENT 条原文（与 compressContext 的 keepCount=4 同口径），其余压成 record。
       const KEEP_RECENT = 4;
+      // ★ M4-6 审查修复（high/correctness 问题1+6 同根因）：排除 role==='system' 的「压缩摘要」消息。
+      //   applyManualCompact 会把上一次压缩的 record 摘要物化成头部一条 system 消息插入 store.messages。
+      //   若这里只 filter tool，第二次 /compact 会把该 system 摘要计入 compressedSegment → record 的 stepEnd
+      //   多算 1（system 占 step index 0）→ 水位错位。统一全程排除 system 后，step 口径与首次建立 / clampToBatch 一致。
       const liveMessages = (store.getState() as RootState).conversation.messages
-        .filter((m: any) => m.role !== 'tool') // tool 结果由 agentLoop 内部管理，store 历史里本就不含
+        .filter((m: any) => m.role !== 'tool' && m.role !== 'system') // tool 由 agentLoop 内部管理；system=压缩摘要，不计入 step 口径
         .map(toChatMessage);
       const keepStartIdx = Math.max(0, liveMessages.length - KEEP_RECENT);
       compressedSegment = liveMessages.slice(0, keepStartIdx);
@@ -1189,12 +1213,21 @@ export class AgentLoop {
     try {
       const existingRecord = await getRecord(conversationId);
 
-      // ★ step 口径对齐 record（全程不含 tool）：把被压缩段过滤掉 tool 后，
-      //   才是 record 应覆盖到的「不含 tool」消息序列；本批 = 该序列里超出末批 stepEnd 的尾部。
-      const coveredEligible = compressedSegment.filter(m => m.role !== 'tool');
-      const priorSteps = existingRecord?.totalSteps ?? 0;       // = 末批 stepEnd（不含 tool）
+      // ★ step 口径对齐 record（全程不含 tool，且不含 system 压缩摘要）。
+      //   ★ M4-6 审查修复（问题1+6 根因，比审查建议更彻底）：排除 role==='system'，并区分手动/自动入口算 batchSlice。
+      //   背景：record 增量水位 priorSteps（末批 stepEnd）以「对话 step0 累计」为绝对基准；自动路径 compressedSegment
+      //   是从 store 头部累计的【全量】被压段（自动压缩不截断 store），故 batchSlice = coveredEligible.slice(priorSteps)
+      //   正确切出「上次已覆盖之后的新增段」。但手动 /compact 不同：applyManualCompact 上次已把 store 头部截断、被压段
+      //   原文从 store 移除，故手动入口算出的 compressedSegment 本身就【只剩本次新增段】（不含已 append 的历史步）。
+      //   若对它再 slice(priorSteps) 等于二次增量——把本批前 priorSteps 条又减掉 → 连续 /compact 会漏切中间历史
+      //   （u3/a3/u4/a4 既不进 record 又被截断永久丢失，正是审查问题1 现象的真根因；仅改 filter 不足以修复）。
+      //   故手动入口 batchSlice = coveredEligible 整段（它已是本批增量），stepStart 仍锚定 priorSteps 续接末批。
+      const coveredEligible = compressedSegment.filter(m => m.role !== 'tool' && m.role !== 'system');
+      const priorSteps = existingRecord?.totalSteps ?? 0;       // = 末批 stepEnd（不含 tool/system）
       const priorRounds = existingRecord?.totalRounds ?? 0;     // = 末批 roundEnd
-      const batchSlice = coveredEligible.slice(priorSteps);     // 本批切片（不含 tool，与上一批不重叠）
+      const batchSlice = isManualEntry
+        ? coveredEligible                       // 手动：store 已截断 → coveredEligible 即本批增量段，不再二次 slice
+        : coveredEligible.slice(priorSteps);    // 自动：从 store 头部累计的全量段 → 切掉已覆盖前缀得本批
 
       // ★ M4-5-S2：压缩注入改用确定性稳定前缀（不随 contextWindow 动态升降级），杜绝 apiMessages[1] 前缀漂移。
       recordMd = existingRecord ? buildStableRecordPrefix(existingRecord) : null;

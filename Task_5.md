@@ -95,13 +95,14 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - 目标：@（工作流/设置/对话）+ /（loop/compact/goal）命令体系。
 - 依据：`Plan_5_M4-6_输入区命令.md`
 - 执行清单：
-  - [ ] **S1**(M) 触发检测 `triggerDetect.ts`(纯函数+边界) + 内联浮层 `InlineCompletionMenu.tsx` + AgentPanel 接 onChange/onKeyDown（假数据）；@句中/行首/触发，email/路径不误触
-  - [ ] **S2**(M) @ 三类数据源：`atSources.ts`(合并对话/工作流/设置+分组+模糊+每组≤8) + `settingsIndex.ts`；@对话=插 token+记引用、@工作流=替换 @MultiAI 糖衣、@设置=openSettings+focus-section 事件
-  - [ ] **S3**(M) / 命令注册表 `commandRegistry.ts` + `commandExecutor.ts`(parseAndDispatch)；BUILT_IN_WORKFLOWS(/review //collect) 适配为 SlashCommand；handleSend 先 parseAndDispatch 再走既有分流
-  - [ ] **S4**(L) 内置命令 /goal /compact /loop：conversation slice 加 goal+持久化 + `<current_goal>`/`<referenced_conversation>` 段；/goal 设查；/compact 接 M4-7 `compactNow` 钩子（**与自动压缩并存不改自动逻辑**）；/loop 最小 loopRunner(串行 N 次+硬上限)；@对话引用默认 record 摘要优先
-  - [ ] **S5**(M) 对抗自检 + 边界加固：IME composition 抑制、Ctrl+Enter 与浮层优先级、引用表以表为准、命令解析鲁棒、/loop Stop 可中断；真机走三类@ + 三条/
-- 验收：@/弹内联菜单可选；三类@可用；/review //collect 真执行；/goal 持久化注入；/loop 跑完 N 轮可中断；/compact 触发手动压缩（自动压缩照常）。
-- 证据/产物：
+  - [x] **S1**(M) 触发检测 `inputCommands/triggerDetect.ts`(纯函数+12 边界 case) + 内联浮层 `InlineCompletionMenu.tsx` + AgentPanel 接 onChange/onKeyDown/composition；@句中/仅行首//email/路径/scoped 包不误触/IME 抑制
+  - [x] **S2**(M) @ 三类数据源：`atSources.ts`(对话/工作流/设置+分组+模糊+每组≤8) + `settingsIndex.ts`(sectionId 对齐 tab)；@对话=插 token+记 refs、@工作流=糖衣 @MultiAI、@设置=跳转发 synapse:settings-focus-section 事件(SettingsPanel 监听切 tab)
+  - [x] **S3**(M) / 命令注册表 `commandRegistry.ts` + `commandExecutor.ts`(parseAndDispatch，未知命令不误吞)；BUILT_IN_WORKFLOWS(/review //collect) 适配真执行；matchWorkflow 标 deprecated；handleSend 先命令分流
+  - [x] **S4**(L) 内置命令 /goal /compact /loop(+/clear)：conversation slice goal+setGoal+applyManualCompact 完整 DB 持久化链路；promptBuilder `<current_goal>`/`<referenced_conversation>` 段；/compact 完整手动闭环(compactNow 生成 record+落库 → applyManualCompact 截断+物化摘要消息+刷新前缀，**与自动压缩并存**)；/loop loopRunner(串行+硬上限 20+可中断)；@对话引用 record 摘要优先/回退最近 N 条
+  - [x] **S5**(M) 边界加固：引号参数鲁棒、引用表为准、@设置 rAF 延迟派发、/loop 切换/新建调 stop()、未知命令走普通消息、IME/Ctrl+Enter 守卫
+- 验收：✅ 5 stage 实现，build+electron:build 双过；✅ 3 路对抗审查→5 项(含 2 high)已修(连续 /compact 丢历史+record 误删→isManualEntry 分支隔离+删误用 clampToBatch；goal 跨对话泄漏→切换补 goal；/loop 次数解析；IME 守卫)；🔸 三类@/三条/真机留主人验。
+- ⚠️ stillOpen(已 spawn task_e5135885 建议真机回归)：手动 /compact 后再触发自动压缩，priorSteps 绝对基准 vs store 已截断的水位错位可能未根治(彻底修需重构 record 增量水位×手动截断，动自动压缩/崩溃恢复/编辑截断三链路，架构级高风险，编译约束下未贸然做)；连续两次 /compact 端到端真机未跑。
+- 证据/产物：commit `feat(M4-6)`；新建 inputCommands/(triggerDetect/types/atSources/settingsIndex/commandRegistry/commandExecutor/loopRunner) + InlineCompletionMenu；改 AgentPanel/agentLoop/systemPrompt/conversation slice/persistence/MessageBubble/SettingsPanel/ConversationList + electron(database/conversation) + css。
 
 ---
 
@@ -151,3 +152,6 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - [ ] (M4-1 low) 护栏 `historyOnlyTokens` 仅含历史文本 token、不含历史非文本(图片)token——块一治本后概率极低，Plan 措辞本就如此，记为口径取舍
 - [ ] (M4-1 low) StatusBar 两态：切到另一已存在对话若未重置 `tokenUsage` 可能短暂显示上一对话 promptTokens（clearConversation 已置 null，仅切换路径）；后续可在 loadConversation 确认重置
 - [ ] (M4-8 真机) retry/重连/计时需主人侧用真实异常/超时端点触发验证：reconnect i/5 计数、本轮端到端计时实时刷新、重试耗尽错误文案
+- [ ] (M4-6 残留·关注) 手动 /compact 后再触发自动压缩的 record 水位错位：priorSteps 绝对基准 vs store 已截断的根本错位未根治（本次仅缓解 system 占 step 一层）；连续两次 /compact 端到端真机未跑（task_e5135885）；彻底修需重构 record 增量水位×手动截断（动自动压缩/崩溃恢复/编辑截断三条已验证链路，架构级高风险）
+- [ ] (M4-6 小) ConversationList 左侧栏切换路径未带 goal，从左栏切换可能丢 goal（autosave 重启兜底恢复），如需可后续补
+- [ ] (M3 遗留) Plan_4 worktree 打磨项 #53-59（byContext map 重构等）仍 pending，与 Plan_5 无冲突，按需推进

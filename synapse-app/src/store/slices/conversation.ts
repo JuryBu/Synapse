@@ -192,6 +192,10 @@ interface ConversationState {
   // M4-2-S4 当前对话工作区归属：以工作区 path 为稳定身份键（null = Global 无归属）。
   //   新建对话默认归当前工作区（S5 接线），恢复/分支回填，UI 改归属经 setConversationWorkspace。
   workspacePath: string | null;
+  // ★ M4-6-S4 对话目标（/goal 设定）：随对话持久化（DB goal 列 + autosave）。
+  //   设目标后每轮 agentLoop.run 读取并经 promptBuilder.build 注入 <current_goal> 段（每轮自动注入）。
+  //   空串/undefined 视为未设目标（build 不注入该段）。clearConversation 清空、setConversation 换身份时回填。
+  goal?: string;
 }
 
 const CONVERSATION_SCHEMA_VERSION = 1;
@@ -307,6 +311,7 @@ const initialState: ConversationState = {
   parentId: null,
   branchedFromMessageId: null,
   workspacePath: null,
+  goal: undefined,
 };
 
 export const conversationSlice = createSlice({
@@ -329,6 +334,9 @@ export const conversationSlice = createSlice({
       // M4-2-S4：工作区归属可选回填，沿用「undefined 不覆盖」语义——懒迁移回写等不带该字段的 setConversation
       //   不会把已有归属清成 null。切换/加载/恢复这类「换对话身份」的入口须显式传（含 null=Global）以正确刷新。
       workspacePath?: string | null;
+      // ★ M4-6-S4：对话目标可选回填，沿用「'goal' in payload 才覆盖」语义——懒迁移回写等不带该字段的
+      //   setConversation 不会把已设目标清掉。切换/加载/恢复这类「换对话身份」的入口须显式传（含 undefined）以正确刷新。
+      goal?: string;
     }>) {
       state.schemaVersion = CONVERSATION_SCHEMA_VERSION;
       state.id = action.payload.id;
@@ -343,10 +351,45 @@ export const conversationSlice = createSlice({
         state.branchedFromMessageId = action.payload.branchedFromMessageId ?? null;
       }
       if ('workspacePath' in action.payload) state.workspacePath = action.payload.workspacePath ?? null;
+      // ★ M4-6-S4：换对话身份时回填 goal（'goal' in payload 才覆盖，含显式 undefined→清空；不带则不动）。
+      if ('goal' in action.payload) state.goal = action.payload.goal || undefined;
     },
     // M4-2-S4：手动改当前对话工作区归属（S6/S7「移动到…」用）。null = 改归 Global。
     setConversationWorkspace(state, action: PayloadAction<string | null>) {
       state.workspacePath = action.payload ?? null;
+    },
+    // ★ M4-6-S4：设定 / 清空当前对话目标（/goal 命令用）。空串/undefined → 清空（视为未设目标）。
+    //   随对话持久化（autosave effect 依赖 conversation.goal 重落库；DB goal 列；切换/恢复回填）。
+    setGoal(state, action: PayloadAction<string | undefined>) {
+      const next = (action.payload ?? '').trim();
+      state.goal = next || undefined;
+    },
+    /**
+     * ★ M4-6-S4 手动 /compact 闭环第 (1) 步「截断 store.messages + 刷新注入前缀」（见 agentLoop.compactNow JSDoc 职责边界）。
+     *   compactNow 只生成 record 批次 + 落库 + 同步 autosave，【不】动 store.messages；本 reducer 由 /compact thunk
+     *   在 compactNow 之后调用，把对话历史真正收敛为：
+     *     头部 1 条 system「压缩摘要」消息（content = recordMd，承载被压段的 record 摘要，下一轮 run 作历史前缀发出 →
+     *     即「刷新注入前缀」）  +  最近 keepRecent 条原文。
+     *   这样被压段从可见对话流移除、后续组装只剩 keep 尾部；摘要已物化进 system 消息。
+     *   ★ M4-6 审查修复（问题6）：thunk 在本 reducer 之后【不再】调 clampToBatch——/compact 是「头部压缩」，
+     *   record 水位由 compactNow 的 appendBatch 正确前进即可；clampToBatch 是「尾部截断/编辑」专用，在此会把刚写的
+     *   record 批误删（keptSteps=最近几条 < record.totalSteps 累计量 → 误判超界）。详见 AgentPanel compactNow helper。
+     *   summaryPrefix 为空（无 record 可压）时为 no-op，避免插入空摘要。
+     */
+    applyManualCompact(state, action: PayloadAction<{ summaryPrefix: string; keepRecent: number }>) {
+      const summary = (action.payload.summaryPrefix ?? '').trim();
+      if (!summary) return; // 无可压缩内容 → 不动。
+      const keep = Math.max(0, action.payload.keepRecent);
+      // 仅在确有可压段（消息数 > keep）时压缩；否则历史本就很短，无需动。
+      if (state.messages.length <= keep) return;
+      const tail = keep > 0 ? state.messages.slice(state.messages.length - keep) : [];
+      const summaryMessage: Message = normalizeMessage({
+        id: `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        role: 'system',
+        content: summary,
+        timestamp: Date.now(),
+      });
+      state.messages = [summaryMessage, ...tail];
     },
     addMessage(state, action: PayloadAction<Message>) {
       state.messages.push(normalizeMessage(action.payload));
@@ -578,6 +621,8 @@ export const conversationSlice = createSlice({
       //   这三条 clear 后无 setConversationWorkspace 的路径，借此正确回到 Global 空态——否则 store 残留被删对话的
       //   归属，导致 S7 切换器顶部仍显旧工作区徽标、且空态下发首条消息会让新对话错误继承被删对话的归属。
       state.workspacePath = null;
+      // ★ M4-6-S4：新对话无目标——清空 goal，避免新对话误继承上条对话的 goal 注入系统提示。
+      state.goal = undefined;
     },
     setTitle(state, action: PayloadAction<string>) {
       state.title = action.payload;
@@ -610,7 +655,7 @@ export const conversationSlice = createSlice({
 });
 
 export const {
-  setConversation, setConversationWorkspace, addMessage, updateMessage,
+  setConversation, setConversationWorkspace, setGoal, applyManualCompact, addMessage, updateMessage,
   updateMessageMeta, appendMessageContent, setMessageAttachments,
   appendMessageThinking, setMessageStreamState, setMessageReconnect,
   addMessageDiff, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,

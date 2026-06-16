@@ -327,6 +327,8 @@ function getWebMock(): SynapseAPI {
             isSubAgent: Boolean(data.isSubAgent),
             // M4-2-S3 工作区归属（Web 对等）：path 作键，无归属为 null（Global）。
             workspacePath: data.workspacePath ?? null,
+            // ★ M4-6-S4 对话目标（Web 对等）：空串/缺省 → null（未设目标）。
+            goal: data.goal && String(data.goal).trim() ? String(data.goal).trim() : null,
           });
           writeWebConversationSummaries(summaries);
         }
@@ -364,6 +366,10 @@ function getWebMock(): SynapseAPI {
             isSubAgent: patch.isSubAgent === undefined
               ? Boolean(summaries[idx].isSubAgent)
               : Boolean(patch.isSubAgent),
+            // ★ M4-6-S4：对话目标（Web 对等）。undefined 不覆盖；显式传才改（空串→null=清空目标）。
+            goal: patch.goal === undefined
+              ? ((summaries[idx] as any).goal ?? null)
+              : (String(patch.goal).trim() ? String(patch.goal).trim() : null),
             // systemTouch 时保留旧 updatedAt（排序时间不变）；否则刷新为当前时间（用户主动保存正常置顶）。
             updatedAt: systemTouch ? (summaries[idx].updatedAt ?? Date.now()) : Date.now(),
           };
