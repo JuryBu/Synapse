@@ -47,6 +47,8 @@ function mapConversation(row: any) {
         // M2-6 对话级元数据：mode 由 `...row` 自带（列名同 key）；reasoning_effort 列名带下划线需显式映射。
         // 旧行（建列前）为 null，上层 loadPlatformSnapshot 回退默认。
         reasoningEffort: row.reasoning_effort ?? null,
+        // M3-1a 真子代理：子代理对话标记。列名带下划线需显式映射为布尔。旧行/普通对话为 0/null → false。
+        isSubAgent: Boolean(row.is_subagent),
     };
 }
 
@@ -113,6 +115,12 @@ export function registerConversationHandlers(): void {
     // 缓存列存在性（PRAGMA 不必每次写都跑）。注册期仅一次；ensureColumn 已尽力补齐，故通常为 true。
     const hasReasoningEffortColumn = hasColumn(db, 'conversations', 'reasoning_effort');
 
+    // ★ M3-1a is_subagent 列同样防御性自愈 + 缺列降级（与 reasoning_effort 同口径）：
+    //   该列是 ensureColumn 后加的，旧库/迁移异常时可能缺失。补不上则写入路径按 hasIsSubAgentColumn 降级
+    //   （跳过该字段，至少不拖垮整条子对话保存）。带 DEFAULT 0，旧行/普通对话天然为非子代理。
+    try { ensureColumn(db, 'conversations', 'is_subagent', 'INTEGER NOT NULL DEFAULT 0'); } catch { /* 自愈失败则靠下方降级兜底 */ }
+    const hasIsSubAgentColumn = hasColumn(db, 'conversations', 'is_subagent');
+
     // 创建对话
     ipcMain.handle('conversation:create', (_e, data: {
         id: string; title?: string; model?: string; mode?: string; reasoningEffort?: string; workspaceId?: string;
@@ -121,6 +129,8 @@ export function registerConversationHandlers(): void {
         archived?: boolean; tags?: string[];
         // M2-3 对话分支：fork 时写入溯源；普通新建为 undefined → 落 NULL。
         parentId?: string | null; branchedFromMessageId?: string | null;
+        // M3-1a 真子代理：子代理对话 create 时带 true；普通对话 undefined → 落默认 0。
+        isSubAgent?: boolean;
     }) => {
         // ★ 缺列降级：reasoning_effort 列缺失时，动态拼一条【不含该列】的 INSERT，
         //   保住 mode/messages 正常落库（不再因一个缺列整条失败）。列存在则带上（正常路径）。
@@ -153,6 +163,11 @@ export function registerConversationHandlers(): void {
             cols.push('reasoning_effort');
             // M2-6 对话级思考层级：缺省/空串落默认 'auto'（与 agentSettings 初值一致；空串也回退避免下拉落空）。
             vals.push(data.reasoningEffort || 'auto');
+        }
+        if (hasIsSubAgentColumn) {
+            // M3-1a：子代理对话写 1，普通对话写 0（列顺序与 vals 顺序对应，追加到尾部并补对应值）。
+            cols.push('is_subagent');
+            vals.push(data.isSubAgent ? 1 : 0);
         }
         const placeholders = cols.map(() => '?').join(', ');
         db.prepare(
@@ -187,6 +202,8 @@ export function registerConversationHandlers(): void {
         archived?: boolean; tags?: string[];
         // M2-3：分支溯源一般在 create 时写定；update 仅在显式回填时生效（undefined 不动）。
         parentId?: string | null; branchedFromMessageId?: string | null;
+        // M3-1a：子代理标记一般 create 时写定；update 仅在显式回填时生效（undefined 不动）。
+        isSubAgent?: boolean;
     }) => {
         const sets: string[] = ['updated_at = unixepoch()'];
         const vals: unknown[] = [];
@@ -216,6 +233,8 @@ export function registerConversationHandlers(): void {
         if (data.tags !== undefined) { sets.push('tags_json = ?'); vals.push(toJson(normalizeTags(data.tags))); }
         if (data.parentId !== undefined) { sets.push('parent_id = ?'); vals.push(data.parentId ?? null); }
         if (data.branchedFromMessageId !== undefined) { sets.push('branched_from_message_id = ?'); vals.push(data.branchedFromMessageId ?? null); }
+        // M3-1a：缺列降级——列缺失时跳过该字段，避免整条 UPDATE throw 拖垮同批写入（同 reasoning_effort 口径）。
+        if (hasIsSubAgentColumn && data.isSubAgent !== undefined) { sets.push('is_subagent = ?'); vals.push(data.isSubAgent ? 1 : 0); }
         vals.push(id);
         db.prepare(`UPDATE conversations SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
         return true;

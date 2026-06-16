@@ -28,6 +28,16 @@ export interface ToolSchema {
  */
 export interface ToolExecContext {
   contextId?: string;
+  /** ★ medium#4：本次工具调用是否来自子代理（后台自动派发，非主对话）。审批文案据此区分来源。 */
+  isSubagent?: boolean;
+  /** ★ medium#4：发起的子代理角色名（如「审查者」），审批框显示「子代理「角色」请求…」。 */
+  subagentRole?: string;
+}
+
+/** execute 的可选元信息（来源标识等）——与 contextId 解耦，便于审批/审计区分主代理 vs 子代理。 */
+export interface ToolExecMeta {
+  isSubagent?: boolean;
+  subagentRole?: string;
 }
 
 export type ToolHandler = (args: Record<string, any>, ctx?: ToolExecContext) => Promise<string>;
@@ -42,8 +52,9 @@ interface RegisteredTool {
   approvalLevel: ApprovalLevel;
 }
 
-// Approval callback — set by UI to show confirmation dialog
-type ApprovalCallback = (toolName: string, args: Record<string, any>, level: ApprovalLevel) => Promise<boolean>;
+// Approval callback — set by UI to show confirmation dialog.
+// ★ medium#4：新增可选第 4 参 meta，传子代理来源标识，让 UI 文案区分主代理/子代理（向后兼容：旧 3 参回调照常工作）。
+type ApprovalCallback = (toolName: string, args: Record<string, any>, level: ApprovalLevel, meta?: ToolExecMeta) => Promise<boolean>;
 
 class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
@@ -104,19 +115,23 @@ class ToolRegistry {
    * @param contextId 当前执行上下文 id（agentLoop 注入；现阶段=conversationId，M3=agentId/subagentId）。
    *        worktree 根/cwd 解析与 enter/exit_worktree 据此定位「本上下文」的活动 worktree，避免并行串台。
    */
-  async execute(name: string, args: Record<string, any>, contextId?: string): Promise<string> {
+  async execute(name: string, args: Record<string, any>, contextId?: string, meta?: ToolExecMeta): Promise<string> {
     const tool = this.tools.get(name);
     if (!tool) return `Error: Tool "${name}" not found`;
 
-    // Check approval
+    // Check approval（★ medium#4：透传 meta，子代理调用时审批框可显示来源角色，避免用户误以为是主代理发起）
     if (this.needsApproval(tool) && this.approvalCallback) {
-      const approved = await this.approvalCallback(name, args, tool.approvalLevel);
+      const approved = await this.approvalCallback(name, args, tool.approvalLevel, meta);
       if (!approved) {
         return `用户取消了工具 "${name}" 的执行`;
       }
     }
 
-    const ctx: ToolExecContext = { contextId };
+    const ctx: ToolExecContext = {
+      contextId,
+      isSubagent: meta?.isSubagent,
+      subagentRole: meta?.subagentRole,
+    };
     // Execute with retry
     let lastError = '';
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
@@ -288,7 +303,7 @@ toolRegistry.register({
       afterHash: hashContent(args.content),
       hunks: buildDiffHunks(beforeContent, args.content),
     },
-  });
+  }, ctx?.contextId);
   return `✅ 已写入文件: ${args.path} (${args.content.length} 字符)`;
 }, 'file', 'write');
 
@@ -739,3 +754,111 @@ toolRegistry.register({
   store.dispatch(exitWorktree({ contextId }));
   return `✅ 已退出 worktree，回到主工作区。后续 view_file/list_dir/write_to_file/run_command 将作用于主工作区。\n（刚才的 worktree 仍保留在磁盘与 git 中：${prev}）`;
 }, 'command', 'auto');
+
+// --- Multi-AI Tools（M3-1a 真子代理：派发独立子代理执行任务）---
+// spawn_subagent：主 AI / 上层子代理调用，派一个独立子代理（独立上下文 + 工具循环）执行任务，
+// 完成后把子代理的结构化报告作为工具结果返回给调用方的对话循环（结果回插）。
+//
+// ★ 工具循环/落库/隔离实现见 agentOrchestrator.spawnSubagent（方案 A：不走主 agentLoop.run，不污染主对话）。
+// ★ 循环依赖规避：agentOrchestrator 顶层 import toolRegistry（取 schemas + execute）；本 handler 反向用
+//   动态 import('./agentOrchestrator') 在调用时才取实例，避免模块级互相 import 成环。
+// ★ maxDepth 派发深度（递归层数控制，逐层递减防无限派发）：
+//   - 调用方是【子代理】（ctx.contextId 在 orchestrator.depthByContext 里）→ 本次派出的子代理 maxDepth = 父 depth - 1。
+//     （buildSubagentTools 已保证：父 depth>1 才把 spawn_subagent 给它，故 -1 后 >=1。）
+//   - 调用方是【主 AI】（contextId 非活动子代理）→ 用工具入参 max_depth（不填默认 1=子代理不能再派）。
+toolRegistry.register(
+  {
+    type: 'function',
+    function: {
+      name: 'spawn_subagent',
+      description: '创建一个独立的子代理来执行特定任务。子代理有独立的上下文窗口，可使用工具多步推进，完成后返回结构化报告。适用于：代码审查、文献分析、数据验证、深度研究等可并行的任务。',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: '子代理需要执行的任务描述' },
+          role: {
+            type: 'string',
+            description: '子代理的角色(如: 审查者、文献分析、数据验证)',
+            enum: ['reviewer', 'literature', 'validator', 'researcher', 'custom'],
+          },
+          // ToolSchema.properties 值类型不含 items（运行时不校验），用 string 描述数组语义即可。
+          context_files: { type: 'string', description: '需要读取的文件路径列表(可选，JSON 数组或逗号分隔)' },
+          max_depth: {
+            type: 'number',
+            description: '派发深度(可选，正整数；不填=1=该子代理不能再派发孙代理)。填 2=子代理可派一层孙代理；逐层递减防无限派发。',
+          },
+        },
+        required: ['task', 'role'],
+      },
+    },
+  },
+  async (args, ctx) => {
+    const { agentOrchestrator } = await import('./agentOrchestrator');
+    const { store } = await import('@/store');
+
+    const task = typeof args.task === 'string' ? args.task.trim() : '';
+    if (!task) return 'Error: spawn_subagent 需要 task（子代理任务描述）。';
+    const role = typeof args.role === 'string' && args.role.trim() ? args.role.trim() : 'custom';
+
+    // 派发深度推导（见上注释）：父代理是子代理则继承 depth-1，否则用入参（默认 1）。
+    const parentDepth = agentOrchestrator.getContextMaxDepth(ctx?.contextId);
+    const childMaxDepth = typeof parentDepth === 'number'
+      ? Math.max(1, parentDepth - 1)
+      : Math.max(1, Math.floor(Number(args.max_depth) || 1));
+
+    // 默认子代理模型 = 配置的 subagentDefaultModel（缺省回退当前模型，由 spawnSubagent 内部兜底）。
+    const state = store.getState() as any;
+    const model = state.multiAI?.subagentDefaultModel || '';
+    const maxTokens = state.multiAI?.defaultSubagentMaxTokens || 32000;
+
+    // 主对话 id 作子对话 parent_id（卡片归属）；缺省由 spawnSubagent 内部回退当前对话 id。
+    const parentConversationId = (state?.conversation?.id as string | null) ?? '';
+
+    const result = await agentOrchestrator.spawnSubagent({
+      taskDescription: task,
+      contextFiles: parseContextFiles(args.context_files),
+      parentConversationId,
+      config: {
+        id: role,
+        name: role,
+        role,
+        model,
+        systemPrompt: `你是一个「${role}」角色的子代理，独立完成主代理交给你的任务，完成后返回结构化报告。`,
+        toolPermissions: ['read', 'search', 'write', 'command'],
+        maxTokens,
+        maxDepth: childMaxDepth,
+      },
+    });
+
+    // 把子代理报告作为工具结果返回主对话循环（结果回插主对话）。
+    const header = result.status === 'complete'
+      ? `✅ 子代理「${result.role}」完成（${(result.duration / 1000).toFixed(1)}s，${result.toolCallsUsed} 次工具调用）`
+      : `❌ 子代理「${result.role}」失败`;
+    return `${header}\n\n${result.report}`;
+  },
+  'custom',
+  'auto',
+);
+
+/** 解析 spawn_subagent 的 context_files 入参：兼容 string[]（旧/直传）、JSON 数组字符串、逗号分隔字符串。 */
+function parseContextFiles(raw: unknown): string[] | undefined {
+  if (Array.isArray(raw)) {
+    const arr = raw.map(f => String(f).trim()).filter(Boolean);
+    return arr.length ? arr : undefined;
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    const text = raw.trim();
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        const arr = parsed.map(f => String(f).trim()).filter(Boolean);
+        return arr.length ? arr : undefined;
+      }
+    } catch {
+      // 非 JSON → 按逗号/换行分隔。
+    }
+    const arr = text.split(/[,\n]/).map(f => f.trim()).filter(Boolean);
+    return arr.length ? arr : undefined;
+  }
+  return undefined;
+}

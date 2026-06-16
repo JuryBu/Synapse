@@ -223,15 +223,20 @@ export function AgentPanel() {
       (name, args, contextId) => toolRegistry.execute(name, args, contextId),
     );
     // P1-3: 设置审批回调（弹出确认对话框）
-    toolRegistry.setApprovalCallback(async (toolName, args, level) => {
+    // ★ M3-1a medium#4：meta 携带子代理来源标识——后台子代理调用 write/command 级工具弹审批时，
+    //   文案前缀「子代理「角色」请求…」，让用户分清是主代理还是哪个子代理发起（旧文案只说「AI 请求」无法区分）。
+    toolRegistry.setApprovalCallback(async (toolName, args, level, meta) => {
+      const origin = meta?.isSubagent
+        ? `子代理「${meta.subagentRole || '未命名'}」`
+        : 'AI';
       // ★ medium#5：worktree 创建是真实 git 写盘 + 建新分支，通用「执行工具」文案会让用户误以为是无害模式切换。
       //   给 enter_worktree 定制说明，明确「会在磁盘建工作树目录 + git 里新建/复用分支」，降低误批风险。
       if (toolName === 'enter_worktree') {
         const branch = typeof args?.branch === 'string' && args.branch.trim() ? args.branch.trim() : '（自动生成时间戳分支）';
-        const msg = `AI 请求进入 git worktree（隔离工作树）\n\n这会在磁盘 userData/worktrees 下创建一个工作树目录，并在当前仓库新建（或复用已有）分支：\n  分支：${branch}\n\n进入后 AI 的文件读写/命令将作用于该工作树（与主工作区隔离），而非直接改主工作区。是否同意？`;
+        const msg = `${origin}请求进入 git worktree（隔离工作树）\n\n这会在磁盘 userData/worktrees 下创建一个工作树目录，并在当前仓库新建（或复用已有）分支：\n  分支：${branch}\n\n进入后 AI 的文件读写/命令将作用于该工作树（与主工作区隔离），而非直接改主工作区。是否同意？`;
         return window.confirm(msg);
       }
-      const msg = `AI 请求执行工具 "${toolName}"（权限: ${level}）\n参数: ${JSON.stringify(args, null, 2).slice(0, 200)}`;
+      const msg = `${origin}请求执行工具 "${toolName}"（权限: ${level}）\n参数: ${JSON.stringify(args, null, 2).slice(0, 200)}`;
       return window.confirm(msg);
     });
     // P1-3: 同步安全设置

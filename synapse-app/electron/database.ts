@@ -163,6 +163,11 @@ export function initDatabase(): Database.Database {
     // 旧行该列为 NULL，读回时由上层回退默认 'auto'；ensureColumn 懒迁移加列不破坏旧库。
     ensureColumn(db, 'conversations', 'reasoning_effort', 'TEXT');
 
+    // M3-1a 真子代理：子代理跑完把其消息序列作为一个独立 conversation 落库（复用 conversations 表），
+    // 带 parent_id=主对话 id + is_subagent=1 标记，供 M3-3 卡片点进查看其完整对话流。
+    // 旧行该列为 NULL/0（普通对话非子代理）；ensureColumn 懒迁移加列不破坏旧库；IPC 读回时映射为 isSubAgent。
+    ensureColumn(db, 'conversations', 'is_subagent', 'INTEGER NOT NULL DEFAULT 0');
+
     ensureColumn(db, 'messages', 'model', 'TEXT');
     ensureColumn(db, 'messages', 'content_parts', 'TEXT');
     ensureColumn(db, 'messages', 'attachments', 'TEXT');

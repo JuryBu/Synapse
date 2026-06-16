@@ -927,7 +927,8 @@ export class AgentLoop {
           try {
             const args = JSON.parse(tc.function.arguments);
             const result = await this.toolExecutor(tc.function.name, args, execContextId);
-            const fileChanges = consumeTrackedFileChanges();
+            // ★ medium#3/#5：按 execContextId 消费自己桶的改动，杜绝与并行子代理/其它上下文串台。
+            const fileChanges = consumeTrackedFileChanges(execContextId);
             for (const change of fileChanges) {
               store.dispatch(recordFileSnapshot(change.snapshot));
               if (assistantMessageId) {

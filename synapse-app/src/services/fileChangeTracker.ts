@@ -5,7 +5,16 @@ export interface TrackedFileChange {
   diff: FileDiffSummary;
 }
 
-const pendingChanges: TrackedFileChange[] = [];
+/**
+ * ★ M3-1a medium#3/#5 根治：文件改动账本按 contextId 分桶，杜绝并行子代理与主 agentLoop 共享单一全局
+ *   数组导致的竞态串台（A 写文件后到 A consume 之间，B 也写了 → A 的 consume 把 B 的 pending change 一起 splice 吞掉，
+ *   或主代理 consume 抢到子代理 diff 挂进主对话）。各 contextId 独立 buffer，record/consume 各操作自己桶。
+ *   - contextId 来源：主 agentLoop = 当前对话 id ?? AUTOSAVE_ID；子代理 = subagentId（见 toolRegistry.execute 注入）。
+ *   - 缺省键 DEFAULT_BUCKET：极端兜底（contextId 未透传时），保持旧行为不丢账本。
+ *   - 桶在 consume（splice 至空）后若为空即删除，避免长期运行下 Map 无限增长（每个 subagentId 含时间戳唯一）。
+ */
+const DEFAULT_BUCKET = '__default__';
+const pendingChangesByContext = new Map<string, TrackedFileChange[]>();
 
 export function generateChangeId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -137,10 +146,35 @@ export function buildDiffHunks(before = '', after = '', context = 3): FileDiffHu
   return hunks;
 }
 
-export function recordTrackedFileChange(change: TrackedFileChange): void {
-  pendingChanges.push(change);
+/**
+ * 记录一次文件改动到【该 contextId 的桶】。
+ * @param contextId 执行上下文 id（主 agentLoop=对话 id ?? AUTOSAVE_ID；子代理=subagentId）。
+ *        缺省（极端兜底）落 DEFAULT_BUCKET，保持旧单桶行为。
+ */
+export function recordTrackedFileChange(change: TrackedFileChange, contextId?: string): void {
+  const key = contextId || DEFAULT_BUCKET;
+  let bucket = pendingChangesByContext.get(key);
+  if (!bucket) {
+    bucket = [];
+    pendingChangesByContext.set(key, bucket);
+  }
+  bucket.push(change);
 }
 
-export function consumeTrackedFileChanges(): TrackedFileChange[] {
-  return pendingChanges.splice(0, pendingChanges.length);
+/**
+ * 取出并清空【该 contextId 桶】的全部 pending 改动；其它上下文的桶不受影响（不再串台）。
+ * @param contextId 同 recordTrackedFileChange；缺省消费 DEFAULT_BUCKET。
+ */
+export function consumeTrackedFileChanges(contextId?: string): TrackedFileChange[] {
+  const key = contextId || DEFAULT_BUCKET;
+  const bucket = pendingChangesByContext.get(key);
+  if (!bucket || bucket.length === 0) {
+    // 空桶不必保留（也避免曾创建但无改动的桶残留）。
+    if (bucket) pendingChangesByContext.delete(key);
+    return [];
+  }
+  const drained = bucket.splice(0, bucket.length);
+  // 消费后桶已空 → 删除，防 Map 随子代理（id 含时间戳唯一）无限增长。
+  pendingChangesByContext.delete(key);
+  return drained;
 }

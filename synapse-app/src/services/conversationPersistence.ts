@@ -44,6 +44,8 @@ export interface ConversationSummary {
   model: string;
   archived?: boolean;
   tags?: string[];
+  // M3-1a：子代理对话标记。普通历史列表默认过滤掉（listConversationSummaries），仅 M3-3 卡片专门读取。
+  isSubAgent?: boolean;
 }
 
 export interface ConversationSnapshot {
@@ -64,6 +66,9 @@ export interface ConversationSnapshot {
   // M2-3 对话分支溯源：仅 fork 出的新对话携带；普通保存为 undefined（落 NULL）。
   parentId?: string | null;
   branchedFromMessageId?: string | null;
+  // M3-1a 真子代理：子代理跑完落库的独立 conversation 带 true（+ parentId=主对话 id），供卡片点进查看。
+  //   普通对话保存为 undefined（落默认 false），不进 Redux 当前对话 slice、不污染主对话 UI。
+  isSubAgent?: boolean;
 }
 
 export interface ConversationListFilters {
@@ -199,12 +204,17 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
     // M2-3：fork 时携带溯源，普通保存为 undefined（不覆盖已有行的 parent 字段）。
     parentId: snapshot.parentId,
     branchedFromMessageId: snapshot.branchedFromMessageId,
+    // M3-1a：子代理对话落库带 true（create 时写定）；普通保存为 undefined → 落默认 false。
+    isSubAgent: snapshot.isSubAgent,
   };
 
   // M2-R6：正式保存同样落库去 base64。
   const sanitizedMessages = sanitizeMessagesForPersistence(snapshot.messages);
   await persistPlatformSnapshot(id, metadata, sanitizedMessages);
-  writeLegacyConversation(id, sanitizedMessages);
+  // ★ Codex P2-2 修复：子代理对话【不写 legacy map】——legacy metadata 不带 isSubAgent，
+  //   写了就会被 listLegacyConversationSummaries 列进普通历史且无法过滤。子对话只走 platform 层（带 is_subagent 列），
+  //   主路径按 isSubAgent 过滤即可彻底排除出普通列表。
+  if (!snapshot.isSubAgent) writeLegacyConversation(id, sanitizedMessages);
 
   return {
     id,
@@ -433,7 +443,9 @@ export async function listConversationSummaries(filters: string | ConversationLi
     .map(mapConversationSummary)
     .filter((summary): summary is ConversationSummary => Boolean(summary))
     .filter(summary => summary.id !== AUTOSAVE_ID)
-    .filter(summary => summary.messageCount > 0);
+    .filter(summary => summary.messageCount > 0)
+    // ★ Codex P2-2 修复：子代理对话是内部 transcript，仅 M3-3 卡片点进查看，不进普通历史列表/侧边栏/批量操作。
+    .filter(summary => !summary.isSubAgent);
 
   const legacy = listLegacyConversationSummaries(normalizedFilters);
   const seen = new Set(summaries.map(summary => summary.id));
@@ -665,6 +677,8 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
       // M2-3：分支溯源随快照回带（两端 mapConversation/Web get 都已带上这两字段，普通对话为 null）。
       parentId: conversation.parentId ?? conversation.parent_id ?? null,
       branchedFromMessageId: conversation.branchedFromMessageId ?? conversation.branched_from_message_id ?? null,
+      // M3-1a：子代理标记随快照回带（两端 mapConversation/Web get 都映射成 isSubAgent，普通对话 false）。
+      isSubAgent: Boolean(conversation.isSubAgent ?? conversation.is_subagent),
     };
   } catch {
     return null;
@@ -689,6 +703,8 @@ async function persistPlatformSnapshot(
     // M2-3 对话分支溯源（仅 create 时有意义；update 路径下若为 undefined，IPC 端会跳过不覆盖）。
     parentId?: string | null;
     branchedFromMessageId?: string | null;
+    // M3-1a 子代理标记（仅 create 时有意义；update 路径下若为 undefined，IPC / Web 端会跳过不覆盖）。
+    isSubAgent?: boolean;
   },
   messages: Message[],
 ): Promise<void> {
@@ -726,6 +742,8 @@ function mapConversationSummary(row: any): ConversationSummary | null {
     model: row.model || 'unknown',
     archived: Boolean(row.archived),
     tags: normalizeTags(row.tags),
+    // M3-1a：两端 mapConversation/Web summary 都带 isSubAgent（驼峰）/ is_subagent（下划线），普通对话 false。
+    isSubAgent: Boolean(row.isSubAgent ?? row.is_subagent),
   };
 }
 

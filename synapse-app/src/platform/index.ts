@@ -322,6 +322,8 @@ function getWebMock(): SynapseAPI {
             // M2-3 对话分支溯源（Web 对等）：fork 时写入，普通新建为 null。
             parentId: data.parentId ?? null,
             branchedFromMessageId: data.branchedFromMessageId ?? null,
+            // M3-1a 真子代理（Web 对等）：子代理对话标记，普通对话 false。
+            isSubAgent: Boolean(data.isSubAgent),
           });
           writeWebConversationSummaries(summaries);
         }
@@ -348,6 +350,10 @@ function getWebMock(): SynapseAPI {
             branchedFromMessageId: data.branchedFromMessageId === undefined
               ? (summaries[idx].branchedFromMessageId ?? null)
               : (data.branchedFromMessageId ?? null),
+            // M3-1a：子代理标记，update 传 undefined 时不覆盖已有值（对齐 Electron IPC 跳过 undefined 列）。
+            isSubAgent: data.isSubAgent === undefined
+              ? Boolean(summaries[idx].isSubAgent)
+              : Boolean(data.isSubAgent),
             updatedAt: Date.now(),
           };
           writeWebConversationSummaries(summaries);

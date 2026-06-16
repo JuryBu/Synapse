@@ -12,6 +12,13 @@ export interface SubagentConfig {
   systemPrompt: string; // 系统提示
   toolPermissions: ('read' | 'write' | 'command' | 'search' | 'generate')[];
   maxTokens: number;
+  /**
+   * M3-1a 派发深度（递归层数控制）。正整数；不填默认 1。
+   *   - 1（默认）→ 不允许该子代理再派发子代理（其工具集剔除 spawn_subagent）。
+   *   - N（>1）→ 允许 N 层：子代理工具集【含】spawn_subagent，且其派出的孙代理 maxDepth=N-1，
+   *     逐层递减，到 1 时不能再派。防无限递归派发。
+   */
+  maxDepth?: number;
 }
 
 export interface MultiAIMode {
@@ -26,19 +33,30 @@ export interface MultiAIMode {
   triggerConditions: ('stageComplete' | 'reviewPhase' | 'userRequest' | 'error')[];
 }
 
+/**
+ * M3-1a 运行态子代理（为 M3-3 卡片四色 + token 统计 + 计时实时刷新打底）。
+ * 四色状态映射（Plan_4_M3 五）：灰=complete、蓝=running、黄=retrying（retry/重连阻塞）、红=error。
+ */
+export interface RunningSubagent {
+  id: string;                 // = subagentId（同时作为 toolRegistry.execute 的 contextId 隔离键）
+  parentConversationId: string; // 主对话 id（卡片归属 + 子对话 parent_id）
+  status: 'running' | 'complete' | 'error' | 'retrying';
+  model: string;
+  role: string;
+  startTime: number;
+  endTime?: number;           // 完成/失败时间（计时停止）
+  result?: string;            // 完成 report 摘要 / 错误信息
+  toolCallsUsed?: number;     // 工具调用次数（卡片展示）
+  tokensUsed?: number;        // 粗估 token 用量（卡片展示）
+  depth?: number;             // 本子代理的 maxDepth（剩余可派发层数；卡片可视化递归层级）
+  conversationId?: string;    // 子代理落库的独立 conversation id（卡片点进查看其完整对话流）
+}
+
 export interface MultiAIState {
   enabled: boolean;
   activeMode: string; // mode id
   modes: MultiAIMode[];
-  runningSubagents: {
-    id: string;
-    parentConversationId: string;
-    status: 'running' | 'complete' | 'error';
-    model: string;
-    role: string;
-    startTime: number;
-    result?: string;
-  }[];
+  runningSubagents: RunningSubagent[];
   maxConcurrentSubagents: number;
   defaultSubagentModel: string;
   defaultSubagentMaxTokens: number;
@@ -177,14 +195,30 @@ const multiAISlice = createSlice({
     setDefaultSubagentMaxTokens(state, action: PayloadAction<number>) {
       state.defaultSubagentMaxTokens = action.payload;
     },
-    addRunningSubagent(state, action: PayloadAction<MultiAIState['runningSubagents'][0]>) {
+    addRunningSubagent(state, action: PayloadAction<RunningSubagent>) {
       state.runningSubagents.push(action.payload);
     },
-    updateSubagentStatus(state, action: PayloadAction<{ id: string; status: 'running' | 'complete' | 'error'; result?: string }>) {
+    updateSubagentStatus(
+      state,
+      action: PayloadAction<{
+        id: string;
+        status: RunningSubagent['status'];
+        result?: string;
+        // M3-1a 卡片实时字段：完成/失败时回填，运行中（retrying/running）可携进度。
+        endTime?: number;
+        toolCallsUsed?: number;
+        tokensUsed?: number;
+        conversationId?: string;
+      }>,
+    ) {
       const sub = state.runningSubagents.find(s => s.id === action.payload.id);
       if (sub) {
         sub.status = action.payload.status;
-        if (action.payload.result) sub.result = action.payload.result;
+        if (action.payload.result !== undefined) sub.result = action.payload.result;
+        if (action.payload.endTime !== undefined) sub.endTime = action.payload.endTime;
+        if (action.payload.toolCallsUsed !== undefined) sub.toolCallsUsed = action.payload.toolCallsUsed;
+        if (action.payload.tokensUsed !== undefined) sub.tokensUsed = action.payload.tokensUsed;
+        if (action.payload.conversationId !== undefined) sub.conversationId = action.payload.conversationId;
       }
     },
     clearCompletedSubagents(state) {
