@@ -130,6 +130,13 @@ export interface WorkflowRunSubagent {
   startTime: number;
   /** 完成/失败时间（卡片据此算耗时，停止计时）。 */
   endTime?: number;
+  /**
+   * ★ M3-3b 子代理对话桥接：本子代理跑完落库的独立 conversation id（is_subagent=true，由
+   *   persistSubagentConversation 用 createConversationId 生成——【不等于】subagentId）。
+   *   中间视图 WorkflowView 据此 loadConversationSnapshot(conversationId) 读回该子代理完整对话流。
+   *   运行中 / 尚未落库 / 落库失败时为 undefined（视图侧显示占位）。
+   */
+  conversationId?: string;
 }
 
 /**
@@ -488,6 +495,8 @@ const multiAISlice = createSlice({
         tokens?: number;
         endTime?: number;
         model?: string;
+        // ★ M3-3b：子代理对话落库后回填其 conversation id，供中间视图按 id 读回完整对话流。
+        conversationId?: string;
       }>,
     ) {
       const run = state.workflowRuns.find(r => r.runId === action.payload.runId);
@@ -499,6 +508,7 @@ const multiAISlice = createSlice({
       if (action.payload.tokens !== undefined) sub.tokens = action.payload.tokens;
       if (action.payload.endTime !== undefined) sub.endTime = action.payload.endTime;
       if (action.payload.model !== undefined) sub.model = action.payload.model;
+      if (action.payload.conversationId !== undefined) sub.conversationId = action.payload.conversationId;
     },
 
     /** 收口一次工作流运行：置整体 status（complete/aborted）+ endTime。 */

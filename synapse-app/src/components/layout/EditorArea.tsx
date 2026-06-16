@@ -14,6 +14,7 @@ import { PptxViewer } from '@/components/editor/PptxViewer';
 import { OfficeViewer } from '@/components/editor/OfficeViewer';
 import { CodeEditor } from '@/components/editor/CodeEditor';
 import { ReviewChangesView } from '@/components/editor/ReviewChangesView';
+import { WorkflowView } from '@/components/editor/WorkflowView';
 import { fileSystem } from '@/services/fileSystem';
 import { applyBlockReview, applyDiffReview, applyHunkReview } from '@/services/fileRollback';
 import { markTabSaved, setTabContent } from '@/store/slices/editorTabs';
@@ -185,6 +186,19 @@ export function EditorArea() {
             }}
           />
         );
+
+      // ★ M3-3b：子代理中间视图（点击对话流 WorkflowCard 打开的 tab）。
+      case 'workflow':
+        return activeTab.workflowRunId
+          ? <WorkflowView runId={activeTab.workflowRunId} />
+          : (
+            <div className="editor-placeholder">
+              <div className="placeholder-content">
+                <span style={{ fontSize: 32, opacity: 0.3 }}>🧩</span>
+                <p>缺少工作流运行实例</p>
+              </div>
+            </div>
+          );
 
       case 'pptx':
         return (

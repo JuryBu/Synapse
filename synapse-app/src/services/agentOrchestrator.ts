@@ -196,6 +196,8 @@ export class AgentOrchestrator {
       tokens?: number;
       endTime?: number;
       model?: string;
+      // ★ M3-3b：子代理对话落库后回填其 conversation id 进 WorkflowRun.subagents，供中间视图按 id 读回对话流。
+      conversationId?: string;
     },
   ): void {
     if (!runContext) return;
@@ -532,12 +534,14 @@ export class AgentOrchestrator {
         conversationId,
       }));
       // ★ M3-3a：完成回填工作流卡片（灰=complete + 工具调用次数 + token + 耗时）。
+      //   ★ M3-3b：一并回填子代理对话落库的 conversationId，供中间视图按 id 读回其完整对话流。
       this.syncWorkflowRunSubagent(task.runContext, subagentId, {
         status: 'complete',
         toolCalls: toolCallsUsed,
         tokens: tokensUsed,
         endTime: completeEndTime,
         model,
+        conversationId,
       });
 
       store.dispatch(addNotification({
@@ -573,10 +577,13 @@ export class AgentOrchestrator {
           conversationId,
         }));
         // ★ M3-3a：失败回填工作流卡片（红=error + 已用工具调用次数 + 耗时）。
+        //   ★ M3-3b：失败也尽力落了部分对话（persistSubagentConversation），有 id 则回填，
+        //     中间视图可点进看子代理失败前跑到哪一步（落库失败时 conversationId=undefined，视图侧显示占位）。
         this.syncWorkflowRunSubagent(task.runContext, subagentId, {
           status: 'error',
           toolCalls: toolCallsUsed,
           endTime: errorEndTime,
+          conversationId,
         });
       }
 

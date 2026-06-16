@@ -1,4 +1,4 @@
-import { X, FileCode, FileText, Image, Film, Presentation, BookOpen, Globe, Home, Settings, ListChecks, ChevronLeft, ChevronRight } from 'lucide-react';
+import { X, FileCode, FileText, Image, Film, Presentation, BookOpen, Globe, Home, Settings, ListChecks, Network, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import { closeTab, markTabSaved, setActiveTab } from '@/store/slices/editorTabs';
 import type { RootState } from '@/store';
@@ -19,6 +19,7 @@ const tabIcons: Record<string, React.ElementType> = {
   welcome: Home,
   settings: Settings,
   review: ListChecks,
+  workflow: Network, // ★ M3-3b 子代理中间视图 tab
   unsupported: FileText,
 };
 

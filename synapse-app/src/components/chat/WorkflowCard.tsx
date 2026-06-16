@@ -15,9 +15,10 @@
  *   由调用方（MessageBubble）回退渲染纯文本汇总。
  */
 import { useCallback, useEffect, useState } from 'react';
-import { useAppSelector } from '@/store/hooks';
+import { useAppSelector, useAppDispatch } from '@/store/hooks';
 import type { RootState } from '@/store';
 import type { WorkflowRun, WorkflowRunSubagent } from '@/store/slices/multiAI';
+import { openWorkflowTab } from '@/store/slices/editorTabs';
 
 interface WorkflowCardProps {
   runId: string;
@@ -87,6 +88,7 @@ function SubagentRow({ sub, now }: { sub: WorkflowRunSubagent; now: number }) {
 }
 
 export function WorkflowCard({ runId }: WorkflowCardProps) {
+  const dispatch = useAppDispatch();
   // 订阅本 run（运行态变化自动重渲染实现「实时」）。
   const run = useAppSelector((s: RootState) =>
     s.multiAI.workflowRuns.find((r: WorkflowRun) => r.runId === runId),
@@ -102,10 +104,19 @@ export function WorkflowCard({ runId }: WorkflowCardProps) {
     return () => window.clearInterval(timer);
   }, [isRunning]);
 
+  // ★ M3-3b：点击卡片 → 在中间编辑器区打开「子代理中间视图」tab（子代理列表 + 各自完整对话流）。
+  //   title 用 modeName；openWorkflowTab 内部按 runId 去重（同 run 已开则仅激活不重开）。
   const handleClick = useCallback(() => {
-    // TODO(M3-3b)：点击卡片打开「中间视图」——子代理树 + 各自完整子对话流。本轮不开视图。
-    console.log('[WorkflowCard] M3-3b 中间视图待实现，runId =', runId);
-  }, [runId]);
+    dispatch(openWorkflowTab({ runId, title: run?.modeName ?? '工作流' }));
+  }, [dispatch, runId, run?.modeName]);
+
+  // ★ M3-3b（修 M3-3a low）：role=button 的键盘可达性——Enter/Space 等价点击。
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleClick();
+    }
+  }, [handleClick]);
 
   // 运行实例不存在（重启清空 / 非工作流消息）→ null，调用方回退纯文本汇总。
   if (!run) return null;
@@ -120,9 +131,10 @@ export function WorkflowCard({ runId }: WorkflowCardProps) {
       className="workflow-card"
       style={{ borderLeftColor: meta.color }}
       onClick={handleClick}
+      onKeyDown={handleKeyDown}
       role="button"
       tabIndex={0}
-      title="点击查看子代理详情（中间视图 M3-3b 即将上线）"
+      title="点击查看子代理详情（中间视图：各子代理完整对话流）"
     >
       <div className="wf-card-header">
         <span className="wf-card-title">🧩 {run.modeName}</span>

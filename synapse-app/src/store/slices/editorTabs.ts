@@ -6,9 +6,14 @@ interface EditorTab {
   fileName: string;
   isDirty: boolean;
   isPreview: boolean;
-  type: 'code' | 'pdf' | 'pptx' | 'docx' | 'office' | 'markdown' | 'html' | 'image' | 'video' | 'welcome' | 'showcase' | 'settings' | 'review' | 'unsupported';
+  type: 'code' | 'pdf' | 'pptx' | 'docx' | 'office' | 'markdown' | 'html' | 'image' | 'video' | 'welcome' | 'showcase' | 'settings' | 'review' | 'workflow' | 'unsupported';
   content?: string;
   savedContent?: string;
+  /**
+   * ★ M3-3b 子代理中间视图 tab（type==='workflow'）专属：关联的 Multi-AI 工作流运行实例 id
+   *   （multiAI.workflowRuns[runId]）。EditorArea 据此渲染 <WorkflowView runId=... />。其它类型 tab 无此字段。
+   */
+  workflowRunId?: string;
 }
 
 const welcomeTab: EditorTab = {
@@ -42,6 +47,29 @@ export const editorTabsSlice = createSlice({
         state.tabs.push(action.payload);
         state.activeTabId = action.payload.id;
       }
+    },
+    /**
+     * ★ M3-3b 打开「子代理中间视图」tab（非文件视图，仿 review tab 模式）。
+     *   id 用稳定的 `workflow:${runId}`，同 runId 已开则仅激活不重开（去重不依赖 filePath——
+     *   workflow tab 无 filePath，故另起 action 而非复用按 filePath 去重的 openTab）。
+     */
+    openWorkflowTab(state, action: PayloadAction<{ runId: string; title: string }>) {
+      const tabId = `workflow:${action.payload.runId}`;
+      const existing = state.tabs.find(t => t.id === tabId);
+      if (existing) {
+        state.activeTabId = existing.id;
+        return;
+      }
+      state.tabs.push({
+        id: tabId,
+        filePath: '',
+        fileName: action.payload.title || '工作流',
+        isDirty: false,
+        isPreview: false,
+        type: 'workflow',
+        workflowRunId: action.payload.runId,
+      });
+      state.activeTabId = tabId;
     },
     closeTab(state, action: PayloadAction<string>) {
       state.tabs = state.tabs.filter(t => t.id !== action.payload);
@@ -92,7 +120,7 @@ export const editorTabsSlice = createSlice({
 });
 
 export const {
-  openTab, closeTab, setActiveTab, setTabDirty, setTabContent, markTabSaved, closeAllTabs, resetTabsToWelcome,
+  openTab, openWorkflowTab, closeTab, setActiveTab, setTabDirty, setTabContent, markTabSaved, closeAllTabs, resetTabsToWelcome,
 } = editorTabsSlice.actions;
 
 export type { EditorTab };
