@@ -118,11 +118,23 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext('2d')!;
-        // ★ 关键：按新 scale 重置 canvas 内在尺寸——这一步真正让画面跟随 scale 变化。
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
+        // ★ FIX-11（修「只清晰不放大」真因）：批次二只设了 canvas.width/height（=位图渲染分辨率），
+        //   但 canvas 的 CSS 显示尺寸由 style 的 maxWidth:100%/height:auto 决定——高分辨率位图被
+        //   CSS 缩回容器宽度，于是缩放只让画面变清晰、页面尺寸不变。
+        //   标准 PDF 渲染模型：位图分辨率 = scale × devicePixelRatio（清晰），
+        //   CSS 显示尺寸 = scale × 基准（viewport.width/height，即真正占据的版面）。
+        //   显示尺寸随 scale 真实放大 + 容器 overflow:auto → 超出时出现滚动条。
+        const dpr = window.devicePixelRatio || 1;
+        // 内在位图尺寸（按 dpr 放大，保证高分屏/放大后依旧锐利）。
+        canvas.width = Math.floor(viewport.width * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+        // CSS 显示尺寸（按 scale 真实放大版面；显式写死，覆盖 style 里的 maxWidth/height auto）。
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+        // 把 dpr 缩放并入渲染 viewport，使 pdf.js 直接画到放大后的位图坐标系。
+        const renderViewport = dpr === 1 ? viewport : pdfPage.getViewport({ scale: scale * dpr });
 
-        myTask = pdfPage.render({ canvasContext: ctx, viewport });
+        myTask = pdfPage.render({ canvasContext: ctx, viewport: renderViewport });
         renderTaskRef.current = myTask;
         await myTask.promise;
       } catch (err: any) {
@@ -218,7 +230,10 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
       </div>
       {mode === 'paged' ? (
         <div className="pdf-viewer-canvas-container" ref={containerRef}>
-          <canvas ref={canvasRef} style={{ maxWidth: '100%', height: 'auto' }} />
+          {/* ★ FIX-11：不再用 maxWidth:100%/height:auto（会把放大后的页面缩回容器宽度，
+              导致「只清晰不放大」）。显示尺寸改由 render effect 按 scale 写到 style.width/height，
+              页面真实放大、超出容器时由 .pdf-viewer-canvas-container 的 overflow:auto 出滚动条。 */}
+          <canvas ref={canvasRef} className="pdf-page-canvas" />
         </div>
       ) : (
         <PdfScrollView
@@ -258,6 +273,12 @@ function PdfScrollView({ pdf, totalPages, scale, activePage, scrollRequest, cont
   const taskRefs = useRef<(any | null)[]>([]);
   // 每页渲染令牌（防过期帧）。
   const tokenRefs = useRef<number[]>([]);
+  // ★ M5-batch3：每页「已成功渲染到的 scale」。scroll 模式下 IntersectionObserver 会在同一页
+  //   反复进出 0.1 阈值视口时反复触发 renderPage，旧逻辑无条件 getPage + 完整 render，大 PDF
+  //   上下滚动会有可感 CPU 浪费/卡顿。此 ref 让 renderPage 短路掉「scale 未变且该页已按此 scale
+  //   渲染过」的重复渲染——仅 scale 变化或首次进入视口才真正重渲，恢复「按需渲染」本意。
+  //   渲染失败/被取消时不写入（保持 undefined），下次进入视口会重试。
+  const renderedScaleRefs = useRef<number[]>([]);
 
   // 渲染单页（按需）。
   const renderPage = useCallback(async (pageNum: number) => {
@@ -265,6 +286,9 @@ function PdfScrollView({ pdf, totalPages, scale, activePage, scrollRequest, cont
     const idx = pageNum - 1;
     const canvas = canvasRefs.current[idx];
     if (!canvas) return;
+    // ★ 短路：该页已按当前 scale 成功渲染过且 canvas 仍有内容（width>0）→ 直接 return，
+    //   不重复 getPage / render。scale 变化或首次进入视口时 renderedScaleRefs[idx] 不等，正常往下渲。
+    if (renderedScaleRefs.current[idx] === scale && canvas.width > 0) return;
     const token = (tokenRefs.current[idx] ?? 0) + 1;
     tokenRefs.current[idx] = token;
     let localTask: any = null;
@@ -273,15 +297,26 @@ function PdfScrollView({ pdf, totalPages, scale, activePage, scrollRequest, cont
       if (token !== tokenRefs.current[idx]) return;
       const viewport = pdfPage.getViewport({ scale });
       const ctx = canvas.getContext('2d')!;
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      // 已标记完成的不重画（width/height 已设说明已渲染过；这里仍渲染以应对 scale 变化）。
+      // ★ FIX-11（同 paged 模式）：位图分辨率 = scale × dpr（清晰），
+      //   CSS 显示尺寸 = scale × 基准（viewport.width/height，真实放大版面）。
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(viewport.width * dpr);
+      canvas.height = Math.floor(viewport.height * dpr);
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
+      const renderViewport = dpr === 1 ? viewport : pdfPage.getViewport({ scale: scale * dpr });
+      // 重渲前取消本页可能仍在飞的旧 task（如 scale 连变），同 canvas 只留最新 task 在画。
       if (taskRefs.current[idx]) {
         try { taskRefs.current[idx].cancel(); } catch { /* ignore */ }
       }
-      localTask = pdfPage.render({ canvasContext: ctx, viewport });
+      // 设置新 width 会清空 canvas 内容；重渲未落地前先标记「此 scale 尚未渲染完成」，
+      // 防止渲染中途被并发短路误判为已完成。
+      renderedScaleRefs.current[idx] = -1;
+      localTask = pdfPage.render({ canvasContext: ctx, viewport: renderViewport });
       taskRefs.current[idx] = localTask;
       await localTask.promise;
+      // ★ 渲染成功落地：记录本页已按此 scale 渲染过，供后续重复进出视口时短路。
+      if (token === tokenRefs.current[idx]) renderedScaleRefs.current[idx] = scale;
     } catch (err: any) {
       const name = err?.name || '';
       if (name === 'RenderingCancelledException' || /cancelled/i.test(err?.message || '')) return;
@@ -350,9 +385,11 @@ function PdfScrollView({ pdf, totalPages, scale, activePage, scrollRequest, cont
     <div className="pdf-viewer-canvas-container pdf-scroll-container" ref={containerRef}>
       {Array.from({ length: totalPages }, (_, i) => i + 1).map(pageNum => (
         <div className="pdf-scroll-page" data-page={pageNum} key={pageNum}>
+          {/* ★ FIX-11：显示尺寸由 renderPage 按 scale 写到 style.width/height，
+              移除 maxWidth:100%/height:auto，使连续模式同样真实放大。 */}
           <canvas
+            className="pdf-page-canvas"
             ref={el => { canvasRefs.current[pageNum - 1] = el; }}
-            style={{ maxWidth: '100%', height: 'auto' }}
           />
         </div>
       ))}

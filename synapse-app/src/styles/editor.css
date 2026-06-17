@@ -48,22 +48,36 @@
   flex: 1;
   overflow: auto;
   display: flex;
-  justify-content: center;
+  /* ★ FIX-11：放大后的页面可能比容器宽，flex 的 justify-content:center 会把溢出部分裁到
+     容器左侧、滚动条也够不到。改用 margin:auto 居中（见 .pdf-page-canvas），容器只负责滚动。 */
+  justify-content: flex-start;
   padding: 16px;
   background: rgba(0, 0, 0, 0.2);
+}
+
+/* ★ FIX-11：canvas 的显示尺寸由 JS 按 scale 写到 style.width/height（真实放大）。
+   这里只负责：不被 flex 压缩（flex-shrink:0），小于容器时 margin:auto 居中、
+   大于容器时靠容器 overflow:auto 出滚动条且不被裁切。 */
+.pdf-page-canvas {
+  flex-shrink: 0;
+  margin: auto;
+  display: block;
 }
 
 /* ★ FIX-9：连续滚动模式——竖向堆叠多页。 */
 .pdf-scroll-container {
   flex-direction: column;
-  align-items: center;
+  /* 放大后页面可能比容器宽：用 flex-start 起始对齐，配合页元素 margin:auto 居中且不裁切。 */
+  align-items: flex-start;
   gap: 16px;
 }
 
 .pdf-scroll-page {
   display: flex;
-  justify-content: center;
-  width: 100%;
+  justify-content: flex-start;
+  /* 至少占满容器宽度（小页时撑开以便内部 margin:auto 居中），内容更宽时随内容增长。 */
+  min-width: 100%;
+  width: max-content;
 }
 
 .pdf-scroll-page canvas {

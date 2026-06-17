@@ -259,11 +259,14 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
       shortcut: 'E',
       onClick: handleStartEdit,
     }] : []),
-    ...(role === 'assistant' ? [{
-      label: '重新生成',
+    // ★ Plan_5 M5-4 重试入口（规范 §5）：重试挂在 user 消息上（不再挂 AI 消息）。
+    //   点某条 user 的「重新生成」= 回溯到该 user 所在轮（截断该 user 段之后全部，含本轮 model 段所有
+    //   assistant/tool 中间 step）+ record 砍批 + 自动重发该 user（不填输入框）。接线见 AgentPanel.handleRetry。
+    ...(role === 'user' && onRetry ? [{
+      label: '重新生成回答',
       icon: <RefreshCw size={14} />,
       shortcut: 'R',
-      onClick: () => onRetry?.(id),
+      onClick: () => onRetry(id),
     }] : []),
     ...(onBranch ? [{
       label: '从此分支为新对话',
@@ -365,8 +368,9 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
                 <Pencil size={12} />
               </button>
             )}
-            {!isUser && !isStreaming && onRetry && (
-              <button className="message-action-btn" onClick={() => onRetry(id)} title="重新生成">
+            {/* ★ Plan_5 M5-4：重试入口改挂 user 消息（点该 user = 回溯到其所在轮 + 自动重发该 user）。 */}
+            {isUser && !isStreaming && onRetry && (
+              <button className="message-action-btn" onClick={() => onRetry(id)} title="重新生成回答（回溯到本轮并重发）">
                 <RefreshCw size={12} />
               </button>
             )}

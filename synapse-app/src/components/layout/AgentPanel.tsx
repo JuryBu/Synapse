@@ -27,7 +27,7 @@ import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
 import { mcpBridge } from '@/services/mcpBridge';
 import { addNotification } from '@/store/slices/notifications';
-import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setPendingMessage, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
 // ★ M3-3a：generateWorkflowRunId 预生成稳定 runId，跑前先建占位 assistant 消息 + 关联卡片实时显示。
 import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@/services/multiAITrigger';
@@ -53,6 +53,8 @@ import { rollbackFileDiff } from '@/services/fileRollback';
 import { describeCapabilities } from '@/services/modelCapabilities';
 import { getRecord, clampToBatch, getRecordSkeleton } from '@/services/recordStore';
 import { identifyRounds } from '@/services/roundBoundary';
+// ★ Plan_5 梯队二 M5-3/4/5：回溯 / 重试 / 分支共用「按轮截断 + record 砍批到轮边界」helper（复用 roundBoundary）。
+import { computeRoundTruncation, clampRecordToRoundTruncation, type RoundTruncationResult } from '@/services/roundTruncation';
 // ★ M4-6 输入区命令层：触发检测（@艾特 / 斜杠命令）+ 内联补全浮层 + @数据源 + /命令注册表/执行器。
 import { detectTrigger, type TriggerKind } from '@/services/inputCommands/triggerDetect';
 import { InlineCompletionMenu } from '@/components/chat/InlineCompletionMenu';
@@ -1234,6 +1236,44 @@ export function AgentPanel() {
     void releaseMessageAttachments(removed).catch(() => undefined);
   }, []);
 
+  // ★ Plan_5 M5-3/M5-5：把一条 user 消息「回填进输入框待发」（回溯 / user 分支点共用）。
+  //   - 文本进 input（本地受控态，与 suggestion-chip 等程序化填值同款）+ 同步 setPendingMessage（store 字段）。
+  //   - 附件还原成【草稿态 pending 附件】：剥掉运行/已发标记，status 置 ready，清掉内存预览（落库后只有 sha256）。
+  //   ★ refCount 守恒（关键）：调用方必须把这条 user 从 GC 列表中【排除】（不 release 它的 sha256）——
+  //     源消息被移除后，它原本持有的那 1 份引用「转移」给 pending 草稿；故这里【不再 addRef】（否则双计）。
+  //     之后用户发送时 pending 转成新消息引用（守恒），或点 × removePendingAttachment 时 release（守恒）。
+  //   - 图片预览：pending tray 用 previewUrl 显示缩略图，历史消息附件落库后无 previewUrl → 异步按 sha256
+  //     还原 dataUrl 回填（与 resolveAttachmentsForRender 同源 resolveAttachmentDataUrl）。
+  const refillInputFromUserMessage = useCallback((userMsg: { content?: string; attachments?: AttachmentRef[] } | null | undefined) => {
+    const text = userMsg?.content ?? '';
+    setInput(text);
+    dispatch(setPendingMessage(text));
+    const atts = userMsg?.attachments ?? [];
+    if (atts.length === 0) {
+      setPendingAttachments([]);
+      return;
+    }
+    const restored: AttachmentRef[] = atts
+      .filter(att => !!att.sha256) // 无 sha256 引用的（理论不应出现在已发消息里）无法作为草稿持有，跳过
+      .map(att => ({
+        ...att,
+        previewUrl: undefined,
+        payloadUrl: undefined,
+        status: 'ready' as const,
+        error: undefined,
+      }));
+    setPendingAttachments(restored);
+    // 异步还原图片缩略图（不阻塞回填；失败则 tray 显图标占位）。
+    for (const att of restored) {
+      if (att.kind === 'image' && att.sha256) {
+        void resolveAttachmentDataUrl(att.sha256).then(dataUrl => {
+          if (!dataUrl) return;
+          setPendingAttachments(prev => prev.map(p => (p.id === att.id ? { ...p, previewUrl: dataUrl } : p)));
+        });
+      }
+    }
+  }, [dispatch]);
+
   // Edit user message → truncate after it → re-send
   const handleEdit = useCallback((msgId: string, newContent: string) => {
     // 截断后剩余消息 = 该消息及之前（与 editMessage reducer 的 slice(0, idx+1) 对齐）
@@ -1254,31 +1294,55 @@ export function AgentPanel() {
     }
   }, [dispatch, messages, invalidateRecordForTruncation, gcMessages]);
 
-  // Retry: delete last AI message → re-send last user message
+  // ★ Plan_5 M5-4 重试（规范 §5）：入口改挂【user 消息】（不再挂 AI 消息）。
+  //   点某条 user 的「重新生成」= 回溯到该 user 所在轮（截断该 user 段之后全部，含本轮 model 段所有
+  //   assistant/tool 中间 step）+ record 砍批 + 用 skipUserMessage 自动重发该 user（不填输入框）。
+  //   统一以「user 消息=轮起点」为锚：重试=自动发出（与回溯「填输入框待发」区分）。复用共享 helper。
   const handleRetry = useCallback((msgId: string) => {
-    // truncateAt 保留到 msgId，随后 deleteMessage(msgId) 再删掉这条 AI 消息。
-    const retryIdx = messages.findIndex((m: any) => m.id === msgId);
-    if (retryIdx >= 0) {
-      invalidateRecordForTruncation(messages.slice(0, retryIdx));
-      // 被移除 = msgId 这条 AI 消息及其之后的所有消息（重试会重发上一条 user，故这些全丢）→ GC。
-      gcMessages(messages.slice(retryIdx));
-    }
-    dispatch(truncateAt(msgId));
-    // Find the previous user message to re-send
-    const msgIdx = messages.findIndex((m: any) => m.id === msgId);
-    if (msgIdx > 0) {
-      const prevUserMsg = messages.slice(0, msgIdx).reverse().find((m: any) => m.role === 'user');
-      if (prevUserMsg && agentLoopRef.current) {
-        // Remove the AI message being retried
-        dispatch(deleteMessage(msgId));
+    if (isStreaming) return;
+    // ① 共享 helper 按轮截断（before-user 模式：保留到该 user 段为止、丢弃本轮 model 段）。
+    const cut: RoundTruncationResult = computeRoundTruncation(messages, msgId, 'before-user');
+    if (!cut.ok || cut.lastKeptIndex < 0) return;
+
+    // ② 被丢弃的本轮 model 段里的文件变更按快照回退（与回溯一致；removedMessages 即本轮 model 段全部）。
+    const diffsToRollback = cut.removedMessages
+      .flatMap((m: any) => m.diffs ?? [])
+      .filter((diff: any) => diff.status !== 'rejected')
+      .reverse();
+
+    void (async () => {
+      for (const diff of diffsToRollback) {
+        const snapshot = diff.snapshotId ? conversation.fileSnapshots[diff.snapshotId] : undefined;
+        try {
+          await rollbackFileDiff(diff, snapshot);
+          dispatch(updateDiffStatus({ diffId: diff.id, status: 'rejected' }));
+        } catch (err: any) {
+          dispatch(addNotification({ type: 'error', title: '重试回退失败', message: err?.message || diff.path }));
+          return;
+        }
+      }
+
+      // ③ record 砍批到轮边界（keptRounds = 该 user 所在轮 − 1，本轮 model 段未完成不算已压；与 clampToBatch 同口径）。
+      const conversationId = conversation.id || AUTOSAVE_ID;
+      await clampRecordToRoundTruncation(conversationId, cut);
+
+      // ④ GC 被移除的本轮 model 段附件（被保留的那条 user 不在 removedMessages 里，附件不动）。
+      gcMessages(cut.removedMessages);
+
+      // ⑤ 截到该 user 段为止（含该 user）；该 user 留在 store 里，下面用 skipUserMessage 直接对它重发。
+      if (cut.lastKeptMessageId) dispatch(truncateAt(cut.lastKeptMessageId));
+
+      // ⑥ 自动重发该 user（不填输入框）：skipUserMessage=true → 不新增 user 消息，直接用 store 现有历史发起请求。
+      if (agentLoopRef.current) {
+        const retryUserMsg = messages.find((m: any) => m.id === msgId);
         setTimeout(() => {
-          agentLoopRef.current?.run((prevUserMsg as any).content, { skipUserMessage: true }).catch((err: any) => {
+          agentLoopRef.current?.run((retryUserMsg as any)?.content ?? '', { skipUserMessage: true }).catch((err: any) => {
             dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err.message }));
           });
         }, 100);
       }
-    }
-  }, [messages, dispatch, invalidateRecordForTruncation, gcMessages]);
+    })();
+  }, [isStreaming, messages, dispatch, conversation.fileSnapshots, conversation.id, gcMessages]);
 
   // Delete single message
   const handleDelete = useCallback((msgId: string) => {
@@ -1288,20 +1352,26 @@ export function AgentPanel() {
     dispatch(deleteMessage(msgId));
   }, [dispatch, messages, gcMessages]);
 
+  // ★ Plan_5 M5-3 回溯（规范 §3）：把点击点【向轮边界取整】定位目标轮 N，UI+本地回到「N 轮结束」，
+  //   record 砍掉 N 之后所有批，并把【第 N+1 轮那条 user】回填输入框待发（不自动发，恢复其 pending 附件，
+  //   GC 时排除这条 user 不删它附件）。统一以「user 消息=轮起点」为锚：回溯=填输入框待发（可改）。
   const handleUndoToMessage = useCallback((msgId: string) => {
     void (async () => {
-      const targetIndex = messages.findIndex((msg: any) => msg.id === msgId);
-      const diffsToRollback = targetIndex >= 0
-        ? messages
-          .slice(targetIndex + 1)
-          .flatMap((msg: any) => msg.diffs ?? [])
-          .filter((diff: any) => diff.status !== 'rejected')
-          .reverse()
-        : [];
+      // ① 共享 helper 按轮截断（round-end 模式：保留目标轮 N 整轮、N 之后整轮丢弃，绝不轮中间切）。
+      const cut: RoundTruncationResult = computeRoundTruncation(messages, msgId, 'round-end');
+      if (!cut.ok) return;
 
+      // ② 被截掉范围内的文件变更按快照回退（与旧逻辑一致，但范围改为「轮取整后的 removedMessages」）。
+      const diffsToRollback = cut.removedMessages
+        .flatMap((msg: any) => msg.diffs ?? [])
+        .filter((diff: any) => diff.status !== 'rejected')
+        .reverse();
+
+      const hasPending = !!cut.pendingUserMessage;
+      const tail = hasPending ? '下一轮那条消息会回填到输入框（可改后再发）。' : '回到所选轮结束。';
       const prompt = diffsToRollback.length > 0
-        ? `回溯到这条消息？后续消息会移除，${diffsToRollback.length} 个关联文件变更会按快照回退。`
-        : '回溯到这条消息？后续消息会从当前对话中移除。';
+        ? `回溯到第 ${cut.anchorRound} 轮结束？后续轮次会移除，${diffsToRollback.length} 个关联文件变更会按快照回退；${tail}`
+        : `回溯到第 ${cut.anchorRound} 轮结束？${tail}`;
       if (!window.confirm(prompt)) return;
 
       for (const diff of diffsToRollback) {
@@ -1315,15 +1385,28 @@ export function AgentPanel() {
         }
       }
 
-      // 回溯保留到该消息（含）；若 record 覆盖到被截掉的轮次则失效重建。
-      if (targetIndex >= 0) {
-        invalidateRecordForTruncation(messages.slice(0, targetIndex + 1));
-        // 被截掉的后续消息（targetIndex 之后）整体移除 → GC 其附件。
-        gcMessages(messages.slice(targetIndex + 1));
+      // ③ record 砍批到轮边界（keptRounds = 真轮数 N，keptSteps 不含 tool；共享 helper 与 clampToBatch 同口径）。
+      const conversationId = conversation.id || AUTOSAVE_ID;
+      await clampRecordToRoundTruncation(conversationId, cut);
+
+      // ④ GC 被移除消息的附件——但【排除第 N+1 轮那条 user】（它的内容/附件要回填输入框待发，
+      //   其持有的那 1 份附件引用「转移」给 pending 草稿，故绝不在这里 release，见 refillInputFromUserMessage）。
+      const pendingId = cut.pendingUserMessage?.id;
+      const removedForGc = pendingId
+        ? cut.removedMessages.filter((m: any) => m.id !== pendingId)
+        : cut.removedMessages;
+      gcMessages(removedForGc);
+
+      // ⑤ UI+本地回到「N 轮结束」：截到保留范围最后一条消息（含）。lastKeptMessageId 必非空（anchorRound>=1）。
+      if (cut.lastKeptMessageId) dispatch(truncateAt(cut.lastKeptMessageId));
+
+      // ⑥ 把第 N+1 轮那条 user 回填输入框待发（含其 pending 附件）。
+      //   无 N+1（目标轮已是末轮、本次回溯无消息被移除）则不动输入框——避免误清用户正在输入的草稿。
+      if (cut.pendingUserMessage) {
+        refillInputFromUserMessage(cut.pendingUserMessage as any);
       }
-      dispatch(truncateAt(msgId));
     })();
-  }, [conversation.fileSnapshots, dispatch, messages, invalidateRecordForTruncation, gcMessages]);
+  }, [conversation.fileSnapshots, conversation.id, dispatch, messages, gcMessages, refillInputFromUserMessage]);
 
   // M2-3 对话分支：在某条消息处「从此分支」→ 把该消息及之前另存为【新对话】，源对话原样保留。
   // 源若仍是 autosave（未落真实 id），先 save 一次 fork 成真实 id 作为稳定 parent，并把当前 store 切到该真实 id，
@@ -1454,6 +1537,22 @@ export function AgentPanel() {
         //   新分支落库时 branchConversation 未带 mode/reasoningEffort → DB 取默认；下次该分支被保存
         //   （saveCurrentToHistory / autosave）即写入其当时设置，与切换恢复闭环一致。
         dispatch(setSelectedId(result.newId));
+
+        // ★ Plan_5 M5-5：分支点是 user 时，那条 user【不进新对话子集】，改回填新对话输入框待发（与回溯对齐）。
+        //   refCount 守恒（与回溯不同！）：分支是【复制】、源对话原 user 消息仍在并持有其 sha → 新对话这份草稿
+        //   是【新增引用】，必须 addRef（不像回溯是源消息被移除、引用转移给 pending 故不 addRef）。
+        //   先对该 user 的 sha addRef（+1）再回填草稿，与发送转消息引用 / removePending 时 release 守恒。
+        if (result.pendingUserMessage) {
+          const pu = result.pendingUserMessage;
+          const shasToHold = (pu.attachments ?? [])
+            .map(a => a.sha256)
+            .filter((s): s is string => !!s);
+          for (const sha of shasToHold) {
+            void platform.attachment.addRef(sha).catch(() => undefined);
+          }
+          refillInputFromUserMessage(pu as any);
+        }
+
         // 附件 addRef 守恒检查：若有 sha 重试后仍未 +1，新分支这些图在源对话删除后可能被误删，提示用户。
         if (result.addRefFailedShas.length > 0) {
           dispatch(addNotification({
@@ -1470,7 +1569,7 @@ export function AgentPanel() {
         endConversationSwitch();
       }
     })();
-  }, [dispatch, isStreaming]);
+  }, [dispatch, isStreaming, refillInputFromUserMessage]);
 
   const openReviewChanges = useCallback(() => {
     dispatch(openTab({

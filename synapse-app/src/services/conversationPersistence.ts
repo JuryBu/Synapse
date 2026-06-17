@@ -10,6 +10,9 @@ import {
 import { copyRecord, copyRecordFrom } from './recordStore';
 import type { SynapseRecord } from './recordStore';
 import { identifyRounds } from './roundBoundary';
+// ★ Plan_5 M5-5 分支：cutIdx 向轮边界取整（与回溯/重试同一套共享 helper 口径），分支点是 user 时
+//   该 user 整轮不进子集、改回填新对话输入框待发（规范 §4「新对话=老对话回溯到分支点后的状态」）。
+import { computeRoundTruncation } from './roundTruncation';
 
 export const CONVERSATION_SCHEMA_VERSION = 1;
 export const AUTOSAVE_ID = 'autosave-current';
@@ -312,6 +315,12 @@ export interface BranchResult {
    * 上层据此提示用户「分支附件可能未完整保留」，便于其重新分支或保留源对话。
    */
   addRefFailedShas: string[];
+  /**
+   * ★ Plan_5 M5-5：分支点是 user 消息时，该 user【整轮不进子集】，改由调用方切到新对话后回填输入框待发
+   *   （与回溯对齐）。此处回带那条 user 的内容/附件供 AgentPanel.refillInputFromUserMessage 使用；
+   *   分支点非 user（落在 model 段）或退化为空子集时为 null（不回填，行为同普通分支）。
+   */
+  pendingUserMessage: { content: string; attachments?: Message['attachments'] } | null;
 }
 
 /**
@@ -372,10 +381,33 @@ export async function branchConversation(
   meta?: { title?: string; model?: string; mode?: string; reasoningEffort?: string; workspacePath?: string | null; recordSrcId?: string; recordSnapshot?: SynapseRecord | null },
 ): Promise<BranchResult | null> {
   if (!srcId || !fromMessageId || !Array.isArray(messages) || messages.length === 0) return null;
-  const cutIdx = messages.findIndex(m => m.id === fromMessageId);
-  if (cutIdx < 0) return null;
+  const rawCutIdx = messages.findIndex(m => m.id === fromMessageId);
+  if (rawCutIdx < 0) return null;
 
-  // 1. 子集 = 分支点及之前（含该条）。深拷贝隔离，绝不触碰源 store 引用。
+  // ★ Plan_5 M5-5：cutIdx【向轮边界取整】（复用回溯/重试同款共享 helper，绝不轮中间切）。
+  //   - 分支点是 user：该 user 整轮不进子集（cutIdx 退到上一整轮结束），该 user 回填【新对话】输入框待发。
+  //   - 分支点非 user（落在 model 段）：保留该轮整轮（round-end 同款），不回填。
+  //   退化兜底：分支点是【第 1 轮的 user】→ 排除后子集为空（lastKeptIndex=-1），无法落成有效非空对话
+  //   （历史列表按 messageCount>0 过滤会隐藏它）。此种极端退化回退为「含该 user 的最小子集」（旧 inclusive
+  //   语义、不回填），保证新分支非空可见。其余情形按轮取整 + 回填。
+  const cut = computeRoundTruncation(messages, fromMessageId, 'branch');
+  let cutIdx: number;
+  let pendingUserForRefill: BranchResult['pendingUserMessage'] = null;
+  if (cut.ok && cut.lastKeptIndex >= 0) {
+    cutIdx = cut.lastKeptIndex;
+    if (cut.pendingUserMessage) {
+      const pu = cut.pendingUserMessage as unknown as Message;
+      pendingUserForRefill = { content: pu.content ?? '', attachments: pu.attachments };
+    }
+  } else if (cut.ok && cut.lastKeptIndex < 0 && cut.pendingUserMessage) {
+    // 退化：分支点是第 1 轮 user，排除后子集空 → 回退含该 user 的最小子集（rawCutIdx，inclusive），不回填。
+    cutIdx = rawCutIdx;
+  } else {
+    // helper 兜不住（理论不应发生，anchor 已校验存在）→ 回退旧 inclusive 口径。
+    cutIdx = rawCutIdx;
+  }
+
+  // 1. 子集 = 截断点及之前（含截断点对应消息）。深拷贝隔离，绝不触碰源 store 引用。
   //    ★ M2-3 主键修复：messages.id 是全局 UNIQUE 主键。分支是【复制成独立新对话】，源对话原行仍占着原 message.id，
   //      若新对话复用同一批 message.id，replaceMessages → INSERT 会撞 `UNIQUE constraint failed: messages.id`。
   //      故每条复制出的消息重新生成 message.id。安全性：
@@ -502,6 +534,8 @@ export async function branchConversation(
     title,
     model: meta?.model,
     addRefFailedShas,
+    // ★ Plan_5 M5-5：分支点是 user 时，把那条被排除的 user 回带，供调用方切到新对话后回填输入框待发。
+    pendingUserMessage: pendingUserForRefill,
   };
 }
 
