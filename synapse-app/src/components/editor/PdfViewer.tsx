@@ -198,11 +198,19 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
     let dragging = false;
     let startX = 0, startY = 0, startLeft = 0, startTop = 0;
     const onDown = (e: PointerEvent) => {
-      if (e.button !== 0) return; // 仅左键拖动
+      if (e.button !== 0) return;             // 仅左键
+      if (e.pointerType !== 'mouse') return;  // 仅鼠标；触屏/笔走浏览器原生滚动，避免与 pan 双重滚动
+      // ★ FIX-12b：排除原生滚动条命中区——offsetX/Y 相对 padding-box，超过 clientWidth/Height 即落在
+      //   右侧/底部滚动条带上。此时让浏览器处理原生「拖 thumb 滚动」，绝不启动抓手平移（否则会被
+      //   setPointerCapture 抢走事件、且 pan 公式方向与拖 thumb 相反，导致拖滚动条时画面反向跳动）。
+      if (e.offsetX > el.clientWidth || e.offsetY > el.clientHeight) return;
+      // 无可平移空间（内容未溢出）则不启动，避免「按住拖动毫无反应」的困惑。
+      if (el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight) return;
       dragging = true;
       startX = e.clientX; startY = e.clientY;
       startLeft = el.scrollLeft; startTop = el.scrollTop;
       el.classList.add('is-grabbing');
+      e.preventDefault();                     // 阻止拖拽期间的文本/元素选区高亮
       try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     };
     const onMove = (e: PointerEvent) => {
@@ -225,6 +233,7 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
       el.removeEventListener('pointercancel', onUp);
+      el.classList.remove('is-grabbing'); // 兜底：拖拽中途容器被替换/卸载时清掉残留抓手光标态
     };
   }, [containerEl]);
 

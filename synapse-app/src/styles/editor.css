@@ -58,6 +58,8 @@
 }
 .pdf-viewer-canvas-container.is-grabbing {
   cursor: grabbing;
+  /* ★ FIX-12b：平移期间禁用文本/元素选择，避免拖拽出现蓝色选区高亮（平时不禁用，保留潜在选中需求）。 */
+  user-select: none;
 }
 
 /* ★ FIX-12（修「放大后看不见左右滚动条」真因）：全局滚动条仅 6px、thumb 为 rgba(255,255,255,0.12)，
