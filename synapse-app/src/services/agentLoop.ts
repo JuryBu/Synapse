@@ -9,7 +9,7 @@ import {
   addMessage, updateMessage, updateMessageMeta, appendMessageContent,
   appendMessageThinking, setMessageStreamState, setMessageReconnect, setStreaming,
   clearStreamingContent, setTitle, setTokenUsage,
-  addAssistantRun, addRunEvent, addMessageDiff, recordFileSnapshot,
+  addAssistantRun, addRunEvent, addMessageDiff, recordFileSnapshot, updateToolCallStatus,
   type AttachmentRef, type MessageContentPart, type StreamModeUsed,
 } from '../store/slices/conversation';
 import { setConnectionStatus } from '../store/slices/agentSettings';
@@ -1095,6 +1095,7 @@ export class AgentLoop {
           || AUTOSAVE_ID;
         for (const tc of pendingToolCalls) {
           if (!this.running) break;
+          const toolStartedAt = Date.now();
           try {
             const args = JSON.parse(tc.function.arguments);
             const result = await this.toolExecutor(tc.function.name, args, execContextId);
@@ -1121,6 +1122,16 @@ export class AgentLoop {
               content: result,
               timestamp: Date.now(),
             }));
+            // ★ FIX-13：工具执行成功 → 回写该 toolCall status=success + result + 耗时（停掉 spinner、显示 ✓ 和耗时）。
+            if (assistantMessageId) {
+              store.dispatch(updateToolCallStatus({
+                messageId: assistantMessageId,
+                toolCallId: tc.id,
+                status: 'success',
+                result,
+                executionTime: Date.now() - toolStartedAt,
+              }));
+            }
             apiMessages.push({
               role: 'tool',
               content: result,
@@ -1128,6 +1139,16 @@ export class AgentLoop {
             });
           } catch (err: any) {
             const errorResult = `Error: ${err.message}`;
+            // ★ FIX-13：工具执行失败 → 回写该 toolCall status=error + 错误信息 + 耗时（停掉 spinner、显示 ✗）。
+            if (assistantMessageId) {
+              store.dispatch(updateToolCallStatus({
+                messageId: assistantMessageId,
+                toolCallId: tc.id,
+                status: 'error',
+                result: errorResult,
+                executionTime: Date.now() - toolStartedAt,
+              }));
+            }
             apiMessages.push({
               role: 'tool',
               content: errorResult,

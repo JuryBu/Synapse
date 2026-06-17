@@ -34,19 +34,26 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
     }
   }, [toolCall.result]);
 
+  // ★ FIX-13 兜底：历史对话里旧 toolCall 已落库为 pending（工具早执行完但当时没回写），或任何漏回写边界——
+  //   只要 status 仍为 pending/running 却已有 result（说明实际已完成），就视作 success，避免「执行完还在转圈」。
+  //   新执行路径已由 agentLoop 正确回写 success/error，本兜底只覆盖历史数据与边界。
+  const effectiveStatus = (toolCall.status === 'pending' || toolCall.status === 'running') && toolCall.result
+    ? 'success'
+    : toolCall.status;
+
   const statusIcon = {
     pending: <Loader2 size={14} className="tool-status-icon spinning" />,
     running: <Loader2 size={14} className="tool-status-icon spinning" />,
     success: <Check size={14} className="tool-status-icon success" />,
     error: <X size={14} className="tool-status-icon error" />,
-  }[toolCall.status];
+  }[effectiveStatus];
 
   const statusColor = {
     pending: 'var(--syn-text-muted)',
     running: 'var(--syn-accent)',
     success: '#22c55e',
     error: '#ef4444',
-  }[toolCall.status];
+  }[effectiveStatus];
 
   const resultText = toolCall.result || '';
   const isLongResult = resultText.length > MAX_RESULT_PREVIEW;

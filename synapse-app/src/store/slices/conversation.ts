@@ -162,6 +162,7 @@ export interface ToolCall {
   arguments: string;
   result?: string;
   status: 'pending' | 'running' | 'success' | 'error';
+  executionTime?: number; // ms，执行耗时（success/error 时回填，供 ToolCallCard 显示）
 }
 
 export interface TokenUsage {
@@ -634,6 +635,16 @@ export const conversationSlice = createSlice({
     clearMessages(state) {
       state.messages = [];
     },
+    // ★ FIX-13：工具执行完成后回写 toolCall 的 status/result/耗时。此前 toolCall 创建为 'pending'，
+    //   执行完从不回写 → ToolCallCard 永远显示 spinning（转圈不停）。按 messageId+toolCallId 定位回写。
+    updateToolCallStatus(state, action: PayloadAction<{ messageId: string; toolCallId: string; status: ToolCall['status']; result?: string; executionTime?: number }>) {
+      const msg = state.messages.find(m => m.id === action.payload.messageId);
+      const tc = msg?.toolCalls?.find(t => t.id === action.payload.toolCallId);
+      if (!tc) return;
+      tc.status = action.payload.status;
+      if (action.payload.result !== undefined) tc.result = action.payload.result;
+      if (action.payload.executionTime !== undefined) tc.executionTime = action.payload.executionTime;
+    },
   },
 });
 
@@ -644,5 +655,5 @@ export const {
   addMessageDiff, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,
   setStreaming, appendStreamingContent, clearStreamingContent,
   setModel, setTokenUsage, setPendingMessage, clearConversation, setTitle,
-  editMessage, truncateAt, deleteMessage, clearMessages,
+  editMessage, truncateAt, deleteMessage, clearMessages, updateToolCallStatus,
 } = conversationSlice.actions;
