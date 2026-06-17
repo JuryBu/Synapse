@@ -53,6 +53,36 @@
   justify-content: flex-start;
   padding: 16px;
   background: rgba(0, 0, 0, 0.2);
+  /* ★ FIX-12：抓手光标——提示「可按住拖动平移」。拖动中切 grabbing（JS 加 .is-grabbing）。 */
+  cursor: grab;
+}
+.pdf-viewer-canvas-container.is-grabbing {
+  cursor: grabbing;
+}
+
+/* ★ FIX-12（修「放大后看不见左右滚动条」真因）：全局滚动条仅 6px、thumb 为 rgba(255,255,255,0.12)，
+   压在本容器的半透明黑底上几乎不可见。PDF 是强依赖滚动导航的查看器，给它一套更宽、对比更高的专属滚动条，
+   横竖都清晰可见、易于拖动。 */
+.pdf-viewer-canvas-container::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
+}
+.pdf-viewer-canvas-container::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.25);
+}
+.pdf-viewer-canvas-container::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.32);
+  border-radius: 7px;
+  /* 透明边框 + padding-box 裁切：让 thumb 视觉更细且与轨道留间距，但命中区域仍是整条，便于拖动。 */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.pdf-viewer-canvas-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.5);
+  background-clip: padding-box;
+}
+.pdf-viewer-canvas-container::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* ★ FIX-11：canvas 的显示尺寸由 JS 按 scale 写到 style.width/height（真实放大）。

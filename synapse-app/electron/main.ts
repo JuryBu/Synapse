@@ -48,6 +48,23 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
   }
 
+  // ★ FIX-12：恢复刷新快捷键。app.whenReady 里 Menu.setApplicationMenu(null) 移除了默认菜单，
+  //   连带 Ctrl+R / F5 / Ctrl+Shift+R 这些默认 reload accelerator 一并失效——开发时改了前端代码
+  //   无法自助刷新（此前只能整进程重启 electron）。这里监听键盘输入直接补回，不恢复菜单 UI。
+  mainWindow.webContents.on('before-input-event', (_event, input) => {
+    if (input.type !== 'keyDown') return;
+    const key = (input.key || '').toLowerCase();
+    const ctrlOrCmd = input.control || input.meta;
+    const isReload = key === 'f5' || (ctrlOrCmd && key === 'r');
+    if (!isReload) return;
+    // Ctrl+Shift+R / Ctrl+F5：忽略缓存强刷；否则普通刷新。
+    if (input.shift || (key === 'f5' && input.control)) {
+      mainWindow?.webContents.reloadIgnoringCache();
+    } else {
+      mainWindow?.webContents.reload();
+    }
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });

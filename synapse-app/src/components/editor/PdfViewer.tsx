@@ -39,8 +39,20 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
   // ★ 渲染令牌——每次新渲染自增，异步恢复点前比对，过期帧直接丢弃（防 setState 串帧）。
   const renderTokenRef = useRef(0);
 
-  // 容器 ref：FIX-8 原生 wheel 监听 + FIX-9 scroll 模式滚动容器。
+  // 容器 ref + 挂载态。
+  // ★ FIX-12（修「Ctrl+滚轮永不生效」真因）：旧版 wheel 监听 effect 依赖 [zoomIn,zoomOut,mode]，
+  //   但首帧 loading=true 时组件提前 return loading 占位、根本不渲染滚动容器，effect 跑时
+  //   containerRef.current 为 null 直接早退；待 loadPDF 完成 setLoading(false) 容器才挂载，
+  //   而 effect 依赖未变不会重跑 → 监听「永不绑定」。
+  //   改用 callback ref 把节点提升为 state：挂载（null→div）即触发依赖它的 effect 重绑，
+  //   对 loading/error/paged↔scroll 切换全部自动正确。containerRef 仍保留供 PdfScrollView
+  //   读取（IntersectionObserver root / 滚动定位）。
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
+  const attachContainer = useCallback((el: HTMLDivElement | null) => {
+    containerRef.current = el;
+    setContainerEl(el);
+  }, []);
 
   // ★ FIX-9：scroll 模式下「点翻页按钮要把目标页滚入视图」。用 {page,nonce} 触发，
   //   nonce 每次点击自增以区分「同页重复点」，避免与 IntersectionObserver 回写形成死循环
@@ -162,10 +174,11 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
     };
   }, [mode, page, totalPages, scale]);
 
-  // ── FIX-8：Ctrl+滚轮缩放。React onWheel 默认 passive 无法 preventDefault，
-  //   故用 ref + 原生 addEventListener('wheel', fn, { passive:false })。
+  // ── FIX-8/FIX-12：Ctrl+滚轮缩放。React onWheel 默认 passive 无法 preventDefault，
+  //   故用原生 addEventListener('wheel', fn, { passive:false })。依赖 containerEl（挂载态），
+  //   容器真正挂载后才绑定，根治「loading 期监听漏绑」。
   useEffect(() => {
-    const el = containerRef.current;
+    const el = containerEl;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
@@ -175,8 +188,45 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => { el.removeEventListener('wheel', onWheel); };
-    // mode 进 deps：paged↔scroll 切换时 containerRef 指向的 DOM 元素更换，需重新绑定监听。
-  }, [zoomIn, zoomOut, mode]);
+  }, [containerEl, zoomIn, zoomOut]);
+
+  // ── FIX-12：鼠标拖动平移（抓手）。放大后页面超出视口时，按住左键拖动即可平移滚动容器，
+  //   与主流 PDF 阅读器手感一致。用 Pointer 事件 + setPointerCapture，保证指针拖出元素后仍持续跟随。
+  useEffect(() => {
+    const el = containerEl;
+    if (!el) return;
+    let dragging = false;
+    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0) return; // 仅左键拖动
+      dragging = true;
+      startX = e.clientX; startY = e.clientY;
+      startLeft = el.scrollLeft; startTop = el.scrollTop;
+      el.classList.add('is-grabbing');
+      try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!dragging) return;
+      el.scrollLeft = startLeft - (e.clientX - startX);
+      el.scrollTop = startTop - (e.clientY - startY);
+    };
+    const onUp = (e: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      el.classList.remove('is-grabbing');
+      try { el.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    };
+    el.addEventListener('pointerdown', onDown);
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+    return () => {
+      el.removeEventListener('pointerdown', onDown);
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onUp);
+    };
+  }, [containerEl]);
 
   // 仅更新页码（IntersectionObserver 回写用，不触发滚动，避免死循环）。
   const setVisiblePage = useCallback((p: number) => {
@@ -229,7 +279,7 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
         </button>
       </div>
       {mode === 'paged' ? (
-        <div className="pdf-viewer-canvas-container" ref={containerRef}>
+        <div className="pdf-viewer-canvas-container" ref={attachContainer}>
           {/* ★ FIX-11：不再用 maxWidth:100%/height:auto（会把放大后的页面缩回容器宽度，
               导致「只清晰不放大」）。显示尺寸改由 render effect 按 scale 写到 style.width/height，
               页面真实放大、超出容器时由 .pdf-viewer-canvas-container 的 overflow:auto 出滚动条。 */}
@@ -243,6 +293,7 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
           activePage={page}
           scrollRequest={scrollRequest}
           containerRef={containerRef}
+          attachContainer={attachContainer}
           onVisiblePage={setVisiblePage}
           onError={setError}
         />
@@ -262,11 +313,12 @@ interface PdfScrollViewProps {
   activePage: number;
   scrollRequest: { page: number; nonce: number };
   containerRef: React.RefObject<HTMLDivElement | null>;
+  attachContainer: (el: HTMLDivElement | null) => void;
   onVisiblePage: (page: number) => void;
   onError: (message: string) => void;
 }
 
-function PdfScrollView({ pdf, totalPages, scale, activePage, scrollRequest, containerRef, onVisiblePage, onError }: PdfScrollViewProps) {
+function PdfScrollView({ pdf, totalPages, scale, activePage, scrollRequest, containerRef, attachContainer, onVisiblePage, onError }: PdfScrollViewProps) {
   // 每页一个 canvas ref。
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
   // 每页进行中的 RenderTask（取消用）。
@@ -382,7 +434,7 @@ function PdfScrollView({ pdf, totalPages, scale, activePage, scrollRequest, cont
   }, [scrollRequest, containerRef]);
 
   return (
-    <div className="pdf-viewer-canvas-container pdf-scroll-container" ref={containerRef}>
+    <div className="pdf-viewer-canvas-container pdf-scroll-container" ref={attachContainer}>
       {Array.from({ length: totalPages }, (_, i) => i + 1).map(pageNum => (
         <div className="pdf-scroll-page" data-page={pageNum} key={pageNum}>
           {/* ★ FIX-11：显示尺寸由 renderPage 按 scale 写到 style.width/height，
