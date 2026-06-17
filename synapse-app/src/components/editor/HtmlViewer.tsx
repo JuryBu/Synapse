@@ -90,10 +90,20 @@ export function HtmlViewer({
         </div>
       </div>
       {mode === 'render' ? (
+        // ★ FIX-6 安全收口（提权根治）：绝不同时给 allow-scripts 与 allow-same-origin——
+        //   这正是 HTML 规范明确警告会使 sandbox 失效的组合。srcDoc 由父渲染进程提供，
+        //   带 allow-same-origin 时 iframe 内脚本会继承父窗口同源（dev=http://localhost:5173 / prod=file://），
+        //   可经 window.parent/window.top 触达 preload 经 contextBridge 暴露的全部 synapse IPC 桥
+        //   （command.exec / file.write / file.delete / worktree.* / mcp.* …）。工作区 .html 常为 AI 生成或下载所得，
+        //   并非可信内容，一旦点「渲染」即可执行宿主任意命令 / 任意读写删文件。
+        //   收口方案：保留 allow-scripts（KaTeX/图表等脚本仍执行，CDN <script src> 照常加载），
+        //   去掉 allow-same-origin——srcDoc 随之运行在 null/opaque origin，window.parent.synapse 不可达，提权面归零。
+        //   注：iframe 的 csp 属性浏览器支持度不稳（Chromium 曾实验后撤回）且非标准，不靠它做防线；
+        //   opaque origin 已从根上切断对父窗口同源资源/synapse 桥的访问，无需再叠不可靠的属性。
         <iframe
           className="html-preview-frame"
           srcDoc={content}
-          sandbox=""
+          sandbox="allow-scripts allow-popups"
           title={`HTML 预览: ${fileName}`}
         />
       ) : (

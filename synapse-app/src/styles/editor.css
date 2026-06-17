@@ -36,6 +36,13 @@
   cursor: not-allowed;
 }
 
+/* ★ FIX-9：阅读模式切换按钮选中态。 */
+.pdf-viewer-toolbar button.pdf-mode-active {
+  background: var(--syn-accent);
+  border-color: var(--syn-accent);
+  color: #fff;
+}
+
 .pdf-viewer-canvas-container {
   flex: 1;
   overflow: auto;
@@ -43,6 +50,23 @@
   justify-content: center;
   padding: 16px;
   background: rgba(0, 0, 0, 0.2);
+}
+
+/* ★ FIX-9：连续滚动模式——竖向堆叠多页。 */
+.pdf-scroll-container {
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.pdf-scroll-page {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.pdf-scroll-page canvas {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
 }
 
 .pdf-viewer-loading {
@@ -134,6 +158,52 @@
   resize: none;
   outline: none;
   tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+
+/* ★ FIX-3：可编辑高亮——textarea 浮在高亮层上，二者填满 .code-editor-content。 */
+.code-editor-edit-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* 高亮层：绝对铺满，不接收鼠标事件（点击/选区都给上层 textarea），随 textarea 同步滚动。 */
+.code-editor-edit-highlight {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* 高亮层内 react-syntax-highlighter 产出的 pre：去掉自身滚动（滚动交给 textarea），
+   字号/行高/padding 必须与 textarea 完全一致，否则 caret 与高亮字符串位。 */
+.code-editor-edit-highlight pre,
+.code-editor-edit-highlight code {
+  margin: 0 !important;
+  background: transparent !important;
+  white-space: pre !important;
+  word-break: normal !important;
+}
+
+/* 叠加态 textarea：文字透明（只显 caret），让下方高亮层透出；caret 用浅色保证可见。 */
+.code-editor-textarea-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  color: transparent;
+  background: transparent;
+  caret-color: #c9d1d9;
+  -webkit-text-fill-color: transparent;
+}
+
+/* 选区仍要可见（透明文字下用半透明高亮块表达选中范围）。 */
+.code-editor-textarea-overlay::selection {
+  background: rgba(88, 166, 255, 0.35);
+  -webkit-text-fill-color: transparent;
 }
 
 /* Drop Overlay */

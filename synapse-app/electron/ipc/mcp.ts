@@ -78,6 +78,38 @@ export function ensureDefaultMCPConfig(): void {
     }
 }
 
+/**
+ * ★ FIX-5：应用启动序列里自动拉起所有 enabled!==false 的 MCP server。
+ *   旧实现：whenReady 只做 ensureDefaultMCPConfig + registerMCPHandlers，
+ *   enabled=true 仅被 SettingsPanel 用来出文案，从未被启动序列消费 →
+ *   默认 memory-store 显示「已配置，未启动」，需手动逐个点启动。
+ *
+ *   本函数遍历 config，对 enabled!==false 的 server 逐个 new MCPServerProcess + start，
+ *   单个失败 catch 吞掉不阻塞其余（fire-and-forget，不阻塞创窗）。已在运行的不重复启动。
+ *   启动后前端 mcpBridge.refresh（AgentPanel 构建 AgentLoop 时已调）会自然发现并桥接工具，
+ *   SettingsPanel mcp:status 也会显示「运行中」。
+ */
+export async function startEnabledMCPServers(): Promise<void> {
+    const config = loadMCPConfig();
+    const tasks: Promise<void>[] = [];
+    for (const [name, entry] of Object.entries(config)) {
+        if (entry.enabled === false) continue; // 仅显式 disabled 跳过；未填默认启动。
+        if (servers.has(name)) continue; // 已存在（被动 start 过）则不重复。
+        const proc = new MCPServerProcess(name, entry.command, entry.args, entry.env);
+        servers.set(name, proc);
+        tasks.push(
+            proc.start()
+                .then(() => { console.log(`[MCP] auto-started "${name}"`); })
+                .catch(err => {
+                    console.error(`[MCP] auto-start "${name}" failed:`, (err as Error)?.message);
+                    // 启动失败的从 map 移除，避免后续 status 误报为存在但实际未运行。
+                    servers.delete(name);
+                }),
+        );
+    }
+    await Promise.allSettled(tasks);
+}
+
 export function registerMCPHandlers(): void {
     // 获取 MCP 状态
     // ★ M4-7-S2：handler 改 async——对 running server 调 listTools() 填【真实 tools 名列表】

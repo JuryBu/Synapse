@@ -3,6 +3,7 @@ import { FileTree } from '@/components/sidebar/FileTree';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { ConversationList } from '@/components/chat/ConversationList';
 import { SynopsisPanel } from '@/components/sidebar/SynopsisPanel';
+import { SearchPanel } from '@/components/sidebar/SearchPanel';
 import { fileSystem, type FileNode } from '@/services/fileSystem';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
 import { clearWorkspace, openWorkspace } from '@/store/slices/workspace';
@@ -163,10 +164,7 @@ export function Sidebar({ activeView }: SidebarProps) {
         ) : activeView === 'synopsis' ? (
           <SynopsisPanel />
         ) : activeView === 'search' ? (
-          <div className="sidebar-placeholder">
-            <Search size={32} strokeWidth={1} style={{ opacity: 0.3 }} />
-            <p>搜索文件和内容</p>
-          </div>
+          <SearchPanel />
         ) : activeView === 'settings' ? (
           <SettingsPanel />
         ) : activeView === 'history' ? (

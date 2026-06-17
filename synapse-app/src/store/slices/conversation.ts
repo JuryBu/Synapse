@@ -364,33 +364,11 @@ export const conversationSlice = createSlice({
       const next = (action.payload ?? '').trim();
       state.goal = next || undefined;
     },
-    /**
-     * ★ M4-6-S4 手动 /compact 闭环第 (1) 步「截断 store.messages + 刷新注入前缀」（见 agentLoop.compactNow JSDoc 职责边界）。
-     *   compactNow 只生成 record 批次 + 落库 + 同步 autosave，【不】动 store.messages；本 reducer 由 /compact thunk
-     *   在 compactNow 之后调用，把对话历史真正收敛为：
-     *     头部 1 条 system「压缩摘要」消息（content = recordMd，承载被压段的 record 摘要，下一轮 run 作历史前缀发出 →
-     *     即「刷新注入前缀」）  +  最近 keepRecent 条原文。
-     *   这样被压段从可见对话流移除、后续组装只剩 keep 尾部；摘要已物化进 system 消息。
-     *   ★ M4-6 审查修复（问题6）：thunk 在本 reducer 之后【不再】调 clampToBatch——/compact 是「头部压缩」，
-     *   record 水位由 compactNow 的 appendBatch 正确前进即可；clampToBatch 是「尾部截断/编辑」专用，在此会把刚写的
-     *   record 批误删（keptSteps=最近几条 < record.totalSteps 累计量 → 误判超界）。详见 AgentPanel compactNow helper。
-     *   summaryPrefix 为空（无 record 可压）时为 no-op，避免插入空摘要。
-     */
-    applyManualCompact(state, action: PayloadAction<{ summaryPrefix: string; keepRecent: number }>) {
-      const summary = (action.payload.summaryPrefix ?? '').trim();
-      if (!summary) return; // 无可压缩内容 → 不动。
-      const keep = Math.max(0, action.payload.keepRecent);
-      // 仅在确有可压段（消息数 > keep）时压缩；否则历史本就很短，无需动。
-      if (state.messages.length <= keep) return;
-      const tail = keep > 0 ? state.messages.slice(state.messages.length - keep) : [];
-      const summaryMessage: Message = normalizeMessage({
-        id: `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        role: 'system',
-        content: summary,
-        timestamp: Date.now(),
-      });
-      state.messages = [summaryMessage, ...tail];
-    },
+    // ★ M5-1 压缩归一：原 applyManualCompact reducer 已删除。
+    //   压缩有且仅有一套（手动 /compact ＝ 自动压缩，完全同一套逻辑，仅触发方式不同）：压缩【不删任何 store.messages】，
+    //   只在压缩点画 batchDivider 分隔线（AgentPanel.batchDividerByIdx，读 record 各批 stepEnd → 消息下标）。
+    //   原 reducer 把 state.messages 收敛为 [system 摘要, ...keep 尾] 删了 store 消息，违背核心原则「UI/本地永不删减」，
+    //   故彻底删除。/compact 现只调 agentLoop.compactNow（生成 record 批次 + 落库），绝不截断 store。
     addMessage(state, action: PayloadAction<Message>) {
       state.messages.push(normalizeMessage(action.payload));
     },
@@ -655,7 +633,7 @@ export const conversationSlice = createSlice({
 });
 
 export const {
-  setConversation, setConversationWorkspace, setGoal, applyManualCompact, addMessage, updateMessage,
+  setConversation, setConversationWorkspace, setGoal, addMessage, updateMessage,
   updateMessageMeta, appendMessageContent, setMessageAttachments,
   appendMessageThinking, setMessageStreamState, setMessageReconnect,
   addMessageDiff, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,

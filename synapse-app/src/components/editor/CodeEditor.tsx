@@ -2,9 +2,12 @@
  * CodeEditor Component
  * Lightweight code display with syntax highlighting (no Monaco dependency)
  * - 只读分支：react-syntax-highlighter（Prism，PrismAsyncLight 按需注册语言）语法高亮。
- * - 可编辑分支：原生 textarea，含 Ctrl+S / Tab，逐字节与现状一致，不受高亮改造影响。
+ * - 可编辑分支（★ FIX-3）：透明 textarea 叠在同样 Prism 高亮的 pre 层之上，二者像素级对齐 +
+ *   滚动同步，做到「可编辑也带高亮」。保留 Ctrl+S / Tab / onChange / onSave 全部原有行为。
+ *   高亮层与 textarea 共用同一 padding/font/line-height（见 .code-editor-edit-* CSS），
+ *   确保 caret 与高亮字符不串位。无高亮语言（text）或超大文件降级为纯透明 textarea（无高亮层）。
  */
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Copy, Check, Save } from 'lucide-react';
 import { PrismAsyncLight as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -79,6 +82,10 @@ export function CodeEditor({ filename, content, language, readOnly = true, dirty
   const [isDirty, setIsDirty] = useState(false);
   const originalContent = savedContent ?? content;
 
+  // ★ FIX-3：可编辑高亮——textarea 与高亮层滚动同步用的 ref。
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const highlightRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     setValue(content);
     setIsDirty(dirty);
@@ -99,11 +106,20 @@ export function CodeEditor({ filename, content, language, readOnly = true, dirty
     }
   }, [value, onSave]);
 
+  // ★ FIX-3：textarea 滚动时把高亮层滚动到同一位置，保持字符对齐。
+  const syncScroll = useCallback(() => {
+    const ta = textareaRef.current;
+    const hl = highlightRef.current;
+    if (!ta || !hl) return;
+    hl.scrollTop = ta.scrollTop;
+    hl.scrollLeft = ta.scrollLeft;
+  }, []);
+
   // Detect language from filename
   const lang = language || detectLanguage(filename);
 
-  // ── M4-4-S1：只读高亮的 Prism 语言名 + 大文件降级判定。
-  //   仅在只读分支用；可编辑分支不读这两个值。用 useMemo 避免每次渲染重算大文件尺寸。
+  // ── M4-4-S1：高亮的 Prism 语言名 + 大文件降级判定（★ FIX-3 起只读/可编辑两分支共用）。
+  //   useMemo 避免每次渲染重算大文件尺寸。逐键编辑会随 value 变化重算 tooLargeForHighlight。
   const prismLang = useMemo(() => mapToPrismLang(lang), [lang]);
   const tooLargeForHighlight = useMemo(() => {
     if (!value) return false;
@@ -173,31 +189,66 @@ export function CodeEditor({ filename, content, language, readOnly = true, dirty
             </pre>
           )
         ) : (
-          <textarea
-            className="code-editor-textarea"
-            value={value}
-            onChange={e => { const v = e.target.value; setValue(v); setIsDirty(v !== originalContent); onChange?.(v); }}
-            onKeyDown={e => {
-              if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
-                e.preventDefault();
-                handleSave();
-              }
-              // Tab support
-              if (e.key === 'Tab') {
-                e.preventDefault();
-                const start = e.currentTarget.selectionStart;
-                const end = e.currentTarget.selectionEnd;
-                const newVal = value.substring(0, start) + '  ' + value.substring(end);
-                setValue(newVal);
-                setIsDirty(newVal !== originalContent);
-                onChange?.(newVal);
-                setTimeout(() => {
-                  e.currentTarget.selectionStart = e.currentTarget.selectionEnd = start + 2;
-                });
-              }
-            }}
-            spellCheck={false}
-          />
+          // ★ FIX-3：可编辑 + 高亮。透明 textarea 浮在高亮 pre 层上，二者同 padding/font/line-height
+          //   像素对齐 + 滚动同步。无高亮语言（text）或超大文件时 useHighlight=false，高亮层不渲染，
+          //   退化为纯 textarea（外观同改造前）。
+          <div className="code-editor-edit-wrap">
+            {useHighlight && (
+              <div className="code-editor-edit-highlight" ref={highlightRef} aria-hidden="true">
+                <SyntaxHighlighter
+                  language={prismLang as string}
+                  style={vscDarkPlus}
+                  showLineNumbers={false}
+                  wrapLongLines={false}
+                  customStyle={{
+                    margin: 0,
+                    padding: 12,
+                    background: 'transparent',
+                    fontSize: 13,
+                    lineHeight: 1.5,
+                    fontFamily: 'var(--syn-font-mono)',
+                    tabSize: 2,
+                    minHeight: '100%',
+                    overflow: 'visible',
+                    whiteSpace: 'pre',
+                  }}
+                  codeTagProps={{
+                    style: { fontFamily: 'var(--syn-font-mono)', fontSize: 13, whiteSpace: 'pre' },
+                  }}
+                >
+                  {/* 末尾换行兜底：textarea 末行为空行时高亮层需多一行高度，避免末行错位。 */}
+                  {value.endsWith('\n') ? value + ' ' : value}
+                </SyntaxHighlighter>
+              </div>
+            )}
+            <textarea
+              ref={textareaRef}
+              className={`code-editor-textarea${useHighlight ? ' code-editor-textarea-overlay' : ''}`}
+              value={value}
+              onScroll={syncScroll}
+              onChange={e => { const v = e.target.value; setValue(v); setIsDirty(v !== originalContent); onChange?.(v); }}
+              onKeyDown={e => {
+                if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault();
+                  handleSave();
+                }
+                // Tab support
+                if (e.key === 'Tab') {
+                  e.preventDefault();
+                  const start = e.currentTarget.selectionStart;
+                  const end = e.currentTarget.selectionEnd;
+                  const newVal = value.substring(0, start) + '  ' + value.substring(end);
+                  setValue(newVal);
+                  setIsDirty(newVal !== originalContent);
+                  onChange?.(newVal);
+                  setTimeout(() => {
+                    e.currentTarget.selectionStart = e.currentTarget.selectionEnd = start + 2;
+                  });
+                }
+              }}
+              spellCheck={false}
+            />
+          </div>
         )}
       </div>
     </div>

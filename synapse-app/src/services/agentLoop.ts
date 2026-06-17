@@ -1137,27 +1137,26 @@ export class AgentLoop {
   }
 
   /**
-   * ★ M4-7-S6：可复用的「压缩落库」核心——生成 record 批次 + 落库 + 同步持久化，返回刷新后的注入前缀 recordMd。
+   * ★ 可复用的「压缩落库」核心——生成 record 批次 + 落库 + 同步持久化 store.messages 一次，返回刷新后的注入前缀 recordMd。
    *
-   * 同时服务【两条路径】，复用同一套实现、结果一致：
+   * ★ M5-1 压缩归一：压缩有且仅有一套，手动 /compact ＝ 自动压缩，完全同一套逻辑，仅触发方式不同：
    *   - 自动压缩（run 内 ~90% 水位 compressContext 判定 wasCompressed 后）：传入它算好的 compressedSegment
    *     （= 本轮 requestHistory 去掉最近 keepCount 条原文之前的全部），行为与抽取前【逐字节一致】。
-   *   - 手动压缩（M4-6 的 /compact 命令）：不传 compressedSegment，由本方法从 store 当前对话历史自行计算
-   *     被压缩段（与自动同口径：过滤 tool 后保留最近 KEEP_RECENT 条原文之前的全部），主动触发一次压缩。
+   *   - 手动压缩（/compact 命令）：不传 compressedSegment，由本方法从 store 当前对话历史自算被压缩段
+   *     （与自动同口径：过滤 tool 后保留最近 KEEP_RECENT 条原文之前的全部）。归一后 store 永不被截断，
+   *     故手动自算段与自动传入段【同源】，batchSlice 单一口径。
    *
    * 返回：
    *   - 落库成功 → buildStableRecordPrefix(updated)（含本批的确定性稳定前缀）。
    *   - 无新批 / 生成失败 / 中止 → 旧 record 的稳定前缀（existingRecord 存在时）或 null（无 record 时）。
    *   - 调用方据此组装注入前缀；null 时自动路径回退到 compressContext 字符截断（手动路径据此提示无可压缩内容）。
    *
-   * ★★ 职责边界（M4-7 审查澄清，调用方务必知悉）：
-   *   本方法【只负责】「生成 record 批次 + 落库 + 同步持久化 store.messages 一次」三件事，并返回刷新后的
-   *   注入前缀 recordMd。它【不负责】下面两件事，手动入口（M4-6 /compact thunk）必须自行补齐：
-   *     (1) 截断 store.conversation.messages（把被压缩段从对话历史中移除/收敛，使后续组装只剩 keep 尾部）；
-   *     (2) 刷新当前会话 AgentLoop 的注入前缀（让下一轮 send 用上新的 recordMd，而非旧前缀）。
-   *   自动路径无需这两步——run() 外层在组装 apiHistory 时本就自行用 compressedSegment 截断 + 注入 recordMd，
-   *   行为与抽取前【逐字节一致】（这正是本方法对自动路径只返回 recordMd 的原因）。手动入口若只调一次本方法、
-   *   拿到 recordMd 就以为闭环，会漏掉对当前历史的实际截断与注入刷新——这两步须由 M4-6 调用方包一层补上。
+   * ★★ 职责边界（核心原则：压缩绝不删 store.messages）：
+   *   本方法【只负责】「生成 record 批次 + 落库 + 同步持久化 store.messages 一次」并返回注入前缀 recordMd。
+   *   它【绝不】截断 / 收敛 store.conversation.messages —— UI 与本地完整对话文件永远全量保留，压缩只产出
+   *   record 批次。压缩点在 UI 上由 AgentPanel.batchDividerByIdx 分隔线呈现（读 record 各批 stepEnd → 消息下标，
+   *   store 全量时天然画对位置），自动 / 手动两条路径走完全相同的注入组装（run() 外层用 compressedSegment 算
+   *   注入前缀，不删 store），无需调用方再补任何「截断 / 刷新前缀」步骤。
    *
    * ★ R5 健壮性契约沿用（务必维持）：
    *   - 为本次压缩生成新建独立 AbortController 登记到 this.compressControllers，stop() 可遍历 abort；
@@ -1180,20 +1179,19 @@ export class AgentLoop {
   ): Promise<string | null> {
     if (!conversationId) return null;
 
-    // 被压缩段：自动路径由 run 传入（从 store 头部累计的【全量】被压段）；
-    //   手动 /compact 缺省时从 store 当前对话历史自算（store 已被上次手动压缩截断，只剩【本次新增】被压段）。
-    //   这两种语义不同，下方 batchSlice 计算必须分别处理（见 isManualEntry）。
+    // ★ M5-1 压缩归一：手动 /compact 与自动压缩【完全同源】，被压缩段语义统一。
+    //   - 自动路径：run 在组装时传入 compressedSegment（= 从 store 头部累计的【全量】被压段，自动压缩不截断 store）。
+    //   - 手动 /compact：不传 compressedSegment，本方法从 store 当前对话历史自算。归一后 store 永不被截断，
+    //     故手动自算出的也是「从 store 头部累计的【全量】被压段」——与自动路径【同源同口径】。
+    //   下方 batchSlice 因此统一为 coveredEligible.slice(priorSteps) 单一口径，不再有手动/自动分支差异。
     let compressedSegment = opts?.compressedSegment;
-    const isManualEntry = !compressedSegment; // 缺省 compressedSegment == 手动 /compact 入口（run 自动路径总会传入）。
     if (!compressedSegment) {
-      // 手动入口：保留最近 KEEP_RECENT 条原文（与 compressContext 的 keepCount=4 同口径），其余压成 record。
+      // 手动入口：保留最近 KEEP_RECENT 条原文（与 compressContext 的 keepCount=4 同口径），其余的被压段交给增量切片。
       const KEEP_RECENT = 4;
-      // ★ M4-6 审查修复（high/correctness 问题1+6 同根因）：排除 role==='system' 的「压缩摘要」消息。
-      //   applyManualCompact 会把上一次压缩的 record 摘要物化成头部一条 system 消息插入 store.messages。
-      //   若这里只 filter tool，第二次 /compact 会把该 system 摘要计入 compressedSegment → record 的 stepEnd
-      //   多算 1（system 占 step index 0）→ 水位错位。统一全程排除 system 后，step 口径与首次建立 / clampToBatch 一致。
+      // step 口径：排除 tool（由 agentLoop 内部管理，不计入 step）。归一后 store 已无 system 压缩摘要消息，
+      //   全程只按 user/assistant 算 step，与 record 首次建立 / 自动路径 / clampToBatch 一致。
       const liveMessages = (store.getState() as RootState).conversation.messages
-        .filter((m: any) => m.role !== 'tool' && m.role !== 'system') // tool 由 agentLoop 内部管理；system=压缩摘要，不计入 step 口径
+        .filter((m: any) => m.role !== 'tool')
         .map(toChatMessage);
       const keepStartIdx = Math.max(0, liveMessages.length - KEEP_RECENT);
       compressedSegment = liveMessages.slice(0, keepStartIdx);
@@ -1213,21 +1211,14 @@ export class AgentLoop {
     try {
       const existingRecord = await getRecord(conversationId);
 
-      // ★ step 口径对齐 record（全程不含 tool，且不含 system 压缩摘要）。
-      //   ★ M4-6 审查修复（问题1+6 根因，比审查建议更彻底）：排除 role==='system'，并区分手动/自动入口算 batchSlice。
-      //   背景：record 增量水位 priorSteps（末批 stepEnd）以「对话 step0 累计」为绝对基准；自动路径 compressedSegment
-      //   是从 store 头部累计的【全量】被压段（自动压缩不截断 store），故 batchSlice = coveredEligible.slice(priorSteps)
-      //   正确切出「上次已覆盖之后的新增段」。但手动 /compact 不同：applyManualCompact 上次已把 store 头部截断、被压段
-      //   原文从 store 移除，故手动入口算出的 compressedSegment 本身就【只剩本次新增段】（不含已 append 的历史步）。
-      //   若对它再 slice(priorSteps) 等于二次增量——把本批前 priorSteps 条又减掉 → 连续 /compact 会漏切中间历史
-      //   （u3/a3/u4/a4 既不进 record 又被截断永久丢失，正是审查问题1 现象的真根因；仅改 filter 不足以修复）。
-      //   故手动入口 batchSlice = coveredEligible 整段（它已是本批增量），stepStart 仍锚定 priorSteps 续接末批。
-      const coveredEligible = compressedSegment.filter(m => m.role !== 'tool' && m.role !== 'system');
-      const priorSteps = existingRecord?.totalSteps ?? 0;       // = 末批 stepEnd（不含 tool/system）
+      // ★ M5-1 压缩归一：batchSlice 单一口径（手动 /compact 与自动压缩同源，不再分支）。
+      //   step 口径对齐 record（全程不含 tool）。record 增量水位 priorSteps（末批 stepEnd）以「对话 step0 累计」为绝对基准。
+      //   归一后两条路径的 compressedSegment 都是「从 store 头部累计的【全量】被压段」（压缩绝不截断 store），
+      //   故 batchSlice = coveredEligible.slice(priorSteps) 恒切出「上次已覆盖之后的新增段」——单一口径全覆盖。
+      const coveredEligible = compressedSegment.filter(m => m.role !== 'tool');
+      const priorSteps = existingRecord?.totalSteps ?? 0;       // = 末批 stepEnd（不含 tool）
       const priorRounds = existingRecord?.totalRounds ?? 0;     // = 末批 roundEnd
-      const batchSlice = isManualEntry
-        ? coveredEligible                       // 手动：store 已截断 → coveredEligible 即本批增量段，不再二次 slice
-        : coveredEligible.slice(priorSteps);    // 自动：从 store 头部累计的全量段 → 切掉已覆盖前缀得本批
+      const batchSlice = coveredEligible.slice(priorSteps);     // 从全量段切掉已覆盖前缀得本批增量
 
       // ★ M4-5-S2：压缩注入改用确定性稳定前缀（不随 contextWindow 动态升降级），杜绝 apiMessages[1] 前缀漂移。
       recordMd = existingRecord ? buildStableRecordPrefix(existingRecord) : null;

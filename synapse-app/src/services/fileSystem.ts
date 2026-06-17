@@ -510,6 +510,68 @@ class FileSystemService {
     return newPath;
   }
 
+  /** 公开当前工作区根路径（SearchPanel 等需要绝对根做内容搜索）。 */
+  getWorkspaceRoot(): string {
+    return this.getCurrentWorkspacePath();
+  }
+
+  /**
+   * ★ FIX-4：统一搜索入口（供 SearchPanel 用）。
+   *   - 文件名匹配：遍历内存文件树（Electron / Web 都有）。
+   *   - 内容匹配：Electron 走主进程 `file:search`（fs 递归 grep，返回 path/line/content）；
+   *     Web 模式无磁盘访问，降级为仅内存文件内容（uploadFile 读入 memoryFiles 的文本文件）。
+   *   返回统一形态：kind 区分 file（文件名命中）/ content（行内容命中）。
+   */
+  async searchInWorkspace(
+    query: string,
+  ): Promise<Array<{ path: string; name: string; kind: 'file' | 'content'; line?: number; content?: string }>> {
+    const trimmed = query.trim();
+    if (!trimmed) return [];
+    const lower = trimmed.toLowerCase();
+    const results: Array<{ path: string; name: string; kind: 'file' | 'content'; line?: number; content?: string }> = [];
+    const seenFiles = new Set<string>();
+
+    // ① 文件名匹配（遍历当前工作区树）。
+    const walk = (node: FileNode) => {
+      if (node.type === 'file' && node.name.toLowerCase().includes(lower)) {
+        if (!seenFiles.has(node.path)) {
+          seenFiles.add(node.path);
+          results.push({ path: node.path, name: node.name, kind: 'file' });
+        }
+      }
+      if (node.children) for (const c of node.children) walk(c);
+    };
+    walk(this.fileTree);
+
+    // ② 内容匹配。
+    if (isElectron && window.synapse?.file?.search) {
+      try {
+        const root = this.getCurrentWorkspacePath();
+        const matches = await window.synapse.file.search(root, trimmed);
+        for (const m of matches as Array<{ path: string; line: number; content: string }>) {
+          if (!m?.path) continue;
+          const name = m.path.split(/[\\/]/).pop() || m.path;
+          results.push({ path: m.path, name, kind: 'content', line: m.line, content: m.content });
+        }
+      } catch { /* 内容搜索失败不影响文件名结果 */ }
+    } else {
+      // Web 降级：仅内存文本文件内容。
+      for (const [p, content] of this.memoryFiles) {
+        const idx = content.toLowerCase().indexOf(lower);
+        if (idx === -1) continue;
+        const lineStart = content.lastIndexOf('\n', idx) + 1;
+        const lineEndRaw = content.indexOf('\n', idx);
+        const lineEnd = lineEndRaw === -1 ? content.length : lineEndRaw;
+        const matchLine = content.slice(lineStart, lineEnd).trim();
+        const line = content.slice(0, idx).split('\n').length;
+        const name = p.split(/[\\/]/).pop() || p;
+        results.push({ path: p, name, kind: 'content', line, content: matchLine.slice(0, 200) });
+      }
+    }
+
+    return results;
+  }
+
   async searchFiles(query: string): Promise<Array<{ path: string; match: string }>> {
     const results: Array<{ path: string; match: string }> = [];
     const lowerQuery = query.toLowerCase();

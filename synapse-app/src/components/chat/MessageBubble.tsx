@@ -180,8 +180,7 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
   const [thinkingOpen, setThinkingOpen] = useState(!thinking?.collapsed);
   // ★ M3-3a：工作流卡片消息默认折叠纯文本汇总（卡片是主视图，文本汇总作为可展开 fallback）。
   const [workflowSummaryOpen, setWorkflowSummaryOpen] = useState(false);
-  // ★ M4-6-S4 手动 /compact 压缩摘要点（role='system'）默认折叠——摘要可能较长，折叠态只显一行说明。
-  const [collapsed, setCollapsed] = useState(true);
+  // ★ M5-1 压缩归一：原 role==='system' 压缩摘要卡片的折叠 state 已删除（不再渲染 system 摘要卡片）。
   const [now, setNow] = useState(() => Date.now());
   const editRef = useRef<HTMLTextAreaElement>(null);
   const live = isStreaming || streamState === 'pending' || streamState === 'streaming';
@@ -297,25 +296,23 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
     );
   }
 
-  // ★ M4-6-S4 手动 /compact：压缩摘要点（role='system' 的 content 是 record 摘要前缀）。
-  //   渲染为紧凑可折叠卡片而非 AI 气泡——让用户清楚「此处历史已被手动压缩为摘要，AI 后续看摘要 + 最近对话」。
+  // ★ M5-1 压缩归一：原 role==='system' 的「手动压缩摘要卡片」渲染分支已删除。
+  //   归一后压缩绝不把摘要物化成 system 消息塞进 store.messages，故正常不再有 system 摘要卡片需要渲染。
+  //   压缩点改由 AgentPanel.batchDividerByIdx「已压缩」分隔线呈现，对话原文照常全量显示。
+  //   遗留 system 摘要的【治本清理】在对话加载入口（conversationPersistence.stripLegacyCompactMessages）一次性剥除，
+  //   归一后 store 恒无 system 消息——这是主防线。
+  //
+  //   下面这条极简 system 兜底是【第二道防线】（纯防御）：万一某条遗留 compact_* system 摘要因边缘路径仍漏进 store，
+  //   绝不让它掉到通用气泡分支被当成 AI 正文铺出（既视觉突兀又误导用户以为 AI 真发了这段）。
+  //   渲染成与「已压缩」分隔线同款的极简提示，原文不当正文展示。
   if (role === 'system') {
     return (
-      <div className="message message-compact-summary">
-        <button
-          className="compact-summary-toggle"
-          onClick={() => setCollapsed(c => !c)}
-          title={collapsed ? '展开压缩摘要' : '折叠压缩摘要'}
-        >
-          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-          <ListChecks size={13} />
-          <span>历史已手动压缩为摘要（AI 后续看摘要 + 最近对话）</span>
-        </button>
-        {!collapsed && (
-          <div className="compact-summary-body glass-panel">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-          </div>
-        )}
+      <div
+        className="message-compact-divider"
+        style={{ textAlign: 'center', fontSize: 11, color: 'var(--syn-text-muted)', padding: '6px 12px', margin: '6px 0', borderTop: '1px dashed rgba(255,255,255,0.12)', opacity: 0.75 }}
+        title="此处为历史压缩摘要占位（遗留数据）；发送给 AI 时用 record 摘要代替原文"
+      >
+        ⌁ 历史已压缩为摘要 ⌁
       </div>
     );
   }

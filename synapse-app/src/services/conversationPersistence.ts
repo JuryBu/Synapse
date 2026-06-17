@@ -129,6 +129,31 @@ function createMessageId(): string {
   return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * ★ M5-1 压缩归一 · 遗留 system 摘要清理（入口兜底，治本）。
+ *
+ * 旧版 applyManualCompact 会把手动 /compact 的压缩摘要【物化成一条 role='system' 消息】（id 形如 `compact_*`）
+ * push 进 store.messages，并经 sanitizeMessagesForPersistence 持久化进本地 DB（该函数不按 role 过滤）。
+ * M5-1 归一后：
+ *   - MessageBubble 删除了 role==='system' 渲染分支 → 遗留 system 摘要会掉到通用气泡分支，被当成 AI 正文铺出（视觉突兀、误导）。
+ *   - agentLoop 的 step 口径（requestHistory / compactNow coveredEligible）已去掉 `role!=='system'` 特判 →
+ *     存量遗留 system 消息会被多计一个 step，使 record stepEnd/priorSteps 与 batchSlice / batchDivider 下标错位。
+ *
+ * 两处问题【同根源】：store 里仍残留旧 compact_* system 消息。最干净的修法是在【所有对话加载入口】一次性过滤掉它，
+ * 归一后 store 即恒无 system 消息——MessageBubble 删除分支无回归、agentLoop 单一 step 口径自洽、batchDivider 下标正确，
+ * 无需在任何 filter 里再特判 system。原文不丢（摘要本就是历史的冗余物化，删掉后压缩点改由 batchDivider「已压缩」分隔线呈现）。
+ *
+ * 精确匹配（role==='system' 且 id 以 `compact` 开头）：只清旧压缩摘要，不误伤任何其它潜在 system 消息。
+ */
+function stripLegacyCompactMessages(messages: Message[]): Message[] {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  const filtered = messages.filter(
+    m => !(m.role === 'system' && typeof m.id === 'string' && m.id.startsWith('compact')),
+  );
+  // 无遗留则返回原引用（不制造无谓新数组）。
+  return filtered.length === messages.length ? messages : filtered;
+}
+
 export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Promise<void> {
   const id = snapshot.id || AUTOSAVE_ID;
   // ★ M2-6 切换竞态封堵（本轮收紧，把 mode/reasoningEffort 一并纳入保护）：
@@ -199,7 +224,10 @@ export async function loadAutosaveSnapshot(): Promise<ConversationSnapshot | nul
     const saved = localStorage.getItem(AUTOSAVE_KEY);
     if (!saved) return null;
     const parsed = JSON.parse(saved);
-    if (Array.isArray(parsed.messages)) return parsed;
+    if (Array.isArray(parsed.messages)) {
+      // ★ M5-1 归一入口兜底：localStorage autosave 镜像同样剥掉遗留 compact_* system 摘要消息。
+      return { ...parsed, messages: stripLegacyCompactMessages(parsed.messages) };
+    }
   } catch {
     return null;
   }
@@ -716,7 +744,9 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
   try {
     const conversation = await platform.conversation.get(id);
     if (!conversation) return null;
-    const messages = await platform.conversation.listMessages(id);
+    // ★ M5-1 归一入口兜底：从 DB 读回即剥掉遗留 compact_* system 摘要消息（见 stripLegacyCompactMessages）。
+    //   所有真实对话恢复（ConversationList 切换 / AgentPanel 切换 / autosave / WorkflowView）都经此函数，统一收口。
+    const messages = stripLegacyCompactMessages(await platform.conversation.listMessages(id) as Message[]);
     return {
       id,
       title: conversation.title,
@@ -729,7 +759,7 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
       reasoningEffort: fallbackMeta(conversation.reasoningEffort ?? conversation.reasoning_effort, 'auto'),
       archived: Boolean(conversation.archived),
       tags: normalizeTags(conversation.tags),
-      messages: messages as Message[],
+      messages,
       assistantRuns: conversation.assistantRuns ?? {},
       fileSnapshots: conversation.fileSnapshots ?? {},
       pendingDiffs: conversation.pendingDiffs ?? [],
@@ -910,8 +940,10 @@ function updateLegacyConversationMetadata(id: string, patch: Partial<Conversatio
 }
 
 function loadLegacyConversationSnapshot(id: string): ConversationSnapshot | null {
-  const messages = readLegacyConversationMap()[id];
-  if (!Array.isArray(messages)) return null;
+  const rawMessages = readLegacyConversationMap()[id];
+  if (!Array.isArray(rawMessages)) return null;
+  // ★ M5-1 归一入口兜底：legacy（localStorage map）对话同样剥掉遗留 compact_* system 摘要消息。
+  const messages = stripLegacyCompactMessages(rawMessages);
   const metadata = readLegacyConversationMetadata()[id] ?? {};
   return {
     id,

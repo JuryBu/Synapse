@@ -1,4 +1,148 @@
 /* ============================================
+   Search Panel (★ FIX-4)
+   ============================================ */
+
+.search-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+}
+
+.search-input-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search-input-icon {
+  position: absolute;
+  left: 8px;
+  color: var(--syn-text-muted);
+  pointer-events: none;
+}
+
+.search-input {
+  width: 100%;
+  padding: 6px 26px 6px 28px;
+  font-size: 13px;
+  color: var(--syn-text-primary);
+  background: var(--syn-bg-elevated);
+  border: 1px solid var(--syn-border);
+  border-radius: 6px;
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: var(--syn-accent);
+}
+
+.search-clear-btn {
+  position: absolute;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  background: none;
+  border: none;
+  color: var(--syn-text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.search-clear-btn:hover {
+  color: var(--syn-text-primary);
+  background: var(--syn-bg-hover);
+}
+
+.search-status {
+  font-size: 12px;
+  color: var(--syn-text-muted);
+  padding: 4px 6px;
+}
+
+.search-results {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.search-group-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--syn-text-muted);
+  padding: 4px 6px 2px;
+}
+
+.search-result-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--syn-text-secondary);
+  overflow: hidden;
+}
+
+.search-result-item:hover {
+  background: var(--syn-bg-hover);
+}
+
+.search-result-icon {
+  flex-shrink: 0;
+  color: var(--syn-text-muted);
+}
+
+.search-result-name {
+  font-size: 13px;
+  color: var(--syn-text-primary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.search-result-line {
+  color: var(--syn-text-muted);
+  font-family: var(--syn-font-mono);
+  font-size: 11px;
+}
+
+.search-result-path {
+  font-size: 11px;
+  color: var(--syn-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.search-result-content {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.search-result-snippet {
+  font-size: 11px;
+  font-family: var(--syn-font-mono);
+  color: var(--syn-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+}
+
+/* ============================================
    FileTree & Context Menu Styles
    ============================================ */
 

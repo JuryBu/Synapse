@@ -27,7 +27,7 @@ import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
 import { mcpBridge } from '@/services/mcpBridge';
 import { addNotification } from '@/store/slices/notifications';
-import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setGoal, applyManualCompact, setModel as setConversationModel, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
 // ★ M3-3a：generateWorkflowRunId 预生成稳定 runId，跑前先建占位 assistant 消息 + 关联卡片实时显示。
 import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@/services/multiAITrigger';
@@ -122,6 +122,10 @@ export function AgentPanel() {
   // ★ M3-2b 修复（high）：标记当前是否在跑 @MultiAI 工作流（走 agentOrchestrator 而非 agentLoop）。
   //   runWorkflowFromInput 进入置 true / finally 置 false；handleStop 据此分流到 agentOrchestrator.abortAll()。
   const isWorkflowRunningRef = useRef(false);
+  // ★ M5-1 压缩归一：手动 /compact 重入守卫。归一后 store.messages 不再被压缩截断，原先「第二次 /compact 因
+  //   store 变短被 msgCount<=KEEP_RECENT 挡掉」的天然防重入消失；这里显式防「压缩生成在途又触发一次 /compact」
+  //   导致的重复 LLM 压缩 + 通知竞态 + record 水位竞争。compactNow 进入置 true、finally 置 false。
+  const isCompactingRef = useRef(false);
   const isStreaming = useAppSelector((s: RootState) => (s as any).conversation.isStreaming);
   const settings = useAppSelector((s: RootState) => (s as any).settings);
   const agentSettings = useAppSelector((s: RootState) => (s as any).agentSettings);
@@ -1000,45 +1004,54 @@ export function AgentPanel() {
     // ★ M4-6-S4 /goal：设/清当前对话目标（写 conversation.goal，随对话持久化 + 每轮注入 <current_goal>）。
     setGoal: (text: string) => { dispatch(setGoal(text)); },
     getGoal: () => (conversationRef.current.goal as string | undefined),
-    // ★ M4-6-S4 /compact 完整手动闭环（见 agentLoop.compactNow JSDoc 职责边界）：
-    //   compactNow 只生成 record 批次 + 落库 + 同步 autosave，【不】动 store.messages。手动入口须补一步：
-    //   (1) 截断 store.messages + 刷新注入前缀：dispatch(applyManualCompact) 把历史收敛为
-    //       「头部 1 条 system 压缩摘要消息(content=recordMd) + 最近 N 条」——摘要物化进消息，下一轮 run 作历史前缀发出。
-    //   ★ M4-6 审查修复（问题6）：曾有第 (2) 步 clampToBatch「对齐水位」——【已删除】。/compact 是头部压缩，record
-    //     水位由 compactNow 的 appendBatch 正确前进即可；clampToBatch 是尾部截断/编辑专用，在此会把刚写的批误删（详见下方）。
+    // ★ M5-1 压缩归一 /compact：压缩有且仅有一套，手动 ＝ 自动，完全同一套逻辑（仅触发方式不同）。
+    //   /compact 只调 loop.compactNow（生成 record 批次 + 落库 + 同步 autosave），【绝不截断 store.messages】——
+    //   UI 与本地完整对话照常全量保留，压缩点由 batchDividerByIdx 分隔线呈现（读 record 各批 stepEnd → 消息下标，
+    //   store 全量时天然画对位置）。原来的 dispatch(applyManualCompact)（把历史收敛为「system 摘要 + keep 尾」、
+    //   删了 store 消息）违背核心原则，已彻底删除。
     compactNow: async () => {
       const loop = agentLoopRef.current;
       if (!loop) {
         dispatch(addNotification({ type: 'warning', title: '无法压缩', message: 'AI 未就绪' }));
         return;
       }
+      // ★ M5-1 重入守卫：压缩生成在途时再点 /compact 直接忽略（防重复 LLM 压缩 + 通知竞态 + record 水位竞争）。
+      if (isCompactingRef.current) {
+        dispatch(addNotification({ type: 'info', title: '压缩进行中', message: '上一次手动压缩还在进行，请稍候' }));
+        return;
+      }
       const KEEP_RECENT = 4; // 与 agentLoop.compactNow 内部 KEEP_RECENT 同口径
       const convId = (conversationRef.current.id as string | null) || AUTOSAVE_ID;
-      // 可压段太短（消息数 <= keep）→ 无需压缩，直接提示。
-      const msgCount = (conversationRef.current.messages ?? []).filter((m: any) => m.role !== 'tool' && m.role !== 'system').length;
+      // 可压段太短（消息数 <= keep）→ 无需压缩，直接提示。store 全量、不含 system 压缩摘要（归一后不再物化）。
+      const msgCount = (conversationRef.current.messages ?? []).filter((m: any) => m.role !== 'tool').length;
       if (msgCount <= KEEP_RECENT) {
         dispatch(addNotification({ type: 'info', title: '无需压缩', message: '当前对话历史较短，暂无可压缩内容' }));
         return;
       }
+      isCompactingRef.current = true;
       try {
-        // 1. 生成 record 批次 + 落库（compactNow 内部自算 compressedSegment = 全历史去最近 KEEP_RECENT 条）。
+        // ★ M5-1：归一后 store 不再被压缩截断，重复 /compact 不会因 store 变短而 no-op，故 compactNow 在「无新增段」
+        //   时会返回旧 recordMd（非空）。仅凭 recordMd 非空判定会误报「已压缩」。改用「压缩前后 record 批数比对」
+        //   判断是否真有新批落库：批数增加才算真压缩，否则提示「已是最新」。
+        const priorBatchCount = (await getRecord(convId).catch(() => null))?.batches?.length ?? 0;
+        // 生成 record 批次 + 落库（compactNow 内部自算 compressedSegment = 全历史去最近 KEEP_RECENT 条，与自动同源）。
+        // 不截断 store：下一轮 run 的注入前缀由 record 组装，store.messages 全量保留。
         const recordMd = await loop.compactNow(convId);
-        if (!recordMd) {
+        const after = await getRecord(convId).catch(() => null);
+        const afterBatchCount = after?.batches?.length ?? 0;
+        // 压缩点 UI 交还 batchDividerByIdx 分隔线：归一后 store.messages 长度不变，stepEnds effect 不会自动重算，
+        // 这里主动用重读到的 record 刷新各批 stepEnd，让新批的「已压缩」分隔线立即画出。
+        const ends = (after?.batches ?? []).map(b => b.stepEnd).filter(s => s > 0);
+        setRecordBatchStepEnds(ends);
+        if (!recordMd || afterBatchCount <= priorBatchCount) {
           dispatch(addNotification({ type: 'info', title: '手动压缩', message: '本次没有可压缩为摘要的历史（已是最新）' }));
           return;
         }
-        // 2. 截断 store.messages + 把摘要物化进 system 消息（刷新注入前缀）。
-        dispatch(applyManualCompact({ summaryPrefix: recordMd, keepRecent: KEEP_RECENT }));
-        // ★ M4-6 审查修复（问题6 根因）：手动 /compact 【不能】再调 clampToBatch。
-        //   clampToBatch 是为「尾部截断/编辑/回溯消息」设计的——keptSteps=保留的消息条数，record 覆盖区超过它说明
-        //   覆盖了被删消息要裁掉。但 /compact 是「头部压缩」：record 覆盖的恰是刚被压走、从 store 移除的前缀，而 store
-        //   可见区（keep 尾）的 step 编号在 record 覆盖区【之后】。此时 keptSteps（最近4条）必 < record.totalSteps
-        //   （累计压缩量），clampToBatch 会把刚 append 的新批判为「超界」当场删除（白跑一次 LLM 压缩 + record 失效，
-        //   即审查问题6 现象）。/compact 后 record 水位由 compactNow 的 appendBatch 正确前进，本就与 store「摘要前缀 +
-        //   keep 尾」一致，下一轮 run 的 record 注入天然对齐，无需任何 clamp。故此处删除 clampToBatch 调用。
-        dispatch(addNotification({ type: 'success', title: '已手动压缩', message: '历史已压缩为摘要（保留最近若干条原文）' }));
+        dispatch(addNotification({ type: 'success', title: '已手动压缩', message: '历史已生成 record 摘要批次（对话原文照常完整保留，仅在压缩点标注）' }));
       } catch (err: any) {
         dispatch(addNotification({ type: 'error', title: '手动压缩失败', message: err?.message || '未知错误' }));
+      } finally {
+        isCompactingRef.current = false;
       }
     },
     // ★ M4-6-S4 /loop：最小循环驱动器（串行重发 N 次同指令，硬上限，可 handleStop 中断）。

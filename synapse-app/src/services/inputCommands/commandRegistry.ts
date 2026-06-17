@@ -46,9 +46,10 @@ export interface SlashRunContext {
      */
     getGoal?: () => string | undefined;
     /**
-     * ★ 手动 record 压缩钩子（/compact 用）。S4/M4-7 接入后为真实现（已落地 compactNow 完整手动闭环：
-     *   生成 record 批次 + 落库 + 截断 store.messages + 刷新注入前缀）。与既有 ~90% 水位自动压缩【并存】，
-     *   复用同一套 generateBatch → appendBatch 逻辑。未接入时为 undefined，命令 run 据此走 stub 提示。
+     * ★ 手动 record 压缩钩子（/compact 用）。M5-1 压缩归一：压缩有且仅有一套，手动 ＝ 自动，完全同一套逻辑，
+     *   仅触发方式不同。AgentPanel 注入的实现只调 agentLoop.compactNow（生成 record 批次 + 落库），
+     *   【绝不截断 store.messages】——对话原文全量保留，压缩点由 batchDivider 分隔线呈现。
+     *   未接入时为 undefined，命令 run 据此走 stub 提示。
      */
     compactNow?: () => Promise<void> | void;
     /**
@@ -184,10 +185,10 @@ commandRegistry.register({
 });
 
 /**
- * /compact —— 手动触发 record 压缩（M4-6-S4 接入完整手动闭环）。与既有 ~90% 水位自动压缩【并存】，
- *   复用同一套 generateBatch → appendBatch 逻辑。helpers.compactNow 由 AgentPanel 注入：
- *   它在 agentLoop.compactNow（生成 record 批次 + 落库）之外，【额外补齐】截断 store.messages + 刷新注入前缀
- *   两步（见 compactNow JSDoc 职责边界），构成真正的手动压缩闭环。
+ * /compact —— 手动触发 record 压缩（M5-1 压缩归一）。压缩有且仅有一套：手动 /compact ＝ 自动压缩，
+ *   完全同一套逻辑（同一函数 agentLoop.compactNow，复用 generateBatch → appendBatch），仅触发方式不同
+ *   （手敲命令 vs 聊到 token 水位）。helpers.compactNow 由 AgentPanel 注入，只生成 record 批次 + 落库，
+ *   【绝不截断 store.messages】——UI 与本地完整对话照常全量保留，压缩点由 batchDivider「已压缩」分隔线呈现。
  *   helpers.compactNow 缺省（AI 未就绪/未注入）时走降级提示。
  */
 commandRegistry.register({
