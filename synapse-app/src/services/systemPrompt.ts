@@ -4,6 +4,7 @@
  */
 
 import { extensionManager } from './extensionManager';
+import { keepRecentRoundsStartStep } from './roundBoundary';
 
 interface PromptContext {
   workspaceName?: string;
@@ -55,6 +56,15 @@ const PLAN_IDENTITY = `<identity>
 
 export const MAX_CONTEXT_TOKENS = 128000;
 export const COMPRESSION_THRESHOLD = 0.9; // 90% of model context window triggers compression
+/**
+ * ★ M5-2 轮次地基：压缩时「保留最近原文」的 token 预算比例（占模型上下文窗口）。
+ * compressContext 不再按固定条数（旧 keepCount=4）保留，而是按此预算从最后一轮往前纳入【整轮】原文，
+ * 向轮边界取整（绝不在轮中间切，见规范 §1/§2）。0.25 = 约保留 1/4 窗口的最近整轮原文，
+ * 既留足最近上下文连贯性，又给被压段（>0.9 窗口的总量减去保留段）足够压缩空间。
+ */
+export const KEEP_RECENT_RATIO = 0.25;
+/** ★ M5-2 轮次地基：压缩时至少保留的最近【整轮】数（保底，即便单轮超预算也保留整轮）。 */
+export const KEEP_RECENT_MIN_ROUNDS = 1;
 /**
  * M4-1-S4 护栏阈值：少条超长危险态下，仅当「不含当前消息的历史文本 token」≥ 阈值 * 此比例
  * 才认定为真·历史超长（标 overLimitWithoutCompression）。低于此比例则判超额来自当前消息、护栏放行不截断。
@@ -221,7 +231,7 @@ export function compressContext(
   wasCompressed: boolean;
   /**
    * M2-R4 问题4：少条超长危险态标志。
-   * true 表示「token 已超阈值，但消息条数 < 6 无法做切片压缩」——切片压缩（keepCount=4）此时无可压缩余量，
+   * true 表示「token 已超阈值，但消息条数 < 6 无法做切片压缩」——条数过少时按轮保留后无可压缩余量，
    * 直接全量发送有撑爆窗口风险。调用方（agentLoop）应据此对超长单条做内容截断保护后再发送。
    */
   overLimitWithoutCompression?: boolean;
@@ -237,7 +247,7 @@ export function compressContext(
 
   // M2-R4 问题4 修复：原实现 `currentTokens <= threshold || messages.length < 6` 把「条数<6」也当作
   // 无条件不压缩，导致「少条但单条极长」（如粘贴超长课件/代码）即便已超阈值仍全量发送、撑爆窗口。
-  // 现拆分：条数<6 只跳过【切片压缩】（keepCount=4 时无可压缩余量），但暴露 overLimitWithoutCompression 危险态，
+  // 现拆分：条数<6 只跳过【切片压缩】（按轮保留后无可压缩余量），但暴露 overLimitWithoutCompression 危险态，
   // 由调用方对超长单条做截断保护。此处仅告警，不在 compressed 内截断——因为不压缩分支调用方实际发送的是
   // 原始 requestHistory（含图片/附件 part），截断需在调用方层面对发送体做（见 agentLoop.ts 不压缩守卫）。
   if (messages.length < 6) {
@@ -259,10 +269,37 @@ export function compressContext(
     return { compressed: messages, wasCompressed: false, overLimitWithoutCompression: true };
   }
 
-  // Keep last 4 messages (recent context), compress earlier ones
-  const keepCount = 4;
-  const toCompress = messages.slice(0, messages.length - keepCount);
-  const toKeep = messages.slice(messages.length - keepCount);
+  // ★ M5-2 轮次地基：保留最近原文从「固定 keepCount=4 条」改为「按 token 预算→向轮边界取整保留整轮」。
+  //   规范 §1/§2：保留与批次边界一律按轮取整，绝不在轮中间切。
+  //   - keepRecentRoundsStartStep 在本序列（已不含 tool，与 agentLoop requestHistory 同口径）上识别轮边界，
+  //     从最后一轮往前按 budget 纳入整轮，至少保留 KEEP_RECENT_MIN_ROUNDS 整轮，返回保留段起始 step index。
+  //   - 退化等价：常规交替序列 [u,a,u,a,...] 上，轮数 === user 条数，行为与旧条数切平滑过渡；
+  //     仅在连发 user / 一轮多 model step（工具循环、子代理）时才正确收敛到整轮。
+  //   ★ 与 agentLoop 的衔接：本函数返回 compressed=[checkpoint, ...toKeep]，agentLoop 用
+  //     keepCount = compressed.length - 1 反推 compressedSegment = requestHistory.slice(0, len-keepCount)，
+  //     故只要这里把保留段对齐到轮起点，被压段（compressedSegment）也自动对齐轮边界——改一处全覆盖。
+  const keepBudget = maxTokens * KEEP_RECENT_RATIO;
+  const keepStartIdx = keepRecentRoundsStartStep(
+    messages,
+    keepBudget,
+    m => estimateTokens(m.content) + 4, // 与 countConversationTokens 单条口径一致（含每条 +4 开销）
+    KEEP_RECENT_MIN_ROUNDS,
+  );
+  // ★ M5-2 铁律守卫（绝不轮中间切）：若按整轮取整后被压段为空（keepStartIdx<=0，即保留了全部轮——
+  //   典型是「只有 1 个超大整轮」或「全部轮都在保底/预算内」），则【不在轮中间硬切】。
+  //   这种「单超大轮超阈值」本质是少条超长危险态：交给调用方的超长保护（truncateOverLongHistory）按
+  //   文本 part 截断，而不是把这一整轮从某 step 处劈成「半轮摘要 + 半轮原文」破坏轮边界。
+  //   （length<6 的少条超长已在上方分支拦截；此处兜住「条数≥6 但全在一个/少数大轮里」的情形。）
+  if (keepStartIdx <= 0) {
+    console.warn(
+      `[compressContext] token 超阈值但按整轮取整后无更早整轮可压（保留全部轮），` +
+      `不在轮中间切，转 overLimitWithoutCompression 交超长保护。`,
+    );
+    return { compressed: messages, wasCompressed: false, overLimitWithoutCompression: true };
+  }
+
+  const toCompress = messages.slice(0, keepStartIdx);
+  const toKeep = messages.slice(keepStartIdx);
 
   // Generate summary of old messages
   const summaryParts: string[] = [];

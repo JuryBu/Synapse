@@ -33,9 +33,10 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
   const [error, setError] = useState('');
   const pdfRef = useRef<any>(null);
 
-  // ★ FIX-7：当前进行中的 RenderTask（paged 模式单任务），用于在 effect cleanup 中 cancel。
+  // ★ FIX-10：仅记录「最新在飞的 RenderTask」，供 finally 安全回收（=== myTask 才置空）；
+  //   取消职责已下放到每个 run 的闭包 myTask（见 paged effect），不再由这个共享 ref 承担。
   const renderTaskRef = useRef<any>(null);
-  // ★ FIX-7：渲染令牌——每次新渲染自增，异步回写前比对，过期帧直接丢弃（防 setState 串帧）。
+  // ★ 渲染令牌——每次新渲染自增，异步恢复点前比对，过期帧直接丢弃（防 setState 串帧）。
   const renderTokenRef = useRef(0);
 
   // 容器 ref：FIX-8 原生 wheel 监听 + FIX-9 scroll 模式滚动容器。
@@ -80,52 +81,71 @@ export function PdfViewer({ data, currentPage = 1, onPageChange }: PdfViewerProp
     return () => { cancelled = true; };
   }, [data]);
 
-  // ── paged 模式：渲染当前页到单 canvas（FIX-7 取消旧任务 + token 守卫）。
+  // ── paged 模式：渲染当前页到单 canvas。
+  //
+  // ★ FIX-10（修 FIX-7 缩放回归）：真因——FIX-7 用「共享 renderTaskRef + token 过期守卫 +
+  //   cleanup cancel(localTask)」三件套，但 cancel 与 token 的时序在「连点 +/− / 首帧未完成时缩放」
+  //   下会互相绊倒：
+  //     · cleanup 只 cancel 闭包里的 localTask，而 localTask 在 await getPage 之前恒为 null，
+  //       于是「getPage 仍在飞」的那次缩放，cleanup 取消不到任何东西；
+  //     · 被取消的 task 抛 RenderingCancelledException 后从 catch 直接 return，renderTaskRef.current
+  //       仍指向那个「死 task」，永不置空；
+  //     · 共享 renderTaskRef 跨多次 run 复用，叠加 StrictMode 的 mount→cleanup→mount 双调用，
+  //       很容易出现「该生效的新一帧 render 被上一拍的 cleanup/cancel 误杀、或新帧被判过期挡回写」，
+  //       表现即为：百分比变了（scale state 变了）但 canvas 不重画、停在旧 scale。
+  //
+  //   重写为「每次 run 自带独立 token + 独立 task 句柄」的可证明正确模型：
+  //     1) 进 effect 立刻 ++token 作废所有在飞旧帧；本 run 的 task 存在闭包 myTask（非共享 ref），
+  //        cleanup 只取消「本 run 自己创建的那个 task」，绝不误杀别人；
+  //     2) 任何异步恢复点都先比对 token，过期即退出（不写 canvas、不报错）；
+  //     3) 用 cancelled 标记替代「靠 token 顺便判过期」，cleanup 一旦触发即视为本帧作废，
+  //        即便 render 之后才被取消也不会回写「失败」状态；
+  //     4) renderToken 仅作「最新有效帧」判据，不再承担「task 句柄回收」职责，彻底解耦。
+  //   防重入抛错的好处保留：旧帧 token 失配会主动 cancel，同一 canvas 任意时刻只有最新 task 在画。
   useEffect(() => {
     if (mode !== 'paged') return;
     if (!pdfRef.current || !canvasRef.current) return;
 
     const token = ++renderTokenRef.current;
-    let localTask: any = null;
+    let myTask: any = null;
+    let cancelled = false;
 
     (async () => {
       try {
         const pdfPage = await pdfRef.current.getPage(page);
-        if (token !== renderTokenRef.current) return; // 已被更新的渲染取代，丢弃。
+        if (cancelled || token !== renderTokenRef.current) return; // 本帧已被取代/作废，丢弃。
         const viewport = pdfPage.getViewport({ scale });
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext('2d')!;
+        // ★ 关键：按新 scale 重置 canvas 内在尺寸——这一步真正让画面跟随 scale 变化。
         canvas.width = viewport.width;
         canvas.height = viewport.height;
 
-        // ★ FIX-7：保存 RenderTask 句柄，供 cleanup cancel；同 canvas 重入前先 cancel 上一个。
-        if (renderTaskRef.current) {
-          try { renderTaskRef.current.cancel(); } catch { /* ignore */ }
-        }
-        localTask = pdfPage.render({ canvasContext: ctx, viewport });
-        renderTaskRef.current = localTask;
-        await localTask.promise;
-        if (token === renderTokenRef.current) {
-          renderTaskRef.current = null;
-        }
+        myTask = pdfPage.render({ canvasContext: ctx, viewport });
+        renderTaskRef.current = myTask;
+        await myTask.promise;
       } catch (err: any) {
-        // pdf.js 取消渲染抛 RenderingCancelledException（name 字段判定），属预期，静默忽略。
+        // 被 cleanup 取消时 pdf.js 抛 RenderingCancelledException；本帧已作废，静默忽略。
         const name = err?.name || '';
-        if (name === 'RenderingCancelledException' || /cancelled/i.test(err?.message || '')) {
+        if (cancelled || name === 'RenderingCancelledException' || /cancelled/i.test(err?.message || '')) {
           return;
         }
         if (token === renderTokenRef.current) {
           console.error('[PdfViewer] Render error:', err);
           setError(err instanceof Error ? err.message : 'PDF 渲染失败');
         }
+      } finally {
+        // 仅当本 run 的 task 仍是「全局当前 task」时才清空，避免把后继帧的句柄误置空。
+        if (renderTaskRef.current === myTask) renderTaskRef.current = null;
       }
     })();
 
     return () => {
-      // ★ FIX-7：effect 重跑/卸载时取消进行中的任务，避免「同 canvas 多 render」异常。
-      if (localTask) {
-        try { localTask.cancel(); } catch { /* ignore */ }
+      // effect 重跑/卸载：标记本帧作废 + 取消「本 run 自己创建的」task（绝不碰别的 run 的 task）。
+      cancelled = true;
+      if (myTask) {
+        try { myTask.cancel(); } catch { /* ignore */ }
       }
     };
   }, [mode, page, totalPages, scale]);
@@ -262,7 +282,6 @@ function PdfScrollView({ pdf, totalPages, scale, activePage, scrollRequest, cont
       localTask = pdfPage.render({ canvasContext: ctx, viewport });
       taskRefs.current[idx] = localTask;
       await localTask.promise;
-      if (token === tokenRefs.current[idx]) taskRefs.current[idx] = null;
     } catch (err: any) {
       const name = err?.name || '';
       if (name === 'RenderingCancelledException' || /cancelled/i.test(err?.message || '')) return;
@@ -270,6 +289,10 @@ function PdfScrollView({ pdf, totalPages, scale, activePage, scrollRequest, cont
         console.error('[PdfViewer] Scroll render error:', err);
         onError(err instanceof Error ? err.message : 'PDF 渲染失败');
       }
+    } finally {
+      // ★ FIX-10：无论成功/被取消，只要本页句柄仍是自己创建的那个就置空，
+      //   避免被取消的「死 task」残留在 taskRefs 里（FIX-7 旧逻辑从 catch 直接 return 会漏置空）。
+      if (localTask && taskRefs.current[idx] === localTask) taskRefs.current[idx] = null;
     }
   }, [pdf, scale, onError]);
 

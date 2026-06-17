@@ -3,7 +3,8 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--syn-bg);
+  /* ★ 顺带修正历史遗留：--syn-bg 在本项目未定义（应为 --syn-bg-base），裸引用会回退透明。 */
+  background: var(--syn-bg, var(--syn-bg-base));
 }
 
 .pdf-viewer-toolbar {
@@ -763,12 +764,71 @@
   border-right: none;
 }
 
+/* 渲染区舞台：作为 flex 子项占满，并为加载遮罩提供定位上下文。 */
+.html-preview-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+}
+
 .html-preview-frame {
   flex: 1;
   width: 100%;
   min-height: 0;
   border: none;
   background: white;
+}
+
+/* iframe onLoad 前的加载遮罩：盖在 iframe 之上，onLoad 后淡出。 */
+.html-preview-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  /* ★ 修复：项目从未定义 --syn-bg（只有 --syn-bg-base/-surface/-elevated 等），裸引用回退到透明，
+     会让 z-index:2 的遮罩盖不住下层 background:white 的 iframe，onLoad 前白屏照样透出、淡出变成
+     「文字消失」而非「遮罩揭开」。改用已定义的 --syn-bg-base（暗/亮主题均有）保证遮罩真正不透明。 */
+  background: var(--syn-bg, var(--syn-bg-base));
+  color: var(--syn-text-muted);
+  font-size: 14px;
+  opacity: 1;
+  transition: opacity 260ms ease;
+}
+
+/* onLoad 后：淡出并停止接收事件，让 iframe 完全可交互。 */
+.html-preview-loading.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.html-preview-loading p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.html-preview-loading small {
+  color: var(--syn-text-secondary);
+  font-size: 12px;
+  max-width: 80%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.html-preview-spinner {
+  color: var(--syn-accent);
+  animation: html-preview-spin 0.9s linear infinite;
+}
+
+@keyframes html-preview-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* ============================================

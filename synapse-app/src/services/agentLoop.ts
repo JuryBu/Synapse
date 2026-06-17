@@ -16,6 +16,7 @@ import { setConnectionStatus } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
 import { promptBuilder, renderOpenFilesSection, compressContext, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
 import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type SynapseRecord } from './recordStore';
+import { identifyRounds, floorStepToRoundStart } from './roundBoundary';
 import { generateBatch } from './recordGenerator';
 import { runSystemModelOnce } from './systemModelClient';
 import { AUTOSAVE_ID, saveAutosaveSnapshot } from './conversationPersistence';
@@ -639,7 +640,33 @@ export class AgentLoop {
         duration: 4000,
       }));
     } else {
-      apiHistory = requestHistory;
+      // ★ M5-1 遗留 blocker：统一 record 注入口径（规范 §0.3 / §2）。
+      //   只要 record 已有内容（totalSteps>0，无论是自动压缩还是 /compact 手动生成的），就【按
+      //   record prefix + 保留轮原文】组装请求体，不再只在 wasCompressed（触达 0.9 水位）分支注入。
+      //   效果：/compact 生成 record 后【下一轮请求体立即用摘要】（不必等触达 token 水位才生效），
+      //   且自动压缩行为保持一致（wasCompressed 分支照旧生成新批 + 注入，本分支只在「未触发新压缩
+      //   但已有 record」时复用已有摘要前缀）。
+      //   ★ 不生成新批、不改 store、不删消息——纯组装本轮发送视图（store 全量永远不动，规范 §0.2）。
+      const conversationId = ((rootState as any).conversation?.id as string | null) || AUTOSAVE_ID;
+      const existingRecord = await getRecord(conversationId);
+      if (existingRecord && existingRecord.totalSteps > 0) {
+        // 保留段 = record 已覆盖 step 之后的原文（含本轮当前 user）。requestHistory 不含 tool，
+        // 其下标即 step 下标，与 record.totalSteps 同口径。
+        // ★ 向轮边界取整（规范 §1「保留与批次边界一律按轮取整，不在轮中间切」）：
+        //   M5-2 后 record 批 stepEnd 必落在轮边界，totalSteps 即轮边界、slice 天然干净；
+        //   但为兼容 M5-2 之前生成、批边界非轮对齐的旧 record，用 floorStepToRoundStart 把保留起点
+        //   向下对齐到 ≤ totalSteps 的最近轮起点（宁可多保留半轮原文，绝不从轮中间切）。
+        const roundsOfRequest = identifyRounds(requestHistory);
+        let keepFromIdx = floorStepToRoundStart(roundsOfRequest, existingRecord.totalSteps);
+        // 安全下限：保留段至少含最后一条（当前最新 user），绝不把当前轮也压没/越界成空。
+        keepFromIdx = Math.max(0, Math.min(keepFromIdx, requestHistory.length - 1));
+        const recordMd = buildStableRecordPrefix(existingRecord);
+        apiHistory = recordMd
+          ? [{ role: 'system', content: `${RECORD_INJECTION_PREFIX}${recordMd}` } as ChatMessage, ...requestHistory.slice(keepFromIdx)]
+          : requestHistory;
+      } else {
+        apiHistory = requestHistory;
+      }
     }
 
     // Prepend system prompt to compressed messages
@@ -1186,14 +1213,20 @@ export class AgentLoop {
     //   下方 batchSlice 因此统一为 coveredEligible.slice(priorSteps) 单一口径，不再有手动/自动分支差异。
     let compressedSegment = opts?.compressedSegment;
     if (!compressedSegment) {
-      // 手动入口：保留最近 KEEP_RECENT 条原文（与 compressContext 的 keepCount=4 同口径），其余的被压段交给增量切片。
-      const KEEP_RECENT = 4;
+      // 手动入口（/compact）：保留最近原文、其余作被压段交给增量切片。
       // step 口径：排除 tool（由 agentLoop 内部管理，不计入 step）。归一后 store 已无 system 压缩摘要消息，
       //   全程只按 user/assistant 算 step，与 record 首次建立 / 自动路径 / clampToBatch 一致。
       const liveMessages = (store.getState() as RootState).conversation.messages
         .filter((m: any) => m.role !== 'tool')
         .map(toChatMessage);
-      const keepStartIdx = Math.max(0, liveMessages.length - KEEP_RECENT);
+      // ★ M5-2 轮次地基：保留最近 KEEP_RECENT_ROUNDS 个【整轮】（向轮边界取整，绝不轮中间切，规范 §1）。
+      //   原实现保留固定 4 条原文，会在轮中间切（连发 user / 一轮多 model step 时把半轮留半轮压）；
+      //   现按真轮识别，从末轮往前数 KEEP_RECENT_ROUNDS 整轮作为保留段，其余整轮作被压段——
+      //   使手动 /compact 的被压段尾部一定落在轮边界，与自动路径（compressContext 按轮保留）口径统一。
+      const KEEP_RECENT_ROUNDS = 2;
+      const liveRounds = identifyRounds(liveMessages);
+      const keepFromRoundIdx = Math.max(0, liveRounds.rounds.length - KEEP_RECENT_ROUNDS);
+      const keepStartIdx = liveRounds.rounds[keepFromRoundIdx]?.stepStart ?? 0;
       compressedSegment = liveMessages.slice(0, keepStartIdx);
     }
 
@@ -1224,9 +1257,24 @@ export class AgentLoop {
       recordMd = existingRecord ? buildStableRecordPrefix(existingRecord) : null;
 
       if (batchSlice.length > 0) {
-        const batchUserCount = batchSlice.filter(m => m.role === 'user').length;
+        // ★ M5-2 轮次地基：本批覆盖的轮号由【真轮识别】推导，替换原「user 条数 = 轮数」近似。
+        //   在整个全量被压段（coveredEligible，不含 tool）上识别轮边界，本批 = coveredEligible.slice(priorSteps)，
+        //   故本批末 step 的真轮号 = 被压段最后一个 step 的轮号 = identifyRounds(coveredEligible).totalRounds。
+        //   - roundStart = priorRounds + 1（接续上一批末轮 +1）。
+        //   - roundEnd   = 被压段最后一个 step 的真轮号（连发 user / 一轮多 model step 时正确收敛，不再虚高）。
+        //   退化等价：常规交替序列上 totalRounds === user 累计条数，roundEnd 与旧口径一致；仅合并场景才收敛。
+        //   ★ stepEnd 仍是半开 step 计数（= coveredEligible.length），与 appendBatch 幂等水位门口径不变；
+        //     因被压段由上游（compressContext 保留整轮后的剩余 / 手动入口下方按轮取整）保证尾部落在轮边界，
+        //     故 stepEnd 天然 == 末轮 stepEnd，批边界 step/round 双口径同步落在轮边界（绝不轮中间切）。
+        const coveredRounds = identifyRounds(coveredEligible);
         const roundStart = priorRounds + 1;
-        const roundEnd = priorRounds + batchUserCount;
+        // ★ Codex review High#2 防护：roundEnd 取真轮数，但【钳到 >= roundStart】，防 totalRounds 倒退。
+        //   正常态（priorSteps 落轮边界、record 轮口径一致）下 coveredRounds.totalRounds >= roundStart 恒成立。
+        //   但若 existingRecord 是 M5-2 前生成的旧批（priorRounds 按 user 条数算、可能虚高于真轮数），
+        //   连发 user 场景下真轮数 coveredRounds.totalRounds 可能 < priorRounds+1 → roundStart>roundEnd、
+        //   append 后 record.totalRounds 倒退污染水位。Math.max 兜住：宁可本批 round 跨度记为 0（roundStart==roundEnd），
+        //   也绝不让派生 totalRounds 倒退（round 仅用于 UI 分隔线/裁剪 sanity，不影响请求体正确性）。
+        const roundEnd = Math.max(roundStart, coveredRounds.totalRounds);
         const stepStart = priorSteps;
         const stepEnd = priorSteps + batchSlice.length;
         // 旧批骨架只读概览：本批之前所有批次的 skeleton 拼接（getRecordSkeleton）。

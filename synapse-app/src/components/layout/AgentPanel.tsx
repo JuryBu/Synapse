@@ -52,6 +52,7 @@ import { type RootState } from '@/store';
 import { rollbackFileDiff } from '@/services/fileRollback';
 import { describeCapabilities } from '@/services/modelCapabilities';
 import { getRecord, clampToBatch, getRecordSkeleton } from '@/services/recordStore';
+import { identifyRounds } from '@/services/roundBoundary';
 // ★ M4-6 输入区命令层：触发检测（@艾特 / 斜杠命令）+ 内联补全浮层 + @数据源 + /命令注册表/执行器。
 import { detectTrigger, type TriggerKind } from '@/services/inputCommands/triggerDetect';
 import { InlineCompletionMenu } from '@/components/chat/InlineCompletionMenu';
@@ -1212,9 +1213,16 @@ export function AgentPanel() {
   // 且保证后续增量压缩批次起点正确；clamp 后归零才删。record 是加速层，失败吞异常不阻塞主对话。
   const invalidateRecordForTruncation = useCallback((remainingMessages: any[]) => {
     const conversationId = conversation.id || AUTOSAVE_ID;
-    const keptRounds = remainingMessages.filter((m: any) => m.role === 'user').length;
     // step 口径对齐 agentLoop：record.totalSteps 来自不含 tool 的 requestHistory
     const keptSteps = remainingMessages.filter((m: any) => m.role !== 'tool').length;
+    // ★ M5-2 批次二修复（medium）：keptRounds 必须是 identifyRounds 收敛后的【真轮数】（连发 user
+    //   合并为 1 轮），不能再用「user 角色条数」近似。批 roundEnd 在 M5-2 后已是真轮号，若这里仍传
+    //   user 条数（恒 ≥ 真轮数）→ safeRounds 偏大 → clampToBatch 里 `roundEnd > safeRounds` 几乎永不成立
+    //   → 按轮裁剪分支退化为死代码（只剩 step 口径）。在已过滤 tool 的 remainingMessages 上调
+    //   identifyRounds 取 totalRounds，与批 roundEnd 同口径，规范 §1/§3「向轮边界取整」在回溯/编辑/重试侧才闭环。
+    const keptRounds = identifyRounds(
+      remainingMessages.filter((m: any) => m.role !== 'tool'),
+    ).totalRounds;
     // M2-R1：批次整体保留语义（穿过截断点的批及之后整批回退原文），替代旧数字 clamp。
     void clampToBatch(conversationId, keptRounds, keptSteps);
   }, [conversation.id]);

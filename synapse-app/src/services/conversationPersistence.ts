@@ -9,6 +9,7 @@ import {
 } from './attachmentRefs';
 import { copyRecord, copyRecordFrom } from './recordStore';
 import type { SynapseRecord } from './recordStore';
+import { identifyRounds } from './roundBoundary';
 
 export const CONVERSATION_SCHEMA_VERSION = 1;
 export const AUTOSAVE_ID = 'autosave-current';
@@ -340,7 +341,8 @@ async function tryAddRefOnce(sha: string): Promise<boolean> {
  *   2. createConversationId 生成新 id；saveConversationSnapshot 落新对话
  *      （messages=子集，parentId=源 id，branchedFromMessageId=fromMessageId）。
  *   3. copyRecord(源, 新, keptSteps, keptRounds) 继承到该点的 record 多批次。
- *      - keptRounds = 子集里 role==='user' 的条数；
+ *      - keptRounds = identifyRounds(过滤 tool 的子集).totalRounds（★ 真轮数，连发 user 合并为 1 轮，
+ *        与批 roundEnd 同口径；不再用 user 角色条数近似——否则按轮裁剪分支永远兜不住、退化为死代码）。
  *      - keptSteps  = 子集里 role!=='tool' 的条数（★ 与 clampToBatch / agentLoop requestHistory「不含 tool」step 口径严格一致）。
  *   4. 附件 refCount：对子集 collectMessageShas 得到的每个 sha256 调 platform.attachment.addRef（+1）。
  *      新对话与源对话复用同一附件实体，必须 +1，否则源对话删除/GC 后新分支的图失效（与 R6 fork refCount 欠计同类坑）。
@@ -421,10 +423,15 @@ export async function branchConversation(
   });
   if (subset.length === 0) return null;
 
-  // 2. step/round 口径（★ 必须与 clampToBatch / copyRecord 严格一致）：
-  //    keptSteps 不含 tool 角色；keptRounds 只算 user 角色。
-  const keptRounds = subset.filter(m => m.role === 'user').length;
+  // 2. step/round 口径（★ 必须与 clampToBatch / copyRecord / 批 roundEnd 严格一致）：
+  //    keptSteps 不含 tool 角色。
+  //    ★ M5-2 批次二修复（medium）：keptRounds 必须是 identifyRounds 收敛后的【真轮数】，
+  //      不能再用「user 角色条数」近似。批 roundEnd 在 M5-2 后已是真轮号（连发 user 合并为 1 轮），
+  //      若这里仍传 user 条数（恒 ≥ 真轮数）会让两口径系统性错配 → copyRecordFrom 里按轮裁剪分支
+  //      （roundEnd > safeRounds 判定）永远兜不住而退化为死代码。故在已过滤 tool 的 subset 上调
+  //      identifyRounds 取 totalRounds，与批 roundEnd 同口径，规范 §1/§3「向轮边界取整」才真正生效。
   const keptSteps = subset.filter(m => m.role !== 'tool').length;
+  const keptRounds = identifyRounds(subset.filter(m => m.role !== 'tool')).totalRounds;
 
   const newId = createConversationId();
   const title = meta?.title || getFallbackTitle(subset);

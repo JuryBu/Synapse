@@ -494,19 +494,32 @@ export async function deleteRecord(conversationId: string): Promise<boolean> {
 }
 
 /**
+ * ★ M5-2 轮次地基：从 step 截断 idx 与 round 截断 idx 中取【较保守者】（更早的 cutIdx）作为裁剪基准。
+ *   findIndex 约定：返回首个越界批的下标，无越界返回 -1（= 全部保留）。
+ *   取保守语义：两者都为 -1（都不越界）→ -1；任一为 -1 视作「不限制」（取另一个）；都有值取较小（更早裁）。
+ *   这样 step 与 round 双口径任一触发裁剪都会生效，保证「所在轮整轮回退、绝不轮中间切」。
+ */
+function pickCutIdx(cutByStep: number, cutByRound: number): number {
+  if (cutByStep < 0 && cutByRound < 0) return -1;
+  if (cutByStep < 0) return cutByRound;
+  if (cutByRound < 0) return cutByStep;
+  return Math.min(cutByStep, cutByRound);
+}
+
+/**
  * 回溯/编辑/重试截断后，把 record 按批次裁剪到保留范围（M2-R1 批次整体保留语义，替代旧 clampRecord 数字 clamp）。
- * - keptRounds：截断后剩余的用户轮次（只算 role==='user'）。
+ * - keptRounds：截断后剩余的用户轮次（真轮口径，见 roundBoundary；M5-2 后参与裁剪基准、不再仅告警）。
  * - keptSteps：截断后剩余的消息条数（**不含 tool 角色**，对齐 agentLoop requestHistory 口径）。
  *
  * 行为（批次整体保留，对齐 Plan_4 M2「回溯」算例）：
- *   - 截断基准【单一口径 = stepEnd】：找到「第一个 stepEnd > keptSteps」的批次（该批被截断点穿过），
- *     take 其之前的【连续前缀】整批保留、该批及之后整批丢弃（回退原文）。
+ *   - ★ M5-2 截断基准【step + round 双口径取保守】：找到「第一个 stepEnd > keptSteps 或 roundEnd > keptRounds」
+ *     的批次（该批被截断点穿过），二者取较早者（pickCutIdx），take 其之前的【连续前缀】整批保留、
+ *     该批及之后整批丢弃（回退原文）。round 口径从「仅告警」升级为真实裁剪依据，保证「所在轮整轮回退、
+ *     绝不轮中间切」，即便合并轮导致 step/round 口径不一致也能兜住。
  *     —— 用 findIndex + slice 取前缀（而非 filter 全数组），保证结果恒为连续前缀，
- *        即使脏数据导致批次 roundEnd 非单调也不会从中间挖空批次。
- *   - roundEnd 仅作 sanity（断言批次单调递增），不参与 kept 过滤，避免 step/round 两口径
- *     在不同批边界相交时多丢一批。
- *   - 末批 stepEnd <= keptSteps（保留范围覆盖全部批次）→ 不动。
- *   - 裁剪后无批次（keptSteps 落在首批之前）→ 删除 record。
+ *        即使脏数据导致批次 stepEnd/roundEnd 非单调也不会从中间挖空批次。
+ *   - 末批 stepEnd <= keptSteps 且 roundEnd <= keptRounds（保留范围覆盖全部批次）→ 不动。
+ *   - 裁剪后无批次（截断点落在首批之前）→ 删除 record。
  * record 是加速层，失败吞异常返回 null。
  */
 export async function clampToBatch(
@@ -520,23 +533,21 @@ export async function clampToBatch(
     if (!record || record.batches.length === 0) return record;
 
     const safeSteps = Math.max(0, keptSteps);
-
-    // 末批整个在保留范围内 → 无需动（单一 stepEnd 口径，与下方截断基准一致）
-    const last = record.batches[record.batches.length - 1];
-    if (last.stepEnd <= safeSteps) return record;
-
-    // 单一口径找第一个被截断点穿过的批（stepEnd > keptSteps），take 其之前的连续前缀。
-    const cutIdx = record.batches.findIndex(b => b.stepEnd > safeSteps);
-    const kept = cutIdx < 0 ? record.batches : record.batches.slice(0, cutIdx);
-
-    // sanity：keptRounds 与保留前缀末批 roundEnd 在正常单调数据下应一致（仅告警，不改裁剪结果）
     const safeRounds = Math.max(0, keptRounds);
-    const keptLast = kept[kept.length - 1];
-    if (keptLast && keptLast.roundEnd > safeRounds) {
-      console.warn(
-        `[recordStore] clampToBatch round/step 口径偏差：保留前缀末批 roundEnd=${keptLast.roundEnd} > keptRounds=${safeRounds}（以 stepEnd 为准，仅告警）`,
-      );
-    }
+
+    // 末批整个在保留范围内（step 与 round 双口径都覆盖）→ 无需动。
+    const last = record.batches[record.batches.length - 1];
+    if (last.stepEnd <= safeSteps && last.roundEnd <= safeRounds) return record;
+
+    // ★ M5-2 轮次地基：keptRounds 从「仅告警」升级为【真实裁剪依据】（规范 §1/§3，向轮边界取整）。
+    //   截断点穿过的批 = 第一个 (stepEnd > keptSteps) 或 (roundEnd > keptRounds) 的批，二者取【较保守者】
+    //   （更早的 cutIdx）。这样回溯时「所在轮整轮回退原文、绝不在轮中间切」：即便调用方传入的 keptRounds
+    //   与 keptSteps 因合并轮（连发 user / 一轮多 model step）而口径不一致，round 口径也能兜住、不少裁。
+    //   findIndex + slice 取连续前缀，脏数据导致 stepEnd/roundEnd 非单调也不会从中间挖空批次。
+    const cutByStep = record.batches.findIndex(b => b.stepEnd > safeSteps);
+    const cutByRound = record.batches.findIndex(b => b.roundEnd > safeRounds);
+    const cutIdx = pickCutIdx(cutByStep, cutByRound);
+    const kept = cutIdx < 0 ? record.batches : record.batches.slice(0, cutIdx);
 
     if (kept.length === 0) {
       await deleteRecord(conversationId);
@@ -556,10 +567,12 @@ export async function clampToBatch(
  * 用途：用户在源对话第 N 条消息处「从此分支」，新对话继承到该点为止已生成的 record 摘要，
  * 后续在新对话里的增量压缩可从正确的批次起点续接（与源对话的 record 互不影响）。
  *
- * ★ 截断口径与 clampToBatch 完全一致（同款「连续前缀 by stepEnd」逻辑，避免两处口径漂移）：
- *   - 保留所有 stepEnd <= keptSteps 的整批；丢弃被截断点穿过（stepEnd > keptSteps）的批及其之后所有批。
+ * ★ 截断口径与 clampToBatch 完全一致（同款「step + round 双口径取保守」逻辑，避免两处口径漂移）：
+ *   - 保留被截断点之前的【连续前缀整批】；丢弃被截断点穿过的批及其之后所有批。
+ *   - 截断点 = 第一个 (stepEnd > keptSteps) 或 (roundEnd > keptRounds) 的批，二者取较早者（pickCutIdx）。
  *   - 用 findIndex + slice 取前缀，保证结果恒为连续前缀（脏数据导致 stepEnd 非单调也不会从中间挖空）。
- *   - keptRounds 仅作 sanity 告警，不参与过滤（与 clampToBatch 一致，以 stepEnd 单一口径为准）。
+ *   - ★ M5-2 后 keptRounds 为【真轮口径】（见 roundBoundary）并真实参与裁剪，不再仅作 sanity 告警；
+ *     调用方须传 identifyRounds(过滤 tool).totalRounds，与批 roundEnd 同口径，否则 round 分支会兜不住而退化。
  *
  * ★ 不修改源对话：只读源 record（getRecord），把裁出的批次原样（深拷贝）upsert 到目标对话。
  *   目标对话本无 record，是首次写入；批次内容/边界零改动直接复用源批（index/stepStart/stepEnd 一并继承，
@@ -611,24 +624,19 @@ export async function copyRecordFrom(
     if (!src || src.conversationId === dstConvId || src.batches.length === 0) return null;
 
     const safeSteps = Math.max(0, keptSteps);
+    const safeRounds = Math.max(0, keptRounds);
 
-    // 与 clampToBatch 同款：末批整个在保留范围内 → 整份拷贝；否则取被截断点之前的连续前缀。
+    // ★ M5-2 轮次地基：与 clampToBatch 同款【step + round 双口径取保守】裁剪（keptRounds 参与，不再仅告警）。
+    //   末批整个在保留范围内（step 与 round 都覆盖）→ 整份拷贝；否则取被截断点之前的连续前缀。
     const last = src.batches[src.batches.length - 1];
     let kept: RecordBatch[];
-    if (last.stepEnd <= safeSteps) {
+    if (last.stepEnd <= safeSteps && last.roundEnd <= safeRounds) {
       kept = src.batches;
     } else {
-      const cutIdx = src.batches.findIndex(b => b.stepEnd > safeSteps);
+      const cutByStep = src.batches.findIndex(b => b.stepEnd > safeSteps);
+      const cutByRound = src.batches.findIndex(b => b.roundEnd > safeRounds);
+      const cutIdx = pickCutIdx(cutByStep, cutByRound);
       kept = cutIdx < 0 ? src.batches : src.batches.slice(0, cutIdx);
-    }
-
-    // sanity：keptRounds 与保留前缀末批 roundEnd 在正常单调数据下应一致（仅告警，不改裁剪结果）。
-    const safeRounds = Math.max(0, keptRounds);
-    const keptLast = kept[kept.length - 1];
-    if (keptLast && keptLast.roundEnd > safeRounds) {
-      console.warn(
-        `[recordStore] copyRecordFrom round/step 口径偏差：保留前缀末批 roundEnd=${keptLast.roundEnd} > keptRounds=${safeRounds}（以 stepEnd 为准，仅告警）`,
-      );
     }
 
     if (kept.length === 0) return null; // 分支点落在首批之前 → 新对话无可继承摘要
