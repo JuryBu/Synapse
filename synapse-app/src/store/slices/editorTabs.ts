@@ -34,8 +34,8 @@ interface EditorTabsState {
   tabs: EditorTab[];
   activeTabId: string | null;
   /**
-   * ★ M4-3-S7：Enable Preview Editors 开关（VS Code「单击文件=临时斜体 tab」总闸）。
-   *   true（默认）→ 单击文件复用同一个临时 preview tab；false → 每次打开都是固定 tab。
+   * ★ M4-3-S7 / UI-10：Enable Preview Editors 开关（VS Code「单击文件=临时斜体 tab」总闸）。
+   *   true → 单击文件复用同一个临时 preview tab；false（现默认，见 initialState）→ 每次打开都是固定独立 tab。
    */
   previewEnabled: boolean;
   /**
@@ -48,7 +48,9 @@ interface EditorTabsState {
 const initialState: EditorTabsState = {
   tabs: [welcomeTab],
   activeTabId: 'welcome',
-  previewEnabled: true,
+  // ★ UI-10：默认 false——单击文件每次开独立固定 tab、互不替换（主人反馈「打开文件互相替换、中部只能存一个」）。
+  //   想要 VS Code 式「单击=临时预览位复用」的用户可在 TabBar 的 ⋯ 菜单「Enable Preview Editors」手动开启。
+  previewEnabled: false,
   groupLocked: false,
 };
 
