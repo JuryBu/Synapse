@@ -14,9 +14,12 @@
  *   把①②③收敛进本 helper，避免三处各写一遍轮取整逻辑产生口径漂移（M5-2 之前正是因为各处把
  *   「轮」当 user 条数才跑偏）。本 helper 复用 roundBoundary 的 identifyRounds（M5-2 ★地基）。
  *
- * ★ 三种截断模式（对应规范的三种锚语义）：
- *   - `'round-end'`（回溯）：保留【目标轮 N 整轮】（user 段 + model 段全部），N 之后整轮丢弃。
- *       回溯随后把「第 N+1 轮那条 user」回填输入框待发（pendingUserMessage）。
+ * ★ 四种截断模式（对应规范的锚语义）：
+ *   - `'undo'`（回溯，规范 §3 现行口径 / 2026-06-17 修订）：点哪条 user，保留【到该 user 所在轮之前】
+ *       （上一整轮结束），该 user【及之后】整段丢弃，并把该 user 回填【当前对话】输入框待发。
+ *       计算上等价于 branch-user（见下），区别仅在落地：undo 原地裁剪当前对话、branch 落新对话。
+ *   - `'round-end'`：保留【目标轮 N 整轮】+ 回填第 N+1 轮 user。M5-3 早期回溯口径，回溯现已改用 undo；
+ *       本模式保留供「分支点非 user」复用（见 branch）。
  *   - `'before-user'`（重试）：点某条 user，保留【到该 user 段为止】（含该 user），其所在轮的 model 段
  *       （本轮全部 assistant / tool 中间 step）丢弃，随后该 user 自动重发。即该轮回退成「只发了 user、
  *       还没出 model」的半轮态——record 按轮口径此时该轮尚未完成，keptRounds 取到上一整轮。
@@ -43,7 +46,7 @@ interface RoleLike {
   role: string;
 }
 
-export type RoundTruncationMode = 'round-end' | 'before-user' | 'branch';
+export type RoundTruncationMode = 'round-end' | 'before-user' | 'branch' | 'undo';
 
 export interface RoundTruncationResult {
   /** 是否定位成功（anchorMsgId 在 messages 中、且能算出有效截断点）。失败时其它字段为安全空值。 */
@@ -61,9 +64,10 @@ export interface RoundTruncationResult {
   /** record 砍批用：截断后保留的消息条数（不含 tool，与 agentLoop requestHistory 同口径）。 */
   keptSteps: number;
   /**
-   * 回溯/分支「填输入框待发」用：紧随保留范围之后那一轮的【那条 user 消息】（取该轮 user 段首条）。
+   * 回溯/分支「填输入框待发」用：要回填到输入框的【那条 user 消息】。
+   *   - 'undo'（回溯）/ 'branch'（分支点是 user）：= 点击的那条 user（其所在轮被排除、整段移入输入框）。
    *   - 'round-end' 模式：= 第 N+1 轮的 user 消息；目标轮已是末轮（无 N+1）时为 null。
-   *   - 'before-user' 模式：本字段恒为 null（重试不填输入框，由调用方自动重发被保留的那条 user）。
+   *   - 'before-user'（重试）/ 'branch'（分支点非 user）：本字段恒为 null（重试自动重发、不填输入框）。
    */
   pendingUserMessage: RoleLike | null;
 }
@@ -133,8 +137,12 @@ export function computeRoundTruncation(
   if (anchorRound <= 0) return empty;
 
   const anchorIsUser = messages[anchorIdx].role === 'user';
-  // 分支点是 user 时按「回到该轮起点」处理（该 user 不进子集、回填新对话输入框）。
-  const branchExcludesRound = mode === 'branch' && anchorIsUser;
+  // 分支点 / 回溯点是 user 时按「回到该轮起点」处理：该 user 整轮不进保留子集、改回填输入框。
+  //   - 'branch'：分支点 user → 回填【新对话】输入框（规范 §4）。
+  //   - 'undo'（回溯，规范 §3 修订口径）：点哪条 user，那条 user 回填【当前对话】输入框，它及之后
+  //     全部回溯掉（= 回到该 user 所在轮之前）。与重试 'before-user' 的区别——回溯不保留该 user
+  //     （移入输入框待改后再发），重试保留该 user 并自动重发。两者截断点同为「该 user 所在轮之前」。
+  const branchExcludesRound = (mode === 'branch' || mode === 'undo') && anchorIsUser;
 
   // 「保留到第几轮整轮」：
   //   - round-end / branch-非user：保留目标轮 N 整轮 → roundUpperBound = anchorRound。

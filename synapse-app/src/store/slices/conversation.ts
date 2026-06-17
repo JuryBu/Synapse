@@ -629,6 +629,11 @@ export const conversationSlice = createSlice({
     deleteMessage(state, action: PayloadAction<string>) {
       state.messages = state.messages.filter(m => m.id !== action.payload);
     },
+    // ★ Plan_5 M5-3：清空所有消息（回溯到第 1 轮之前等「无任何消息保留」场景）。对话本体 id/title/goal
+    //   保留，仅消息归零——区别于 clearConversation（重置整个对话）。
+    clearMessages(state) {
+      state.messages = [];
+    },
   },
 });
 
@@ -639,5 +644,5 @@ export const {
   addMessageDiff, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,
   setStreaming, appendStreamingContent, clearStreamingContent,
   setModel, setTokenUsage, setPendingMessage, clearConversation, setTitle,
-  editMessage, truncateAt, deleteMessage,
+  editMessage, truncateAt, deleteMessage, clearMessages,
 } = conversationSlice.actions;

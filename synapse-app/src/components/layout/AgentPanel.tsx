@@ -27,7 +27,7 @@ import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
 import { mcpBridge } from '@/services/mcpBridge';
 import { addNotification } from '@/store/slices/notifications';
-import { addMessage, clearConversation, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setPendingMessage, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { addMessage, clearConversation, clearMessages, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setPendingMessage, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
 // ★ M3-3a：generateWorkflowRunId 预生成稳定 runId，跑前先建占位 assistant 消息 + 关联卡片实时显示。
 import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@/services/multiAITrigger';
@@ -1352,13 +1352,14 @@ export function AgentPanel() {
     dispatch(deleteMessage(msgId));
   }, [dispatch, messages, gcMessages]);
 
-  // ★ Plan_5 M5-3 回溯（规范 §3）：把点击点【向轮边界取整】定位目标轮 N，UI+本地回到「N 轮结束」，
-  //   record 砍掉 N 之后所有批，并把【第 N+1 轮那条 user】回填输入框待发（不自动发，恢复其 pending 附件，
-  //   GC 时排除这条 user 不删它附件）。统一以「user 消息=轮起点」为锚：回溯=填输入框待发（可改）。
+  // ★ Plan_5 M5-3 回溯（规范 §3，2026-06-17 修订口径）：点哪条 user 消息，那条 user 本身回填输入框待发，
+  //   它【及之后】全部回溯掉（= 回到该 user 所在轮之前 / 上一整轮结束）。record 砍掉该轮起所有批，
+  //   GC 时排除这条 user（其附件随草稿转移、不删）。与重试的区别：回溯把该 user 移入输入框（可改后再发），
+  //   重试保留该 user 并自动重发。用 'undo' 截断模式（= branch-user 的截断口径，但原地裁剪当前对话）。
   const handleUndoToMessage = useCallback((msgId: string) => {
     void (async () => {
-      // ① 共享 helper 按轮截断（round-end 模式：保留目标轮 N 整轮、N 之后整轮丢弃，绝不轮中间切）。
-      const cut: RoundTruncationResult = computeRoundTruncation(messages, msgId, 'round-end');
+      // ① 共享 helper 按轮截断（undo 模式：点 user → 保留到该 user 所在轮之前、该轮起全部丢弃，绝不轮中间切）。
+      const cut: RoundTruncationResult = computeRoundTruncation(messages, msgId, 'undo');
       if (!cut.ok) return;
 
       // ② 被截掉范围内的文件变更按快照回退（与旧逻辑一致，但范围改为「轮取整后的 removedMessages」）。
@@ -1368,10 +1369,10 @@ export function AgentPanel() {
         .reverse();
 
       const hasPending = !!cut.pendingUserMessage;
-      const tail = hasPending ? '下一轮那条消息会回填到输入框（可改后再发）。' : '回到所选轮结束。';
+      const tail = hasPending ? '这条消息会回填到输入框（可改后再发）。' : '这条及之后的内容会被移除。';
       const prompt = diffsToRollback.length > 0
-        ? `回溯到第 ${cut.anchorRound} 轮结束？后续轮次会移除，${diffsToRollback.length} 个关联文件变更会按快照回退；${tail}`
-        : `回溯到第 ${cut.anchorRound} 轮结束？${tail}`;
+        ? `回溯到这条消息之前？它及之后的内容会移除，${diffsToRollback.length} 个关联文件变更会按快照回退；${tail}`
+        : `回溯到这条消息之前？${tail}`;
       if (!window.confirm(prompt)) return;
 
       for (const diff of diffsToRollback) {
@@ -1397,11 +1398,13 @@ export function AgentPanel() {
         : cut.removedMessages;
       gcMessages(removedForGc);
 
-      // ⑤ UI+本地回到「N 轮结束」：截到保留范围最后一条消息（含）。lastKeptMessageId 必非空（anchorRound>=1）。
+      // ⑤ UI+本地回到「该 user 所在轮之前」：截到保留范围最后一条消息（含）。
+      //   回溯第 1 轮 user（lastKeptIndex<0、无任何消息保留）→ 清空全部消息，该 user 随后移入输入框。
       if (cut.lastKeptMessageId) dispatch(truncateAt(cut.lastKeptMessageId));
+      else dispatch(clearMessages());
 
-      // ⑥ 把第 N+1 轮那条 user 回填输入框待发（含其 pending 附件）。
-      //   无 N+1（目标轮已是末轮、本次回溯无消息被移除）则不动输入框——避免误清用户正在输入的草稿。
+      // ⑥ 把点击的那条 user 回填输入框待发（含其 pending 附件）。
+      //   anchor 非 user（回溯入口只挂 user，此为兜底）时无 pendingUserMessage → 不动输入框，避免误清草稿。
       if (cut.pendingUserMessage) {
         refillInputFromUserMessage(cut.pendingUserMessage as any);
       }

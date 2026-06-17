@@ -379,8 +379,9 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
                 <Trash2 size={12} />
               </button>
             )}
-            {!isStreaming && onUndoToMessage && (
-              <button className="message-action-btn" onClick={() => onUndoToMessage(id)} title="回溯到此消息">
+            {/* ★ Plan_5 M5-3：回溯入口只挂 user 消息——点该 user = 它及之后全部回溯掉、该 user 回填输入框待改后再发。 */}
+            {isUser && !isStreaming && onUndoToMessage && (
+              <button className="message-action-btn" onClick={() => onUndoToMessage(id)} title="回溯：清掉这条及之后，这条回到输入框">
                 <Undo2 size={12} />
               </button>
             )}
