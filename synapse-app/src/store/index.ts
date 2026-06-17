@@ -74,6 +74,13 @@ function sanitizePersistedAgentSettings(agentSettings: any) {
       ...DEFAULT_SYNOPSIS_SETTINGS,
       ...(agentSettings.synopsisSettings ?? {}),
     },
+    // ★ M5-RL：record 分层默认兜底——旧持久化无此字段时补全完整字段（默认值与 agentSettings.recordLayering
+    //   initialState / agentLoop.DEFAULT_LAYERING 同步；改默认值需三处一起改）。buildStableRecordPrefix 另有
+    //   运行时字段级兜底，此处保证 store.recordLayering 永远完整，供 SettingsPanel UI 与 setRecordLayering 用。
+    recordLayering: {
+      headFull: 2, tailFull: 1, titleThreshold: 20, maxRatio: 0.4, foldThreshold: 30, foldBatchK: 10,
+      ...(agentSettings.recordLayering ?? {}),
+    },
   };
   // ★ M4-5-S1：系统模型（systemModel）加载期失效回退，与 currentModel 同款——
   // 持久化里若存了已从端点下线的模型，启动即回退空（跟随 currentModel），防后台任务静默报错。

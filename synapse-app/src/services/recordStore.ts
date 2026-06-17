@@ -144,6 +144,28 @@ export function extractSkeleton(contentMd: string): string {
   return out.join('\n').trim();
 }
 
+/**
+ * ★ R-L1：从 contentMd 本地正则提取【仅标题级】骨架——保留首个 `# 一级标题` + 所有 `## 二级标题`，
+ *   丢弃 extractSkeleton 会附带的「每节首行要点」。量纲约为 extractSkeleton 骨架的 1/3，用于 R-L2
+ *   三级分层把最老中间批进一步降级（titleOnly），进一步压缩 record 注入前缀。
+ *   纯正则、零 LLM，与 extractSkeleton 并列。★ 渲染侧对 batch.contentMd 实时调用（不固化进 RecordBatch、
+ *   不改 extractSkeleton 口径），保证既有 skeleton 落库与 prompt cache 稳定性不受影响。
+ */
+export function extractSkeletonTitle(contentMd: string): string {
+  if (!contentMd || !contentMd.trim()) return '';
+  const lines = contentMd.split(/\r?\n/);
+  const out: string[] = [];
+  // 一级标题（骨架头）
+  for (const line of lines) {
+    if (/^#\s+/.test(line)) { out.push(line.trim()); break; }
+  }
+  // 所有二级标题（仅标题行，不附每节首行要点）
+  for (const line of lines) {
+    if (/^##\s+/.test(line)) out.push(line.trim());
+  }
+  return out.join('\n').trim();
+}
+
 /** upsert 入参：整条覆盖（底层写，含 batches） */
 export interface RecordUpsertInput {
   conversationId: string;

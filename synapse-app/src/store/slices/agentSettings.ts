@@ -41,6 +41,26 @@ export interface SynopsisSettings {
   autoIndexMethod: 'contentHash' | 'timestamp';
 }
 
+/**
+ * ★ M5-RL：record 多级分层 + 折叠 + token 硬闸的可调参数（Plan_5 §2.5 / §8.3「可调进设置」强约束）。
+ *   全部是「默认值，UI 可改」。分层渲染只依赖批位置、不依赖窗口（保 prompt cache 稳定）；maxRatio 仅
+ *   R-L5 token 硬闸危险态兜底用。SettingsPanel 压缩设置区（M5-BPC-7）暴露。
+ */
+export interface RecordLayeringConfig {
+  /** 头部 N 批渲染全文（最老背景/关键决策）。 */
+  headFull: number;
+  /** 尾部 N 批渲染全文（最近上下文，主人拍板 T=1）。 */
+  tailFull: number;
+  /** 中间批数超此阈值时，把最老一段中间批降级为 titleOnly（仅标题）。 */
+  titleThreshold: number;
+  /** R-L5 token 硬闸：record 注入前缀最大占模型窗口的比例（仅危险态兜底，会破 cache）。 */
+  maxRatio: number;
+  /** R-L4 折叠触发：可见（非 archived）批数超此阈值则折叠最老批。 */
+  foldThreshold: number;
+  /** R-L4 每次折叠把最老 K 批合成 1 个元批。 */
+  foldBatchK: number;
+}
+
 interface AgentSettingsState {
   mode: AgentMode;
   currentModel: string;
@@ -68,6 +88,8 @@ interface AgentSettingsState {
   speedTier: string;
   backgroundSettings: BackgroundSettings;
   synopsisSettings: SynopsisSettings;
+  /** ★ M5-RL：record 分层/折叠/硬闸可调参数。 */
+  recordLayering: RecordLayeringConfig;
 }
 
 const initialState: AgentSettingsState = {
@@ -106,6 +128,14 @@ const initialState: AgentSettingsState = {
     mapConcurrency: 3,
     autoIndexEnabled: true,
     autoIndexMethod: 'contentHash',
+  },
+  recordLayering: {
+    headFull: 2,
+    tailFull: 1,
+    titleThreshold: 20,
+    maxRatio: 0.4,
+    foldThreshold: 30,
+    foldBatchK: 10,
   },
 };
 
@@ -186,6 +216,10 @@ export const agentSettingsSlice = createSlice({
      */
     setSystemModel(state, action: PayloadAction<string>) {
       state.systemModel = action.payload;
+    },
+    // ★ M5-RL：更新 record 分层参数（部分覆盖，UI 逐项改）。
+    setRecordLayering(state, action: PayloadAction<Partial<RecordLayeringConfig>>) {
+      state.recordLayering = { ...state.recordLayering, ...action.payload };
     },
     setAvailableModels(state, action: PayloadAction<AIModelOption[]>) {
       state.availableModels = action.payload;
@@ -304,7 +338,7 @@ export const agentSettingsSlice = createSlice({
 });
 
 export const {
-  setMode, setCurrentModel, setSystemModel, setMaxToolRounds,
+  setMode, setCurrentModel, setSystemModel, setRecordLayering, setMaxToolRounds,
   setAvailableModels, setConnectionStatus,
   setEnableStreaming, setOutputStrategy, setPseudoStreamSpeed,
   setShowStreamCursor, setShowGeneratingPlaceholder, setStreamThinking,

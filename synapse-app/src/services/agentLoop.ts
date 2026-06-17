@@ -12,10 +12,10 @@ import {
   addAssistantRun, addRunEvent, addMessageDiff, recordFileSnapshot, updateToolCallStatus,
   type AttachmentRef, type MessageContentPart, type StreamModeUsed,
 } from '../store/slices/conversation';
-import { setConnectionStatus } from '../store/slices/agentSettings';
+import { setConnectionStatus, type RecordLayeringConfig } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
 import { promptBuilder, renderOpenFilesSection, compressContext, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
-import { getRecord, appendBatch, getRecordSkeleton, type RecordBatch, type SynapseRecord } from './recordStore';
+import { getRecord, appendBatch, getRecordSkeleton, extractSkeletonTitle, type RecordBatch, type SynapseRecord } from './recordStore';
 import { identifyRounds, floorStepToRoundStart } from './roundBoundary';
 import { generateBatch } from './recordGenerator';
 import { runSystemModelOnce } from './systemModelClient';
@@ -303,7 +303,11 @@ const BATCH_JOIN = '\n\n---\n\n';
  *   RECORD_HEAD_FULL / RECORD_TAIL_FULL / RECORD_BUDGET_RATIO 常量一并删除。record_read 工具的按需
  *   单批展开是独立路径（不经此函数），功能不回退。renderSkeletonBatch 仍由稳定版复用故保留。
  */
-const STABLE_HEAD_FULL = 2;
+// ★ M5-RL：record 分层默认值（与 agentSettings.recordLayering 初值一致）。buildStableRecordPrefix 的
+//   layering 参缺失 / 旧持久化无此字段时按此兜底，保证渲染不崩，且未配置时行为与改造前一致（headFull=2）。
+const DEFAULT_LAYERING: RecordLayeringConfig = {
+  headFull: 2, tailFull: 1, titleThreshold: 20, maxRatio: 0.4, foldThreshold: 30, foldBatchK: 10,
+};
 
 /**
  * ★ M4-5-S2：压缩注入到 apiMessages[1] 的固定文案前缀（常量化，确保前缀字符串本身永不漂移）。
@@ -311,10 +315,14 @@ const STABLE_HEAD_FULL = 2;
  */
 const RECORD_INJECTION_PREFIX = '[对话历史摘要]\n\n';
 
-/** 渲染一个被降级为骨架的批次：明确标注可用 record_read 展开全文 */
-function renderSkeletonBatch(batch: RecordBatch): string {
-  const skeleton = (batch.skeleton || '').trim();
-  const header = `[批次${batch.index} 骨架，可用 record_read(batchIndex=${batch.index}) 展开全文]`;
+/** 渲染一个被降级为骨架的批次：明确标注可用 record_read 展开全文。
+ *  ★ R-L2：titleOnly=true 时进一步降级为【仅标题】骨架（extractSkeletonTitle 实时提 contentMd，约 1/3 量纲）。 */
+function renderSkeletonBatch(batch: RecordBatch, titleOnly = false): string {
+  const skeleton = titleOnly
+    ? extractSkeletonTitle(batch.contentMd || '').trim()
+    : (batch.skeleton || '').trim();
+  const kind = titleOnly ? '标题' : '骨架';
+  const header = `[批次${batch.index} ${kind}，可用 record_read(batchIndex=${batch.index}) 展开全文]`;
   return skeleton ? `${header}\n${skeleton}` : header;
 }
 
@@ -339,15 +347,35 @@ function renderSkeletonBatch(batch: RecordBatch): string {
  *
  * 服务对象：自动压缩（现有 ~90% 水位）与未来 /compact 手动压缩共用此稳定前缀。
  */
-function buildStableRecordPrefix(record: SynapseRecord): string {
+function buildStableRecordPrefix(record: SynapseRecord, layering?: Partial<RecordLayeringConfig>): string {
+  const cfg = { ...DEFAULT_LAYERING, ...(layering ?? {}) };
+  const H = Math.max(0, Math.floor(cfg.headFull));
+  const T = Math.max(0, Math.floor(cfg.tailFull));
+
   const batches = record.batches ?? [];
   if (batches.length === 0) return record.contentMd ?? '';
   if (batches.length === 1) return batches[0].contentMd;
 
-  // 固定规则：批序位 < STABLE_HEAD_FULL 的（最老 N 批）走全文，其余一律骨架。
-  // 仅依赖批在数组中的位置与各批内容，不依赖 contextWindow / 批数预算 → 确定性。
+  const N = batches.length;
+  // 边界：头尾全文区间已覆盖全部（N <= H+T）→ 全批全文，不进骨架/titleOnly 分支（防重叠/漏算）。
+  if (N <= H + T) {
+    return batches.map(b => b.contentMd).filter(Boolean).join(BATCH_JOIN);
+  }
+
+  // ★ R-L2 三级分层（仅依赖批序位 i 与总批数 N，绝不读 contextWindow/token → prompt cache 确定性）：
+  //   档1 序位 i<H：头全文（最老背景/关键决策）。
+  //   档2 序位 i>=N-T：尾全文（最近上下文，主人拍板 T=1）。
+  //   档3 中间批骨架；中间批数 > titleThreshold 时，把最老一段 [H, titleOnlyEnd) 降 titleOnly（仅标题）。
+  const midCount = N - H - T;
+  const titleOnlyCount = midCount > cfg.titleThreshold ? midCount - cfg.titleThreshold : 0;
+  const titleOnlyEnd = H + titleOnlyCount;
+
   return batches
-    .map((b, i) => (i < STABLE_HEAD_FULL ? b.contentMd : renderSkeletonBatch(b)))
+    .map((b, i) => {
+      if (i < H) return b.contentMd;
+      if (i >= N - T) return b.contentMd;
+      return renderSkeletonBatch(b, i < titleOnlyEnd);
+    })
     .filter(Boolean)
     .join(BATCH_JOIN);
 }
@@ -660,7 +688,7 @@ export class AgentLoop {
         let keepFromIdx = floorStepToRoundStart(roundsOfRequest, existingRecord.totalSteps);
         // 安全下限：保留段至少含最后一条（当前最新 user），绝不把当前轮也压没/越界成空。
         keepFromIdx = Math.max(0, Math.min(keepFromIdx, requestHistory.length - 1));
-        const recordMd = buildStableRecordPrefix(existingRecord);
+        const recordMd = buildStableRecordPrefix(existingRecord, (store.getState() as RootState).agentSettings?.recordLayering);
         apiHistory = recordMd
           ? [{ role: 'system', content: `${RECORD_INJECTION_PREFIX}${recordMd}` } as ChatMessage, ...requestHistory.slice(keepFromIdx)]
           : requestHistory;
@@ -1275,7 +1303,7 @@ export class AgentLoop {
       const batchSlice = coveredEligible.slice(priorSteps);     // 从全量段切掉已覆盖前缀得本批增量
 
       // ★ M4-5-S2：压缩注入改用确定性稳定前缀（不随 contextWindow 动态升降级），杜绝 apiMessages[1] 前缀漂移。
-      recordMd = existingRecord ? buildStableRecordPrefix(existingRecord) : null;
+      recordMd = existingRecord ? buildStableRecordPrefix(existingRecord, (store.getState() as RootState).agentSettings?.recordLayering) : null;
 
       if (batchSlice.length > 0) {
         // ★ M5-2 轮次地基：本批覆盖的轮号由【真轮识别】推导，替换原「user 条数 = 轮数」近似。
@@ -1329,7 +1357,7 @@ export class AgentLoop {
           });
           if (updated) {
             // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性。
-            recordMd = buildStableRecordPrefix(updated);
+            recordMd = buildStableRecordPrefix(updated, (store.getState() as RootState).agentSettings?.recordLayering);
             // ★ R5 修复（问题3：record 水位 vs messages 缺口）：appendBatch 已把【本批覆盖到的 step】落库，
             // 但触发本轮压缩的新 user 消息此刻可能还没被 autosave（700ms 防抖 + 压缩期同步占住事件循环，
             // 且压缩成功后立即进 while 重新点亮 isStreaming 关掉 autosave 闸门）。这里主动同步持久化一次
