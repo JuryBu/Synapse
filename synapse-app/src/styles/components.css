@@ -38,7 +38,7 @@
 /* ★ UI-7：浮层背景调实——glass-panel 的 --glass-bg 半透明会透出底层文字（图四 ⋯ 菜单 / 图五对话切换器重叠）。
    用接近不透明深底覆盖（保留模糊玻璃感）。特异性 .x.glass-panel(0,2,0) 盖过 .glass-panel(0,1,0)。 */
 .context-menu.glass-panel,
-.agent-conv-panel.glass-panel { background: rgba(22, 22, 32, 0.97); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+.agent-conv-panel.glass-panel { background: var(--glass-bg-solid); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
 .context-menu-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 12px; border: none; background: none; color: var(--syn-text); cursor: pointer; font-size: 12px; border-radius: 4px; }
 .context-menu-item:hover { background: rgba(var(--syn-accent-rgb,139,92,246),0.2); }
 .context-menu-item.danger:hover { background: rgba(239,68,68,0.2); color: #ef4444; }

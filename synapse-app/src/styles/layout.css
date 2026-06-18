@@ -1144,7 +1144,7 @@ html[data-wallpaper="enabled"] .settings-panel {
   flex-direction: column;
   border: 1px solid var(--syn-border);
   border-radius: 8px;
-  background: var(--syn-bg-panel);
+  background: var(--syn-bg-surface); /* ★ 主题修复：--syn-bg-panel 全项目未定义(=透明)，改用已有深浅两套的 --syn-bg-surface */
   box-shadow: var(--glass-shadow);
   overflow: hidden;
 }

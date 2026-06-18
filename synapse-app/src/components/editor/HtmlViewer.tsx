@@ -11,12 +11,14 @@ type HtmlMode = 'render' | 'source';
 // ★ UI-9：给渲染 iframe 注入统一滚动条样式。iframe srcDoc 是独立文档（opaque origin），app 全局
 //   ::-webkit-scrollbar 样式进不去，默认是浏览器原生粗白滚动条——与 app 其它区域不一致、突兀。
 //   注入细、半透明中性灰滚动条（深浅底都可见），与 app 风格统一。
+// ★ UI-9 修订：每条都用 !important——精美 HTML（如 AI 生成的讨论页）常自带 ::-webkit-scrollbar 样式，
+//   不加 !important 即便注入在后也可能被用户的高优先级规则压住。配合注入到文档末尾（见 injectHtmlScrollbar）双保险。
 const HTML_SCROLLBAR_STYLE = '<style>'
-  + '::-webkit-scrollbar{width:12px;height:12px;}'
-  + '::-webkit-scrollbar-track{background:transparent;}'
-  + '::-webkit-scrollbar-thumb{background:rgba(140,140,160,0.45);border-radius:6px;border:3px solid transparent;background-clip:padding-box;}'
-  + '::-webkit-scrollbar-thumb:hover{background:rgba(140,140,160,0.65);background-clip:padding-box;}'
-  + '::-webkit-scrollbar-corner{background:transparent;}'
+  + '::-webkit-scrollbar{width:12px !important;height:12px !important;}'
+  + '::-webkit-scrollbar-track{background:transparent !important;}'
+  + '::-webkit-scrollbar-thumb{background:rgba(140,140,160,0.45) !important;border-radius:6px !important;border:3px solid transparent !important;background-clip:padding-box !important;}'
+  + '::-webkit-scrollbar-thumb:hover{background:rgba(140,140,160,0.65) !important;background-clip:padding-box !important;}'
+  + '::-webkit-scrollbar-corner{background:transparent !important;}'
   + '</style>';
 
 /**
@@ -24,23 +26,15 @@ const HTML_SCROLLBAR_STYLE = '<style>'
  * （前置非空内容会触发 quirks mode、破坏用户 HTML 的渲染）。按 head→html→body→片段前置 兜底。
  */
 function injectHtmlScrollbar(html: string): string {
-  const head = html.match(/<head[^>]*>/i);
-  if (head && head.index !== undefined) {
-    const at = head.index + head[0].length;
-    return html.slice(0, at) + HTML_SCROLLBAR_STYLE + html.slice(at);
-  }
-  const htmlTag = html.match(/<html[^>]*>/i);
-  if (htmlTag && htmlTag.index !== undefined) {
-    const at = htmlTag.index + htmlTag[0].length;
-    return html.slice(0, at) + '<head>' + HTML_SCROLLBAR_STYLE + '</head>' + html.slice(at);
-  }
-  const body = html.match(/<body[^>]*>/i);
-  if (body && body.index !== undefined) {
-    const at = body.index + body[0].length;
-    return html.slice(0, at) + HTML_SCROLLBAR_STYLE + html.slice(at);
-  }
-  // 纯片段（无 DOCTYPE/html/body）→ 前置安全（片段本就无标准渲染模式之分）。
-  return HTML_SCROLLBAR_STYLE + html;
+  // ★ UI-9 修订（修「注入了但不生效」）：之前注入到 <head> 开头，排在用户自有 ::-webkit-scrollbar 样式【之前】，
+  //   被 CSS「同特异性后定义赢」覆盖。改为注入到 </body> 前（文档最末，排在所有用户样式之后），fallback </head> 前 /
+  //   片段追加末尾。配合样式 !important，确保覆盖精美 HTML 自带滚动条。注入末尾不影响 DOCTYPE/渲染模式。
+  const bodyClose = html.search(/<\/body>/i);
+  if (bodyClose >= 0) return html.slice(0, bodyClose) + HTML_SCROLLBAR_STYLE + html.slice(bodyClose);
+  const headClose = html.search(/<\/head>/i);
+  if (headClose >= 0) return html.slice(0, headClose) + HTML_SCROLLBAR_STYLE + html.slice(headClose);
+  // 纯片段（无 body/head 闭合）→ 追加末尾（无 DOCTYPE，不影响渲染模式）。
+  return html + HTML_SCROLLBAR_STYLE;
 }
 
 interface HtmlViewerProps {
