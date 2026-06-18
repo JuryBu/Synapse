@@ -1271,8 +1271,8 @@ html[data-wallpaper="enabled"] .settings-panel {
   padding: 8px;
   border: 1px solid var(--syn-border);
   border-radius: 8px;
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur));
+  background: var(--glass-bg-solid); /* ★ UI-7：模型选择浮层用近不透明底，防半透明(--glass-bg 0.78)透出后面文字重合（图二） */
+  backdrop-filter: blur(24px);
   box-shadow: var(--glass-shadow);
   z-index: 30;
   overflow-y: auto;

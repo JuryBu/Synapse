@@ -11,9 +11,12 @@ type HtmlMode = 'render' | 'source';
 // ★ UI-9：给渲染 iframe 注入统一滚动条样式。iframe srcDoc 是独立文档（opaque origin），app 全局
 //   ::-webkit-scrollbar 样式进不去，默认是浏览器原生粗白滚动条——与 app 其它区域不一致、突兀。
 //   注入细、半透明中性灰滚动条（深浅底都可见），与 app 风格统一。
-// ★ UI-9 修订：每条都用 !important——精美 HTML（如 AI 生成的讨论页）常自带 ::-webkit-scrollbar 样式，
-//   不加 !important 即便注入在后也可能被用户的高优先级规则压住。配合注入到文档末尾（见 injectHtmlScrollbar）双保险。
+// ★ UI-9 真机定位（playwright 验证）：iframe【视口主滚动条】用 ::-webkit-scrollbar 在 Chromium 里样式化不可靠
+//   （iframe root scrollbar 有限制，之前几轮只注入 ::-webkit-scrollbar 所以一直没生效）。必须用标准属性
+//   scrollbar-width/scrollbar-color 作用于 html 才真正控制 iframe 视口滚动条（computed 实测应用 thin + 指定色）。
+//   两者并用：标准属性管 iframe 视口主滚动条（细+中性灰原生感），::-webkit-scrollbar 管内部 overflow 容器滚动条，双覆盖。
 const HTML_SCROLLBAR_STYLE = '<style>'
+  + 'html{scrollbar-width:thin !important;scrollbar-color:rgba(140,140,160,0.5) transparent !important;}'
   + '::-webkit-scrollbar{width:12px !important;height:12px !important;}'
   + '::-webkit-scrollbar-track{background:transparent !important;}'
   + '::-webkit-scrollbar-thumb{background:rgba(140,140,160,0.45) !important;border-radius:6px !important;border:3px solid transparent !important;background-clip:padding-box !important;}'
