@@ -252,6 +252,7 @@ export function AgentPanel() {
     void getRecord(conversationId).then(rec => {
       if (cancelled) return;
       const ends = (rec?.batches ?? [])
+        .filter(b => !b.meta) // ★ R-L4 审查 #1：元批 stepEnd 必等于某 archived 批，过滤防同边界分隔线重复标签
         .map(b => b.stepEnd)
         .filter(s => s > 0);
       setRecordBatchStepEnds(ends);
@@ -1044,7 +1045,7 @@ export function AgentPanel() {
         const afterBatchCount = after?.batches?.length ?? 0;
         // 压缩点 UI 交还 batchDividerByIdx 分隔线：归一后 store.messages 长度不变，stepEnds effect 不会自动重算，
         // 这里主动用重读到的 record 刷新各批 stepEnd，让新批的「已压缩」分隔线立即画出。
-        const ends = (after?.batches ?? []).map(b => b.stepEnd).filter(s => s > 0);
+        const ends = (after?.batches ?? []).filter(b => !b.meta).map(b => b.stepEnd).filter(s => s > 0); // ★ R-L4 审查 #1：过滤元批防分隔线重复标签
         setRecordBatchStepEnds(ends);
         if (!recordMd || afterBatchCount <= priorBatchCount) {
           dispatch(addNotification({ type: 'info', title: '手动压缩', message: '本次没有可压缩为摘要的历史（已是最新）' }));

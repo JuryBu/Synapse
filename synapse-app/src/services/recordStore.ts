@@ -51,6 +51,18 @@ export interface RecordBatch {
   timeSpan: string;
   /** 本批创建时间（秒级 Unix 时间戳，与全库统一单位） */
   createdAt: number;
+  /**
+   * ★ R-L4 折叠（设计B）：本批是【被折叠的原始批】——留库（record_read/getBatch/UI 仍可取回全文），
+   *   但不进 buildStableRecordPrefix 注入视图（被元批 meta 代表）。缺省 false。
+   */
+  archived?: boolean;
+  /**
+   * ★ R-L4 折叠（设计B）：本批是【合成元批】——把最老 K 个原始批的 skeleton 本地拼接成 1 个超级老批，
+   *   进注入视图（按位置走三级分层），但不参与派生水位（buildRecord/appendBatch 取「最后一个非 meta 批」）。缺省 false。
+   */
+  meta?: boolean;
+  /** ★ R-L4 折叠（设计B）：本元批覆盖的原始批 index 列表（UI/调试/解折叠用）。仅 meta 批非空，缺省 []。 */
+  foldedFrom?: number[];
 }
 
 /** record 数据模型（多批次架构，运行态 / 持久化对等结构，camelCase） */
@@ -201,6 +213,11 @@ function normalizeBatch(raw: unknown, fallbackIndex: number): RecordBatch | null
   const b = raw as Record<string, unknown>;
   const contentMd = String(b.contentMd ?? b.content_md ?? '');
   const skeleton = String(b.skeleton ?? '') || extractSkeleton(contentMd);
+  // ★ R-L4：archived/meta 默认 false、foldedFrom 默认 []（旧持久化无此三字段时按缺省读回，行为同改造前）。
+  const rawFolded = b.foldedFrom ?? b.folded_from;
+  const foldedFrom = Array.isArray(rawFolded)
+    ? rawFolded.map(v => toNumber(v)).filter(n => Number.isFinite(n))
+    : [];
   return {
     index: toNumber(b.index, fallbackIndex),
     roundStart: toNumber(b.roundStart ?? b.round_start),
@@ -212,7 +229,24 @@ function normalizeBatch(raw: unknown, fallbackIndex: number): RecordBatch | null
     phases: toNumber(b.phases),
     timeSpan: String(b.timeSpan ?? b.time_span ?? ''),
     createdAt: toNumber(b.createdAt ?? b.created_at, nowSec()),
+    archived: Boolean(b.archived ?? b.is_archived ?? false),
+    meta: Boolean(b.meta ?? b.is_meta ?? false),
+    foldedFrom,
   };
+}
+
+/**
+ * ★ R-L4 折叠核心坑：派生水位 / 幂等门所依据的「真实末批」必须【排除 meta 元批】。
+ *   元批 index = 末批+1 → sort 后排在数组尾；元批的 step/round 是其 foldedFrom 原始批的并集区间。
+ *   若把元批当末批派生 totalSteps/totalRounds，会把水位拍成「并集值（= 折叠那 K 批的旧区间，远小于真实末批）」
+ *   → 下次 appendBatch 的 expectedStepStart=末批 stepEnd 幂等门错位 → 静默丢批 / 脏写拒绝。
+ *   故派生水位与 appendBatch 续接都用 lastRealBatch（最后一个非 meta 批）。
+ */
+function lastRealBatch(sorted: RecordBatch[]): RecordBatch | undefined {
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    if (!sorted[i].meta) return sorted[i];
+  }
+  return undefined;
 }
 
 /** 由 batches 派生出完整 SynapseRecord（统一水位/timeSpan/contentMd 派生口径） */
@@ -222,17 +256,23 @@ function buildRecord(
   updatedAt: number,
 ): SynapseRecord {
   const sorted = [...batches].sort((a, b) => a.index - b.index);
-  const last = sorted[sorted.length - 1];
+  // ★ R-L4：派生水位排除 meta 元批——真实末批 = 最后一个非 meta 批（见 lastRealBatch 注释）。
+  const last = lastRealBatch(sorted);
+  // ★ R-L4：派生只读 timeSpan/contentMd 排除 meta 元批——元批 contentMd 是其 foldedFrom 原始批 skeleton 的
+  //   本地拼接（注入视图产物），原始批（含 archived）的真实全文仍在 sorted 里；把元批拼进派生全文会与
+  //   archived 原文重复且污染时间跨度。getRecord/getBatch/record_read/UI 读全量 batches（不过滤 archived），
+  //   满足「原文留库可展开、UI 完整可见」；派生 contentMd 仅兼容旧调用方/调试，按真实批口径即可。
+  const realBatches = sorted.filter(b => !b.meta);
   return {
     conversationId,
     batches: sorted,
     totalRounds: last?.roundEnd ?? 0,
     totalSteps: last?.stepEnd ?? 0,
     lastUpdatedRound: last?.roundEnd ?? 0,
-    timeSpan: deriveTimeSpan(sorted),
+    timeSpan: deriveTimeSpan(realBatches),
     schemaVersion: RECORD_SCHEMA_VERSION,
     updatedAt,
-    contentMd: joinBatchContents(sorted),
+    contentMd: joinBatchContents(realBatches),
   };
 }
 
@@ -411,7 +451,11 @@ export async function appendBatch(input: AppendBatchInput): Promise<SynapseRecor
 
   try {
     const prevBatches = existing?.batches ?? [];
-    const lastBatch = prevBatches[prevBatches.length - 1];
+    // ★ R-L4 核心坑：末批续接（幂等门 + index 派生）必须取【最后一个非 meta 真实批】。
+    //   元批 index = 末批+1 排在数组尾，但其 step/round 是折叠那 K 批的旧并集区间；若误当末批，
+    //   expectedStepStart 会被拍成元批 stepEnd（远小于真实水位）→ 正常续接的新批被判脏写拒绝 → 静默丢批。
+    const sortedPrev = [...prevBatches].sort((a, b) => a.index - b.index);
+    const lastBatch = lastRealBatch(sortedPrev);
     const expectedStepStart = lastBatch?.stepEnd ?? 0;
 
     // 幂等防脏写（本地快速失败）：本批起点必须严格接续末批终点。
@@ -427,7 +471,11 @@ export async function appendBatch(input: AppendBatchInput): Promise<SynapseRecor
       return existing;
     }
 
-    const nextIndex = lastBatch ? lastBatch.index + 1 : 0;
+    // ★ R-L4 核心坑：index 必须取【全批（含 meta）最大 index + 1】保证全局唯一。
+    //   若沿用「真实末批 index+1」，折叠后元批占了 lastReal+1，新真实批又算 lastReal+1 → 与元批 index 撞，
+    //   getBatch/record_read 按 index 查会取到错的批、UI 分隔线错位。故 index 单调取整个数组最大值续。
+    const maxIndex = sortedPrev.reduce((m, b) => Math.max(m, b.index), -1);
+    const nextIndex = maxIndex + 1;
     const contentMd = String(input.contentMd ?? '');
     const newBatch: RecordBatch = {
       index: nextIndex,
@@ -461,6 +509,139 @@ export async function appendBatch(input: AppendBatchInput): Promise<SynapseRecor
 }
 
 /**
+ * ★ R-L4 折叠（设计B）参数。与 agentSettings.RecordLayeringConfig 的 foldThreshold/foldBatchK 同义、同默认值
+ *   （30/10）。foldOldBatches 默认接收调用方传入的 store 配置快照（agentLoop 持有 store）；不传时按本默认兜底。
+ *   ★ 不在 recordStore 顶层 import store —— 保持 recordStore 对 redux 零依赖（纯数据访问层、可被 fixture 直接驱动）。
+ */
+export interface FoldOptions {
+  /** 可见（非 archived）批数超此阈值则触发折叠。 */
+  foldThreshold?: number;
+  /** 每次折叠把最老 K 个非 meta 可见批合成 1 个元批。 */
+  foldBatchK?: number;
+}
+const FOLD_DEFAULTS = { foldThreshold: 30, foldBatchK: 10 };
+
+/** 元批 contentMd 的拼接分隔（视觉上区隔被折叠的各原始批 skeleton）。 */
+const META_JOIN = '\n\n';
+
+/**
+ * ★ R-L4 折叠（设计B）：把最老 K 个可见原始批折叠成 1 个【元批】，原始批标 archived 留库（不丢全文）。
+ *
+ * 触发：可见（非 archived、非 meta）批数 > foldThreshold。
+ * 行为（纯本地、零 LLM）：
+ *   1. 取最老 foldBatchK 个【非 archived、非 meta】批（按 index 升序）。少于 K 个则取全部可见批的 (K) 上限内。
+ *   2. 合成 1 个元批：
+ *      - contentMd = 这 K 批 skeleton 本地拼接（不调 LLM）；skeleton 取 extractSkeletonTitle(contentMd)（再降一档，量小）。
+ *      - roundStart/roundEnd = 这 K 批 round 的并集（min start ~ max end）；stepStart/stepEnd 同理 step 并集。
+ *      - meta=true、foldedFrom=[这K批的index]、index = 当前【全批最大 index + 1】（保证全局唯一，不与真实批/旧元批撞）。
+ *      - timeSpan = 这 K 批 timeSpan 并集。
+ *   3. 把这 K 批标 archived=true；元批与改后的批整体 upsertRecord 落库。
+ *
+ * ★ 水位安全：元批 meta=true → buildRecord/appendBatch 派生水位与幂等门都排除它（见 lastRealBatch），不污染水位。
+ * ★ 幂等/重入安全：只折叠【未 archived】的可见批；已折叠过的批 archived=true 不会被二次折叠。
+ * ★ 可见批不足时（<= foldThreshold）no-op，原样返回当前 record（不写库）。
+ * record 是加速层，任何底层异常一律吞掉返回当前/ null，绝不阻塞主对话。
+ *
+ * @param opts.foldThreshold/foldBatchK 由调用方（agentLoop）从 store.agentSettings.recordLayering 传入快照；
+ *   缺省按 FOLD_DEFAULTS（30/10）。
+ */
+export async function foldOldBatches(
+  conversationId: string,
+  opts?: FoldOptions,
+): Promise<SynapseRecord | null> {
+  if (!conversationId) return null;
+  try {
+    const record = await getRecord(conversationId);
+    if (!record || record.batches.length === 0) return record;
+
+    const foldThreshold = Number.isFinite(opts?.foldThreshold)
+      ? Math.max(0, Math.floor(opts!.foldThreshold!))
+      : FOLD_DEFAULTS.foldThreshold;
+    const foldBatchK = Number.isFinite(opts?.foldBatchK)
+      ? Math.max(1, Math.floor(opts!.foldBatchK!))
+      : FOLD_DEFAULTS.foldBatchK;
+
+    const sorted = [...record.batches].sort((a, b) => a.index - b.index);
+    // 可见批 = 未 archived 且 非 meta（真正进注入视图、占膨胀的那批真实批）。
+    const visibleReal = sorted.filter(b => !b.archived && !b.meta);
+    if (visibleReal.length <= foldThreshold) return record; // 未达阈值 → no-op，不写库
+
+    // 取最老 K 个可见真实批折叠（不足 K 时取实际可见数；但既已 > foldThreshold>=K 场景下恒有 K 个）。
+    const k = Math.min(foldBatchK, visibleReal.length);
+    if (k <= 0) return record;
+    const toFold = visibleReal.slice(0, k);
+    const foldIdxSet = new Set(toFold.map(b => b.index));
+
+    // —— 合成元批（纯本地拼 skeleton，零 LLM）——
+    const metaContentMd = toFold
+      .map(b => (b.skeleton || extractSkeleton(b.contentMd) || '').trim())
+      .filter(Boolean)
+      .join(META_JOIN);
+    const roundStart = Math.min(...toFold.map(b => b.roundStart));
+    const roundEnd = Math.max(...toFold.map(b => b.roundEnd));
+    const stepStart = Math.min(...toFold.map(b => b.stepStart));
+    const stepEnd = Math.max(...toFold.map(b => b.stepEnd));
+    const metaIndex = sorted.reduce((m, b) => Math.max(m, b.index), -1) + 1;
+    const metaBatch: RecordBatch = {
+      index: metaIndex,
+      roundStart,
+      roundEnd,
+      stepStart,
+      stepEnd,
+      // ★ R-L4 审查 #3：metaContentMd 空（K 批都提不出骨架/标题）时兜底占位——否则元批 contentMd='' 会被
+      //   renderRecordPrefix 头/尾全文区的 filter(Boolean) 整段吞掉，该段折叠历史在注入视图蒸发、模型连
+      //   record_read 提示都看不到。占位保证元批永远非空且指引可展开原批。
+      contentMd: metaContentMd || `[折叠摘要：覆盖第 ${roundStart}~${roundEnd} 轮（无可提取骨架），可 record_read 各原批 index 展开全文]`,
+      skeleton: extractSkeletonTitle(metaContentMd) || metaContentMd || `[折叠摘要 第 ${roundStart}~${roundEnd} 轮]`,
+      phases: 0,
+      timeSpan: deriveTimeSpan(toFold),
+      createdAt: nowSec(),
+      meta: true,
+      foldedFrom: toFold.map(b => b.index),
+    };
+
+    // 把被折叠的原始批标 archived=true（其余批原样），加入元批整体落库。
+    const nextBatches: RecordBatch[] = sorted.map(b =>
+      foldIdxSet.has(b.index) ? { ...b, archived: true } : b,
+    );
+    nextBatches.push(metaBatch);
+
+    // ★ 整体覆盖落库（非 appendBatch——本操作改既有批的 archived 标记 + 插元批，是结构性重写而非追加）。
+    //   upsertRecord 内部重新 normalize + 派生水位（已排除 meta）+ 原子写入。
+    return await upsertRecord({ conversationId, batches: nextBatches });
+  } catch (err) {
+    console.warn('[recordStore] foldOldBatches failed:', err);
+    return null;
+  }
+}
+
+/**
+ * ★ R-L4 解折叠（回溯/分支专用）：把 record 还原成【纯原始批】——删除所有 meta 元批、把所有 archived 批的
+ *   archived 标记清掉。返回还原后的批数组（按 index 升序、index 连续性不保证但单调）。
+ *
+ * 用途：clampToBatch（回溯裁剪）/ copyRecordFrom（分支继承）在按 step/round 取连续前缀前，先解折叠，
+ *   保证裁剪基准全是真实原始批的 step/round（绝不撕裂「元批在但 foldedFrom 的 archived 批被裁」或反之）。
+ *   解折叠后批集合 = 纯原始连续批，原裁剪逻辑（findIndex stepEnd/roundEnd + slice 前缀）天然正确。
+ *   代价：回溯/分支后折叠态丢失（但 contentMd 全在），下次 compactNow 会按阈值重新折叠——可接受。
+ *
+ * ★ 纯函数：只做内存数组变换，不读库不写库。
+ */
+function unfoldBatches(batches: RecordBatch[]): RecordBatch[] {
+  return batches
+    .filter(b => !b.meta) // 删元批（其内容是 archived 原始批 skeleton 的派生，原始批仍在）
+    .map(b => {
+      if (!b.archived) return b;
+      const { archived: _archived, ...rest } = b;
+      return { ...rest } as RecordBatch;
+    })
+    .sort((a, b) => a.index - b.index)
+    // ★ R-L4 审查 #2：删元批后原 index 留空洞（元批 index=max+1 被删、或折叠夹在真实批中间）；重排为
+    //   0..n-1 连续，恢复 RecordBatch「index 连续递增」契约。仅回溯/分支场景（本就重建上下文）调用，
+    //   重排不影响任何跨调用持久化的 index 引用。
+    .map((b, i) => (b.index === i ? b : { ...b, index: i }));
+}
+
+/**
  * 各批 skeleton 拼接（渐进式读 / generateBatch 喂「旧批骨架概览」用）。
  * 可选指定截止批次 index（不含），用于「本批之前的所有旧批骨架」。
  */
@@ -470,9 +651,13 @@ export async function getRecordSkeleton(
 ): Promise<string> {
   const record = await getRecord(conversationId);
   if (!record) return '';
-  const batches = typeof beforeIndex === 'number'
+  // ★ R-L4：generateBatch 的「旧批骨架概览」排除 meta 元批——元批 contentMd 是其 foldedFrom 原始批
+  //   skeleton 的本地拼接，archived 原始批的 skeleton 仍在 batches 里（更细粒度、真实历史）；
+  //   带上元批会与 archived skeleton 重复。喂细粒度 archived skeleton 即可，不喂元批的二次拼接。
+  const batches = (typeof beforeIndex === 'number'
     ? record.batches.filter(b => b.index < beforeIndex)
-    : record.batches;
+    : record.batches
+  ).filter(b => !b.meta);
   return batches.map(b => b.skeleton).filter(Boolean).join(BATCH_JOIN);
 }
 
@@ -557,19 +742,30 @@ export async function clampToBatch(
     const safeSteps = Math.max(0, keptSteps);
     const safeRounds = Math.max(0, keptRounds);
 
-    // 末批整个在保留范围内（step 与 round 双口径都覆盖）→ 无需动。
-    const last = record.batches[record.batches.length - 1];
-    if (last.stepEnd <= safeSteps && last.roundEnd <= safeRounds) return record;
+    // ★ R-L4 防撕裂：裁剪前先【解折叠】成纯原始批（删 meta 元批、清 archived 标记）。
+    //   元批的 step/round 是其 foldedFrom 原始批的并集区间，若直接 findIndex 会撕裂「元批在但 archived 批被裁」
+    //   或反之。解折叠后批集合 = 纯原始连续批，按 step/round 取前缀天然不撕裂；折叠态丢失但全文都在，
+    //   下次 compactNow 会按阈值重新折叠（可接受，见 unfoldBatches 注释）。
+    //   ★ 仅在确实有折叠态（含 meta 或 archived）时才解折叠并重排序，避免无折叠态时多一次数组变换。
+    const hasFold = record.batches.some(b => b.meta || b.archived);
+    const baseBatches = hasFold ? unfoldBatches(record.batches) : record.batches;
+
+    // 末批整个在保留范围内（step 与 round 双口径都覆盖）→ 无需动（但若解过折叠仍需落库还原态）。
+    const last = baseBatches[baseBatches.length - 1];
+    if (last.stepEnd <= safeSteps && last.roundEnd <= safeRounds) {
+      return hasFold ? await upsertRecord({ conversationId, batches: baseBatches }) : record;
+    }
 
     // ★ M5-2 轮次地基：keptRounds 从「仅告警」升级为【真实裁剪依据】（规范 §1/§3，向轮边界取整）。
     //   截断点穿过的批 = 第一个 (stepEnd > keptSteps) 或 (roundEnd > keptRounds) 的批，二者取【较保守者】
     //   （更早的 cutIdx）。这样回溯时「所在轮整轮回退原文、绝不在轮中间切」：即便调用方传入的 keptRounds
     //   与 keptSteps 因合并轮（连发 user / 一轮多 model step）而口径不一致，round 口径也能兜住、不少裁。
     //   findIndex + slice 取连续前缀，脏数据导致 stepEnd/roundEnd 非单调也不会从中间挖空批次。
-    const cutByStep = record.batches.findIndex(b => b.stepEnd > safeSteps);
-    const cutByRound = record.batches.findIndex(b => b.roundEnd > safeRounds);
+    //   ★ R-L4：在【解折叠后的纯原始批 baseBatches】上算 cutIdx + 取前缀（绝不在含元批的并集区间上裁）。
+    const cutByStep = baseBatches.findIndex(b => b.stepEnd > safeSteps);
+    const cutByRound = baseBatches.findIndex(b => b.roundEnd > safeRounds);
     const cutIdx = pickCutIdx(cutByStep, cutByRound);
-    const kept = cutIdx < 0 ? record.batches : record.batches.slice(0, cutIdx);
+    const kept = cutIdx < 0 ? baseBatches : baseBatches.slice(0, cutIdx);
 
     if (kept.length === 0) {
       await deleteRecord(conversationId);
@@ -648,17 +844,24 @@ export async function copyRecordFrom(
     const safeSteps = Math.max(0, keptSteps);
     const safeRounds = Math.max(0, keptRounds);
 
+    // ★ R-L4 防撕裂：分支继承同 clampToBatch——裁剪前先【解折叠】源 record 成纯原始批（删 meta、清 archived），
+    //   在纯原始批上按 step/round 取连续前缀，绝不在元批并集区间上裁。新对话从纯原始批起继承（无折叠态），
+    //   后续 compactNow 会按阈值自行重新折叠。
+    const srcBatches = src.batches.some(b => b.meta || b.archived)
+      ? unfoldBatches(src.batches)
+      : [...src.batches].sort((a, b) => a.index - b.index);
+
     // ★ M5-2 轮次地基：与 clampToBatch 同款【step + round 双口径取保守】裁剪（keptRounds 参与，不再仅告警）。
     //   末批整个在保留范围内（step 与 round 都覆盖）→ 整份拷贝；否则取被截断点之前的连续前缀。
-    const last = src.batches[src.batches.length - 1];
+    const last = srcBatches[srcBatches.length - 1];
     let kept: RecordBatch[];
     if (last.stepEnd <= safeSteps && last.roundEnd <= safeRounds) {
-      kept = src.batches;
+      kept = srcBatches;
     } else {
-      const cutByStep = src.batches.findIndex(b => b.stepEnd > safeSteps);
-      const cutByRound = src.batches.findIndex(b => b.roundEnd > safeRounds);
+      const cutByStep = srcBatches.findIndex(b => b.stepEnd > safeSteps);
+      const cutByRound = srcBatches.findIndex(b => b.roundEnd > safeRounds);
       const cutIdx = pickCutIdx(cutByStep, cutByRound);
-      kept = cutIdx < 0 ? src.batches : src.batches.slice(0, cutIdx);
+      kept = cutIdx < 0 ? srcBatches : srcBatches.slice(0, cutIdx);
     }
 
     if (kept.length === 0) return null; // 分支点落在首批之前 → 新对话无可继承摘要

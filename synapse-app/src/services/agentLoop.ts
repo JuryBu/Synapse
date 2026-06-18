@@ -15,7 +15,7 @@ import {
 import { setConnectionStatus, type RecordLayeringConfig } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
 import { promptBuilder, renderOpenFilesSection, compressContext, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
-import { getRecord, appendBatch, getRecordSkeleton, extractSkeletonTitle, type RecordBatch, type SynapseRecord } from './recordStore';
+import { getRecord, appendBatch, getRecordSkeleton, extractSkeletonTitle, foldOldBatches, type RecordBatch, type SynapseRecord } from './recordStore';
 import { identifyRounds, floorStepToRoundStart } from './roundBoundary';
 import { generateBatch } from './recordGenerator';
 import { runSystemModelOnce } from './systemModelClient';
@@ -347,37 +347,144 @@ function renderSkeletonBatch(batch: RecordBatch, titleOnly = false): string {
  *
  * 服务对象：自动压缩（现有 ~90% 水位）与未来 /compact 手动压缩共用此稳定前缀。
  */
-function buildStableRecordPrefix(record: SynapseRecord, layering?: Partial<RecordLayeringConfig>): string {
+/**
+ * ★ R-L4：从全量 batches 算出【注入视图批序列】——过滤 archived 原始批（已被 meta 元批代表，不进注入），
+ *   保留 meta 元批，按【代表位置 stepStart 升序】重排（元批 index = 末批+1 排数组物理尾，但其 stepStart 最小、
+ *   代表最老内容，必须排回头部才能走档1头全文而非被误当尾批渲全文）。getRecord/getBatch/record_read/UI 读全量。
+ */
+function injectionViewBatches(record: SynapseRecord): RecordBatch[] {
+  return (record.batches ?? [])
+    .filter(b => !b.archived)
+    .sort((a, b) => (a.stepStart - b.stepStart) || (a.index - b.index));
+}
+
+/**
+ * ★ R-L2/R-L4/R-L5 共用渲染核心：三级分层渲染注入前缀。
+ *   forceTitleOnlyCount = R-L5 token 硬闸的【强制降级游标】：从中段最老批起，额外强制把这么多批降 titleOnly
+ *   （叠加在档3 的自然 titleThreshold 降级之上，取 max）。默认 0 = 纯三级分层（buildStableRecordPrefix 行为）。
+ *   ★ forceTitleOnlyCount=0 时输出与改造前逐字一致（prompt cache 稳定路径，绝不引入 token/窗口依赖）。
+ */
+function renderRecordPrefix(
+  record: SynapseRecord,
+  layering: Partial<RecordLayeringConfig> | undefined,
+  forceTitleOnlyCount: number,
+): string {
   const cfg = { ...DEFAULT_LAYERING, ...(layering ?? {}) };
   const H = Math.max(0, Math.floor(cfg.headFull));
   const T = Math.max(0, Math.floor(cfg.tailFull));
 
-  const batches = record.batches ?? [];
+  const batches = injectionViewBatches(record);
   if (batches.length === 0) return record.contentMd ?? '';
-  if (batches.length === 1) return batches[0].contentMd;
-
-  const N = batches.length;
-  // 边界：头尾全文区间已覆盖全部（N <= H+T）→ 全批全文，不进骨架/titleOnly 分支（防重叠/漏算）。
-  if (N <= H + T) {
-    return batches.map(b => b.contentMd).filter(Boolean).join(BATCH_JOIN);
+  if (batches.length === 1) {
+    // 单批：R-L5 极端兜底允许把唯一批也降 titleOnly（forceTitleOnlyCount>0 时），否则全文。
+    return forceTitleOnlyCount > 0
+      ? renderSkeletonBatch(batches[0], true)
+      : batches[0].contentMd;
   }
 
-  // ★ R-L2 三级分层（仅依赖批序位 i 与总批数 N，绝不读 contextWindow/token → prompt cache 确定性）：
+  const N = batches.length;
+  const force = Math.max(0, Math.floor(forceTitleOnlyCount));
+
+  // 边界：头尾全文区间已覆盖全部（N <= H+T）→ 全批全文（无 force 时）；force>0 时把最老 force 批降 titleOnly。
+  if (N <= H + T) {
+    if (force <= 0) return batches.map(b => b.contentMd).filter(Boolean).join(BATCH_JOIN);
+    return batches
+      .map((b, i) => (i < force ? renderSkeletonBatch(b, true) : b.contentMd))
+      .filter(Boolean)
+      .join(BATCH_JOIN);
+  }
+
+  // ★ R-L2 三级分层（仅依赖批序位 i 与总批数 N，force=0 时绝不读 contextWindow/token → prompt cache 确定性）：
   //   档1 序位 i<H：头全文（最老背景/关键决策）。
   //   档2 序位 i>=N-T：尾全文（最近上下文，主人拍板 T=1）。
   //   档3 中间批骨架；中间批数 > titleThreshold 时，把最老一段 [H, titleOnlyEnd) 降 titleOnly（仅标题）。
   const midCount = N - H - T;
-  const titleOnlyCount = midCount > cfg.titleThreshold ? midCount - cfg.titleThreshold : 0;
+  const naturalTitleOnly = midCount > cfg.titleThreshold ? midCount - cfg.titleThreshold : 0;
+  // ★ R-L5：强制降级游标叠加——从档3 最老起额外降 force 批，与自然降级取 max；clamp 到中段不越过尾全文区。
+  const titleOnlyCount = Math.min(midCount, Math.max(naturalTitleOnly, force));
   const titleOnlyEnd = H + titleOnlyCount;
+  // ★ R-L5 极端兜底：若中段全降仍不够（force 超过中段批数），允许把尾全文批也降 titleOnly（保正确性优先于 cache）。
+  const tailForce = Math.max(0, force - midCount); // 还需多降几批尾批
+  const tailTitleOnlyStart = N - T + 0; // 尾全文区起点
+  // 头全文区也可被极端 force 吃掉：force 超过「中段+尾」后连头也降（最后防线，几乎不会触达）。
+  const headExtraForce = Math.max(0, force - midCount - T);
 
   return batches
     .map((b, i) => {
-      if (i < H) return b.contentMd;
-      if (i >= N - T) return b.contentMd;
+      // 头全文区：极端 force 下从最老起降 headExtraForce 批
+      if (i < H) return i < headExtraForce ? renderSkeletonBatch(b, true) : b.contentMd;
+      // 尾全文区：极端 force 下从最老尾批起降 tailForce 批
+      if (i >= N - T) return (i - tailTitleOnlyStart) < tailForce ? renderSkeletonBatch(b, true) : b.contentMd;
+      // 中段：[H, titleOnlyEnd) 降 titleOnly，其余骨架
       return renderSkeletonBatch(b, i < titleOnlyEnd);
     })
     .filter(Boolean)
     .join(BATCH_JOIN);
+}
+
+function buildStableRecordPrefix(record: SynapseRecord, layering?: Partial<RecordLayeringConfig>): string {
+  // ★ prompt cache 稳定路径：forceTitleOnlyCount=0，输出仅依赖批集合（与改造前逐字一致）。
+  return renderRecordPrefix(record, layering, 0);
+}
+
+/**
+ * ★ R-L5 token 硬闸（设计C）：组装 apiHistory 前的【危险态兜底】，防 record 注入前缀撑爆上下文窗口。
+ *
+ * ★★ 正常路径必须 no-op：estimateTokens(baseRecordMd) <= maxTokens 时【逐字返回 baseRecordMd】——
+ *   不重渲、不引入任何 token/窗口依赖，保住 buildStableRecordPrefix 的 prompt cache 稳定性。
+ *   只有超限（折叠没及时触发 / 单批超大等极端态）才触发降级，此时前缀会随窗口漂移、必然破 cache（可接受，仅危险态）。
+ *
+ * 降级策略：从中段骨架批最老侧起逐批强制降 titleOnly（forceTitleOnlyCount 游标递增），每降一批重估 token，
+ *   直到 <= maxTokens；中段全 titleOnly 仍超则连尾/头也降（renderRecordPrefix 极端兜底）；全降满仍超则硬截断。
+ *
+ * ★ 纯函数：只读 record + 估算 token，不读 store/窗口（maxTokens 由调用方算好传入）。便于 fixture 直接驱动。
+ */
+function enforceRecordTokenCap(
+  record: SynapseRecord,
+  baseRecordMd: string,
+  maxTokens: number,
+  layering?: Partial<RecordLayeringConfig>,
+): string {
+  // ★ 正常路径 no-op（逐字返回，保 cache）。maxTokens 非正数视作「不限制」也 no-op。
+  if (!Number.isFinite(maxTokens) || maxTokens <= 0) return baseRecordMd;
+  if (estimateTokens(baseRecordMd) <= maxTokens) return baseRecordMd;
+
+  // —— 危险态：逐批强制降 titleOnly ——
+  const visibleCount = injectionViewBatches(record).length;
+  if (visibleCount <= 1) {
+    // 0/1 批：renderRecordPrefix 已对单批做 titleOnly 兜底；再不够只能硬截断。
+    const once = renderRecordPrefix(record, layering, 1);
+    if (estimateTokens(once) <= maxTokens) return once;
+    return hardTruncateToTokens(once, maxTokens);
+  }
+
+  // force 上限 = 可见批总数（连头带尾全降光，renderRecordPrefix 极端兜底覆盖）。逐步递增找首个达标。
+  let rendered = baseRecordMd;
+  for (let force = 1; force <= visibleCount; force++) {
+    rendered = renderRecordPrefix(record, layering, force);
+    if (estimateTokens(rendered) <= maxTokens) return rendered;
+  }
+  // 全批 titleOnly 仍超 → 最后兜底硬截断（极端，几乎不触达）。
+  return hardTruncateToTokens(rendered, maxTokens);
+}
+
+/**
+ * ★ R-L5 最后兜底：按估算 token 硬截断文本（保留头部，尾部加省略标记）。仅在「全批 titleOnly 仍超窗」的极端态用。
+ *   estimateTokens 是字符粗估（中文1.5/其他0.25），这里按 maxTokens 反推一个保守字符上限截断（留 5% 余量）。
+ */
+function hardTruncateToTokens(text: string, maxTokens: number): string {
+  if (!text) return text;
+  if (estimateTokens(text) <= maxTokens) return text;
+  const marker = '\n\n…[record 注入前缀超窗，已硬截断]';
+  // 保守反推：最坏全中文 1.5 token/char → 字符上限 ≈ maxTokens/1.5，再留 5% 余量给 marker。
+  const charBudget = Math.max(0, Math.floor((maxTokens / 1.5) * 0.95));
+  if (charBudget <= 0) return marker.trim();
+  let cut = text.slice(0, charBudget);
+  // 二分收敛：估算仍超则继续砍（估算非线性，单次反推可能不够）。
+  while (cut.length > 0 && estimateTokens(cut + marker) > maxTokens) {
+    cut = cut.slice(0, Math.floor(cut.length * 0.9));
+  }
+  return cut + marker;
 }
 
 export class AgentLoop {
@@ -627,6 +734,11 @@ export class AgentLoop {
     //      幂等：appendBatch 要求 stepStart == 末批 stepEnd 才追加（否则脏写拒绝、原样返回旧 record）。
     //      故「generateBatch 成功但 appendBatch 写库中途崩溃」时，要么这批没落库（重启后 getRecord 拿压缩前一致态，
     //      下次压缩从同一 priorSteps 重算本批，不重复不丢）、要么整批已落库（下次压缩 priorSteps 前移、续记下一批）。
+    // ★ R-L5 token 硬闸入参：record 注入前缀最大可占 token = 模型窗口 × recordLayering.maxRatio（默认 0.4）。
+    //   仅危险态兜底用（enforceRecordTokenCap 正常路径 no-op，不破 cache）。layering 同 buildStableRecordPrefix 口径。
+    const recordLayeringSnapshot = (store.getState() as RootState).agentSettings?.recordLayering;
+    const recordTokenCap = modelContextWindow * (recordLayeringSnapshot?.maxRatio ?? DEFAULT_LAYERING.maxRatio);
+
     let apiHistory: ChatMessage[];
     if (wasCompressed) {
       const keepCount = compressed.length - 1; // compressContext 保留的最近原文条数（含 tool 口径）
@@ -640,11 +752,20 @@ export class AgentLoop {
       // ★ M4-7-S6：自动压缩路径下沉到可复用的 compactNow（生成批次 record + 落库 + 同步持久化）。
       //   行为与现状完全一致——compactNow 只是把原内联逻辑搬进方法，返回同一个 recordMd（落库后稳定前缀
       //   / 旧 record 前缀回退 / null 降级），自动与手动（M4-6 /compact）共用同一套压缩实现。
-      const recordMd = await this.compactNow(conversationId, {
+      const recordMdRaw = await this.compactNow(conversationId, {
         compressedSegment,
         workspaceName: workspaceName || undefined,
         currentModel,
       });
+      // ★ R-L5 token 硬闸：对最终注入的 recordMd 过一道（正常路径 no-op、逐字返回 → 不破 cache；
+      //   仅超 window×maxRatio 的危险态才逐批降 titleOnly）。需 compactNow 落库后的最新 record（已含本批 + 已折叠）。
+      let recordMd = recordMdRaw;
+      if (recordMdRaw) {
+        const compactedRecord = await getRecord(conversationId);
+        if (compactedRecord) {
+          recordMd = enforceRecordTokenCap(compactedRecord, recordMdRaw, recordTokenCap, recordLayeringSnapshot);
+        }
+      }
       apiHistory = recordMd
         // ★ M4-5-S2：前缀文案常量化（RECORD_INJECTION_PREFIX），与确定性 recordMd 配合保证 apiMessages[1] 逐字稳定。
         ? [{ role: 'system', content: `${RECORD_INJECTION_PREFIX}${recordMd}` } as ChatMessage, ...requestHistory.slice(-keepCount)]
@@ -688,7 +809,9 @@ export class AgentLoop {
         let keepFromIdx = floorStepToRoundStart(roundsOfRequest, existingRecord.totalSteps);
         // 安全下限：保留段至少含最后一条（当前最新 user），绝不把当前轮也压没/越界成空。
         keepFromIdx = Math.max(0, Math.min(keepFromIdx, requestHistory.length - 1));
-        const recordMd = buildStableRecordPrefix(existingRecord, (store.getState() as RootState).agentSettings?.recordLayering);
+        const recordMdBase = buildStableRecordPrefix(existingRecord, recordLayeringSnapshot);
+        // ★ R-L5 token 硬闸：正常路径 no-op（逐字返回 recordMdBase，保 cache），仅超 window×maxRatio 危险态降级。
+        const recordMd = enforceRecordTokenCap(existingRecord, recordMdBase, recordTokenCap, recordLayeringSnapshot);
         apiHistory = recordMd
           ? [{ role: 'system', content: `${RECORD_INJECTION_PREFIX}${recordMd}` } as ChatMessage, ...requestHistory.slice(keepFromIdx)]
           : requestHistory;
@@ -1356,8 +1479,21 @@ export class AgentLoop {
             timeSpan: batchResult.timeSpan,
           });
           if (updated) {
-            // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性。
-            recordMd = buildStableRecordPrefix(updated, (store.getState() as RootState).agentSettings?.recordLayering);
+            // ★ R-L4 折叠触发：appendBatch 成功落库后，若可见（非 archived、非 meta）批数 > foldThreshold，
+            //   折叠最老 foldBatchK 批为 1 元批（原文 archived 留库），再用折叠后的 record 重算注入前缀。
+            //   foldOldBatches 内部对未达阈值 no-op、且全程吞异常（record 是加速层，绝不阻塞主对话）。
+            const layeringForFold = (store.getState() as RootState).agentSettings?.recordLayering;
+            const foldThreshold = layeringForFold?.foldThreshold ?? DEFAULT_LAYERING.foldThreshold;
+            const visibleRealCount = updated.batches.filter(b => !b.archived && !b.meta).length;
+            let folded: SynapseRecord | null = updated;
+            if (visibleRealCount > foldThreshold) {
+              folded = await foldOldBatches(conversationId, {
+                foldThreshold,
+                foldBatchK: layeringForFold?.foldBatchK ?? DEFAULT_LAYERING.foldBatchK,
+              }) || updated; // 折叠失败（返回 null）退回未折叠 updated，不破坏注入
+            }
+            // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性（用折叠后 record）。
+            recordMd = buildStableRecordPrefix(folded, layeringForFold);
             // ★ R5 修复（问题3：record 水位 vs messages 缺口）：appendBatch 已把【本批覆盖到的 step】落库，
             // 但触发本轮压缩的新 user 消息此刻可能还没被 autosave（700ms 防抖 + 压缩期同步占住事件循环，
             // 且压缩成功后立即进 while 重新点亮 isStreaming 关掉 autosave 闸门）。这里主动同步持久化一次
