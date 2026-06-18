@@ -226,6 +226,12 @@ export function compressContext(
    * 向后兼容：不传（undefined）时维持原行为（条数<6 且超阈值即标 true）。
    */
   historyOnlyTokens?: number,
+  /**
+   * ★ M5-BPC-4：硬压缩触发阈值比例（默认 COMPRESSION_THRESHOLD=0.9）。run() 传 effectiveCompactThreshold
+   *   （conversation.compactThresholdOverride ?? agentSettings.bpc.compactThreshold ?? 0.9），让硬阈值可配。
+   *   不传时维持原 0.9 行为（向后兼容，其它调用点不受影响）。
+   */
+  thresholdRatio: number = COMPRESSION_THRESHOLD,
 ): {
   compressed: Array<{ role: string; content: string }>;
   wasCompressed: boolean;
@@ -238,7 +244,7 @@ export function compressContext(
 } {
   // 优先使用 API 返回的真实 token 数；没有时回退到字符估算
   const currentTokens = realTokenCount && realTokenCount > 0 ? realTokenCount : countConversationTokens(messages);
-  const threshold = maxTokens * COMPRESSION_THRESHOLD;
+  const threshold = maxTokens * thresholdRatio;
 
   // 未超阈值：无条件不压缩。
   if (currentTokens <= threshold) {

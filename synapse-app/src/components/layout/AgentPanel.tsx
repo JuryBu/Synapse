@@ -23,6 +23,7 @@ import { MessageBubble } from '@/components/chat/MessageBubble';
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
+import { bpcScheduler } from '@/services/bpcScheduler';
 import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
 import { mcpBridge } from '@/services/mcpBridge';
@@ -367,6 +368,9 @@ export function AgentPanel() {
       return;
     }
     const loop = new AgentLoop(aiClient);
+    // ★ M5-BPC-4：把本 AgentLoop 注入 BPC 调度器，让后台预压缩能调它的 bpcGenerate / computeBpcSnapshotInput。
+    //   attachLoop 内部：若换了新 loop 实例（切模型 / MCP refresh 重建）会先 discardCurrent 在途 BPC（旧 loop 已 stop）。
+    bpcScheduler.attachLoop(loop);
     let cancelled = false;
     // ★ M4-7-S4：把 MCP 工具桥接进 toolRegistry，使本 AgentLoop 的工具集含 MCP 工具。
     //   refresh 异步（拉 getStatus → 对 running server listTools → register 进 toolRegistry），故 refresh
@@ -414,7 +418,8 @@ export function AgentPanel() {
       });
     }
     agentLoopRef.current = loop;
-    return () => { cancelled = true; loop.stop(); };
+    // ★ M5-BPC-4：cleanup 时解绑（detachLoop 仅当传入的是当前持有 loop 才解绑 + 丢在途 BPC，防并发重建误伤新 loop）。
+    return () => { cancelled = true; loop.stop(); bpcScheduler.detachLoop(loop); };
   }, [aiClient, settings.safety]);
 
   // Auto-scroll to bottom

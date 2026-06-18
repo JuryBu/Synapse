@@ -24,6 +24,20 @@ import { generateId } from './ids';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 import { restoreApiMessagesAttachments, chatContentToTextWithPlaceholder } from './attachmentRefs';
 import { getModelContextWindow } from '../store/selectors/modelSelectors';
+import { bpcScheduler } from './bpcScheduler';
+
+/**
+ * ★ M5-BPC-4：解析生效硬压缩阈值 = 本对话覆盖 ?? 全局 agentSettings.bpc.compactThreshold ?? COMPRESSION_THRESHOLD(0.9)。
+ *   number override 一律 typeof + Number.isFinite 判定（绝不 x || fallback，防 0/NaN falsy 吞掉合法值），口径与
+ *   bpcScheduler.effectiveBpcThreshold 一致。供 run() 下推 compressContext / overLimit truncate / BPC 边界判定。
+ */
+function resolveCompactThreshold(rootState: RootState): number {
+  const override = (rootState as any).conversation?.compactThresholdOverride;
+  if (typeof override === 'number' && Number.isFinite(override)) return override;
+  const cfg = (rootState as any).agentSettings?.bpc?.compactThreshold;
+  if (typeof cfg === 'number' && Number.isFinite(cfg)) return cfg;
+  return COMPRESSION_THRESHOLD;
+}
 
 export interface ToolDefinition {
   type: 'function';
@@ -710,11 +724,15 @@ export class AgentLoop {
     // M4-1-S4 护栏入参：除最后一条（本轮当前消息）外的历史文本 token，与 compressContext 内同口径
     // （countConversationTokens）。仅历史本身也接近阈值才标 overLimitWithoutCompression，避免误截当前消息。
     const historyOnlyTokens = countConversationTokens(requestHistoryText.slice(0, -1));
+    // ★ M5-BPC-4：硬压缩阈值可配（本对话覆盖 ?? 全局 bpc.compactThreshold ?? 0.9）。下推 compressContext 与
+    //   下方 overLimit truncate 阈值，使「90% 硬阈值」成为用户可调项（BPC 设置面板 / 本对话覆盖）。
+    const effectiveCompactThreshold = resolveCompactThreshold(rootState);
     const { compressed, wasCompressed, overLimitWithoutCompression } = compressContext(
       requestHistoryText,
       modelContextWindow,
       triggerTokens,
       historyOnlyTokens,
+      effectiveCompactThreshold,
     );
 
     // M2-R1: 压缩时优先用 record（多批次结构化摘要）作稳定前缀以命中 prompt cache；
@@ -738,6 +756,28 @@ export class AgentLoop {
     //   仅危险态兜底用（enforceRecordTokenCap 正常路径 no-op，不破 cache）。layering 同 buildStableRecordPrefix 口径。
     const recordLayeringSnapshot = (store.getState() as RootState).agentSettings?.recordLayering;
     const recordTokenCap = modelContextWindow * (recordLayeringSnapshot?.maxRatio ?? DEFAULT_LAYERING.maxRatio);
+
+    // ★ M5-BPC-4：后台预压缩（BPC）边界处理 + ready 状态机收尾——在 apiHistory 组装前裁决。
+    //   设计要点：record 注入由下方 else 分支统一负责（M5-1：record.totalSteps>0 即注入），BPC 后台已把
+    //   record 批落库 → 下一轮 run 走 else 分支天然读到并注入，「无缝替换」自然达成，无需在此另起 BPC 专属组装分支。
+    //   本块只做两件【状态机 / 防双写】的事：
+    //   ① 边界①②（撞硬阈值）：本轮要走同步硬压缩（wasCompressed / overLimit / ratio 已达硬阈值）时丢掉在途 BPC，
+    //      防「BPC 后台 appendBatch」与「硬压缩 appendBatch」对同一 record 双写竞争。discardCurrent 只丢内存快照，
+    //      BPC 已落库的批是持久的——下方 compactNow 增量切片会从该批 stepEnd 续记，BPC 成果不浪费。
+    //   ② 否则若有 ready BPC：takeReadyPrefix 推进状态机 ready→idle（否则永卡 ready 阻止后续触发）并记
+    //      lastReplaceStepCursor（熔断判据）。currentStepCursor 用 identifyRounds(requestHistory).totalSteps，
+    //      与 snapshotStepCursor（过滤 tool 的 store.messages totalSteps）同口径（requestHistory 本就不含 tool）。
+    {
+      const bpcConvId = ((rootState as any).conversation?.id as string | null) || AUTOSAVE_ID;
+      const bpcRatio = modelContextWindow > 0 ? triggerTokens / modelContextWindow : 0;
+      const hitHardThreshold = wasCompressed || overLimitWithoutCompression || bpcRatio >= effectiveCompactThreshold;
+      if (hitHardThreshold) {
+        if (bpcScheduler.isBusy()) bpcScheduler.discardCurrent('撞硬压缩阈值，转同步压缩（防双写）');
+      } else if (bpcScheduler.hasReadySnapshot()) {
+        const curStep = identifyRounds(requestHistory).totalSteps;
+        bpcScheduler.takeReadyPrefix(bpcConvId, curStep);
+      }
+    }
 
     let apiHistory: ChatMessage[];
     if (wasCompressed) {
@@ -781,7 +821,7 @@ export class AgentLoop {
       // M2-R4 问题4：少条超长危险态——无法切片压缩，对发送体最长文本 part 做截断保护，防撑爆窗口。
       // fixedTokens = systemPrompt + tools + 非文本 part（图片/附件，不可靠裁字符缩小）的固定占用。
       const fixedTokens = systemTokens + toolsTokens + nonTextTokens;
-      const threshold = modelContextWindow * COMPRESSION_THRESHOLD;
+      const threshold = modelContextWindow * effectiveCompactThreshold; // ★ M5-BPC-4：硬阈值可配（同 compressContext）
       apiHistory = truncateOverLongHistory(requestHistory, fixedTokens, threshold);
       store.dispatch(addNotification({
         type: 'warning',
@@ -1308,10 +1348,14 @@ export class AgentLoop {
             });
           }
         }
+        // ★ M5-BPC-4：工具轮末 step 收尾钩子——fire-and-forget 评估水位触发后台预压缩（绝不 await，不阻塞循环）。
+        this.evaluateBpcWater(modelContextWindow, systemTokens, toolsTokens);
         // Continue loop for next round
         continue;
       }
 
+      // ★ M5-BPC-4：自然完成轮末 step 收尾钩子——同工具轮末，fire-and-forget 评估水位。
+      this.evaluateBpcWater(modelContextWindow, systemTokens, toolsTokens);
       // No tool calls = conversation complete
       completedNaturally = true;
       break;
@@ -1649,6 +1693,36 @@ export class AgentLoop {
       snapshotStepCursor: liveRounds.totalSteps,
       snapshotRoundCursor: liveRounds.totalRounds,
     };
+  }
+
+  /**
+   * ★ M5-BPC-4：run() while 循环每轮末的 BPC 水位评估钩子（fire-and-forget，绝不阻塞主循环）。
+   *   口径与 run 进入时 triggerTokens 对齐：systemTokens + toolsTokens（本轮不变，闭包传入）+ 当前 store
+   *   全量历史文本 token（store.messages 永远全量，压缩只改发送视图不动 store）+ 非文本 part 估算。
+   *   currentStepCursor 用 identifyRounds(过滤 tool 的 store.messages).totalSteps，与 snapshotStepCursor 同口径。
+   *   scheduler.evaluateWater 内部自判 idle/冷却/熔断/阈值，本方法只负责按同口径算好水位上下文传入。
+   */
+  private evaluateBpcWater(modelContextWindow: number, systemTokens: number, toolsTokens: number): void {
+    try {
+      const state = store.getState() as RootState;
+      const conversationId = ((state as any).conversation?.id as string | null) || AUTOSAVE_ID;
+      const liveMessages = state.conversation.messages
+        .filter((m: any) => m.role !== 'tool')
+        .map(toChatMessage);
+      const liveText = liveMessages.map(m => ({ role: m.role, content: chatContentToText(m.content) }));
+      const liveAssembled = systemTokens + toolsTokens + countConversationTokens(liveText)
+        + liveMessages.reduce((sum, m) => sum + estimateNonTextPartsTokens(m.content), 0);
+      const liveSteps = identifyRounds(liveMessages).totalSteps;
+      bpcScheduler.evaluateWater({
+        triggerTokens: liveAssembled,
+        modelContextWindow,
+        conversationId,
+        currentStepCursor: liveSteps,
+      });
+    } catch (err) {
+      // BPC 评估失败绝不影响主对话循环。
+      console.warn('[AgentLoop] evaluateBpcWater 跳过：', err);
+    }
   }
 
 }
