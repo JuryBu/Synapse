@@ -286,7 +286,7 @@
 
 .drop-zone.drag-over {
   border-color: var(--syn-primary);
-  background: rgba(124, 58, 237, 0.05);
+  background: rgba(var(--syn-accent-rgb), 0.08);
 }
 
 .drop-zone-text {

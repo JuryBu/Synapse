@@ -10,7 +10,10 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Copy, Check, Save } from 'lucide-react';
 import { PrismAsyncLight as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+// ★ 主题修复：深色用 vscDarkPlus（VS Code Dark+），浅色用 vs（VS Code Light）——
+//   官方成对配色，浅底高对比且专业（绿注释/红字符串/蓝关键字），非简单反色。按当前主题切换。
+import { vscDarkPlus, vs } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { useResolvedTheme } from '@/hooks/useResolvedTheme';
 
 // ── M4-4-S1：按需注册 Prism 语言（避免全量 bundle）。
 //   只注册 detectLanguage / mapToPrismLang 可能产出的语言；新增语言时在此处补 import + register。
@@ -81,6 +84,11 @@ export function CodeEditor({ filename, content, language, readOnly = true, dirty
   const [copied, setCopied] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const originalContent = savedContent ?? content;
+
+  // ★ 主题修复：按当前主题选 Prism 配色——深色 vscDarkPlus / 浅色 vs（VS Code Light）。
+  //   背景统一在 customStyle 里改 transparent（露出 .code-editor 的 --syn-bg-code），仅借用其 token 配色。
+  const resolvedTheme = useResolvedTheme();
+  const prismStyle = resolvedTheme === 'light' ? vs : vscDarkPlus;
 
   // ★ FIX-3：可编辑高亮——textarea 与高亮层滚动同步用的 ref。
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -161,10 +169,10 @@ export function CodeEditor({ filename, content, language, readOnly = true, dirty
           useHighlight ? (
             <SyntaxHighlighter
               language={prismLang as string}
-              style={vscDarkPlus}
+              style={prismStyle}
               showLineNumbers={false}
               wrapLongLines={false}
-              // 容器沿用 .code-editor-content 滚动；高亮组件自身背景透明，露出 .code-editor 的 #0d1117。
+              // 容器沿用 .code-editor-content 滚动；高亮组件自身背景透明，露出 .code-editor 的 --syn-bg-code（深 #0d1117 / 浅 #f6f8fa）。
               customStyle={{
                 margin: 0,
                 padding: 12,
@@ -197,7 +205,7 @@ export function CodeEditor({ filename, content, language, readOnly = true, dirty
               <div className="code-editor-edit-highlight" ref={highlightRef} aria-hidden="true">
                 <SyntaxHighlighter
                   language={prismLang as string}
-                  style={vscDarkPlus}
+                  style={prismStyle}
                   showLineNumbers={false}
                   wrapLongLines={false}
                   customStyle={{

@@ -8,6 +8,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { ToolCallCard } from './ToolCallCard';
 import { WorkflowCard } from './WorkflowCard';
 import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
+import { useResolvedTheme } from '@/hooks/useResolvedTheme';
 
 interface ToolCallInfo {
   id: string;
@@ -90,6 +91,8 @@ interface MessageProps {
 function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState<string>('');
   const [error, setError] = useState<string>('');
+  // ★ 浅色适配：mermaid 图表主题跟随 app 主题（之前写死 dark，浅色模式下图表深色突兀）。
+  const resolvedTheme = useResolvedTheme();
 
   useEffect(() => {
     let cancelled = false;
@@ -97,17 +100,14 @@ function MermaidBlock({ code }: { code: string }) {
       try {
         const mermaid = (await import('mermaid')).default;
         const DOMPurify = (await import('dompurify')).default;
+        const isLight = resolvedTheme === 'light';
         mermaid.initialize({
           startOnLoad: false,
-          theme: 'dark',
+          theme: isLight ? 'default' : 'dark',
           securityLevel: 'strict', // P1-2: 防止 SVG 注入
-          themeVariables: {
-            primaryColor: '#8b5cf6',
-            primaryTextColor: '#e2e8f0',
-            lineColor: '#64748b',
-            secondaryColor: '#1e293b',
-            tertiaryColor: '#0f172a',
-          }
+          themeVariables: isLight
+            ? { primaryColor: '#7c3aed', primaryTextColor: '#111827', lineColor: '#64748b', secondaryColor: '#eef1f7', tertiaryColor: '#f6f7fb' }
+            : { primaryColor: '#8b5cf6', primaryTextColor: '#e2e8f0', lineColor: '#64748b', secondaryColor: '#1e293b', tertiaryColor: '#0f172a' },
         });
         const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const { svg: rendered } = await mermaid.render(id, code);
@@ -117,7 +117,7 @@ function MermaidBlock({ code }: { code: string }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [code]);
+  }, [code, resolvedTheme]);
 
   if (error) {
     return (

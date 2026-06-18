@@ -86,7 +86,7 @@
 .setting-item {
   display: flex; align-items: center; gap: 12px;
   flex-wrap: wrap;
-  padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.03);
+  padding: 8px 0; border-bottom: 1px solid var(--syn-border);
 }
 
 .setting-item label {
@@ -188,7 +188,7 @@
   width: 80px;
   height: 50px;
   border-radius: 6px;
-  border: 1px solid rgba(255,255,255,0.12);
+  border: 1px solid var(--syn-border);
   background-size: cover;
   background-position: center;
   cursor: pointer;
@@ -253,19 +253,22 @@
 .plugin-icon { font-size: 16px; line-height: 1.5; }
 .plugin-name { font-size: 12px; font-weight: 500; color: var(--syn-text-primary); }
 .plugin-description { font-size: 11px; color: var(--syn-text-secondary); line-height: 1.5; }
-.plugin-status { font-size: 10px; color: var(--syn-text-primary); background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 2px 8px; }
+.plugin-status { font-size: 10px; color: var(--syn-text-primary); background: var(--syn-overlay-medium); border: 1px solid var(--syn-border); border-radius: 999px; padding: 2px 8px; }
+/* ★ P1 主题修复：plugin-status 徽标原用浅色 token（#86efac/#fde68a/#fca5a5），
+   在浅色背景上对比严重不足。改用语义实色（--syn-success/warning/error），
+   配各自 14% 透明底，深浅两套都清晰可读。 */
 .plugin-status.ok {
-  color: #86efac;
+  color: var(--syn-success);
   background: rgba(34,197,94,0.14);
   border-color: rgba(34,197,94,0.28);
 }
 .plugin-status.warn {
-  color: #fde68a;
+  color: var(--syn-warning);
   background: rgba(245,158,11,0.14);
   border-color: rgba(245,158,11,0.28);
 }
 .plugin-status.danger {
-  color: #fca5a5;
+  color: var(--syn-error);
   background: rgba(239,68,68,0.14);
   border-color: rgba(239,68,68,0.28);
 }
@@ -352,7 +355,7 @@
   align-items: center;
   gap: 10px;
   padding: 9px 10px;
-  border: 1px solid rgba(255,255,255,0.07);
+  border: 1px solid var(--syn-border);
   border-radius: 6px;
   background: var(--syn-bg-elevated);
 }
@@ -426,7 +429,7 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid var(--syn-border);
   border-radius: 8px;
   padding: 12px;
   background: var(--syn-bg-elevated);
@@ -475,7 +478,8 @@
   font-size: 11px;
   padding: 1px 4px;
   border-radius: 4px;
-  background: rgba(0,0,0,0.25);
+  /* ★ 主题修复：内联代码 chip 原写死黑底，浅色模式下深块深字。改用主题叠加（深=提亮/浅=压暗）。 */
+  background: var(--syn-overlay-medium);
   color: var(--syn-text-primary);
   word-break: break-all;
 }
@@ -493,7 +497,7 @@
 
 .workflow-node-list { display: flex; flex-direction: column; gap: 10px; }
 .workflow-node-card {
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid var(--syn-border);
   border-radius: 6px;
   background: var(--syn-bg-base);
   padding: 8px 10px;
@@ -528,7 +532,7 @@
   margin-top: 4px;
 }
 .workflow-branch {
-  border: 1px solid rgba(255,255,255,0.06);
+  border: 1px solid var(--syn-border);
   border-radius: 6px;
   padding: 6px 8px;
   margin-bottom: 8px;

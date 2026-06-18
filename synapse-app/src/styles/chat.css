@@ -103,7 +103,8 @@
 }
 
 .message-stream-state.mode-pseudo {
-  color: #c4b5fd;
+  /* ★ 主题修复：原写死浅紫 #c4b5fd 在浅底胶囊上对比不足。改用主题主色（用户可配且饱和度足够）。 */
+  color: var(--syn-primary);
 }
 
 .message-stream-state.mode-off {
@@ -212,7 +213,7 @@
   margin: 4px 0 0;
   padding: 8px 10px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--syn-overlay-weak);
   color: var(--syn-text-secondary);
   font-size: 12px;
   line-height: 1.5;
@@ -272,7 +273,7 @@
   align-items: center;
   justify-content: center;
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--syn-overlay-weak);
   flex: 0 0 auto;
 }
 
@@ -339,7 +340,8 @@
   margin: 8px 0;
   border-radius: 8px;
   overflow: hidden;
-  background: #0d1117;
+  /* ★ 主题修复：原写死 #0d1117，浅色模式下对话气泡里的代码块深底深字。改用主题代码底（深 #0d1117 / 浅 #f6f8fa）。 */
+  background: var(--syn-bg-code);
   border: 1px solid var(--syn-border);
 }
 
@@ -348,7 +350,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--syn-overlay-weak);
   border-bottom: 1px solid var(--syn-border);
 }
 
@@ -388,7 +390,7 @@
   font-family: var(--syn-font-mono);
   font-size: 13px;
   line-height: 1.5;
-  color: #c9d1d9;
+  color: var(--syn-text-code);
 }
 
 /* Streaming cursor */
@@ -585,18 +587,18 @@
 
 /* Plan View */
 .agent-plan-view { padding: 8px; }
-.plan-step { margin-bottom: 8px; border-radius: 8px; background: rgba(0,0,0,0.15); overflow: hidden; }
-.plan-step-header { display: flex; justify-content: space-between; padding: 6px 10px; font-size: 11px; color: var(--syn-text-muted); border-bottom: 1px solid rgba(255,255,255,0.05); }
+.plan-step { margin-bottom: 8px; border-radius: 8px; background: var(--syn-overlay-scrim); overflow: hidden; }
+.plan-step-header { display: flex; justify-content: space-between; padding: 6px 10px; font-size: 11px; color: var(--syn-text-muted); border-bottom: 1px solid var(--syn-overlay-weak); }
 .plan-step-num { font-weight: 600; color: var(--syn-accent); }
 .plan-step-time { font-size: 10px; }
 .plan-tool-item { display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 12px; color: var(--syn-text-primary); }
-.plan-tool-item:hover { background: rgba(255,255,255,0.04); }
+.plan-tool-item:hover { background: var(--syn-overlay-weak); }
 .plan-tool-name { flex: 1; font-family: var(--syn-font-mono); }
 .plan-tool-status { font-size: 12px; }
 
 /* Context View */
 .agent-context-view { padding: 8px; }
-.context-section { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.context-section { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 12px; border-bottom: 1px solid var(--syn-overlay-weak); }
 .context-label { font-size: 12px; color: var(--syn-text-muted); font-weight: 500; min-width: 80px; }
 .context-value { font-size: 12px; color: var(--syn-text-primary); text-align: right; flex: 1; word-break: break-all; }
 
@@ -637,7 +639,7 @@
   gap: 8px;
   padding: 5px 7px;
   border-radius: 6px;
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--syn-overlay-scrim);
 }
 .wf-card-dot {
   width: 9px;

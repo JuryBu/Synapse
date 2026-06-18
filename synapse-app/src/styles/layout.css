@@ -653,7 +653,7 @@ html[data-wallpaper="enabled"] .settings-panel {
   gap: 2px;
   padding: 2px;
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--syn-overlay-weak);
   border: 1px solid var(--syn-border);
 }
 
@@ -671,7 +671,7 @@ html[data-wallpaper="enabled"] .settings-panel {
 
 .agent-conv-scope button:hover {
   color: var(--syn-text-primary);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--syn-overlay-medium);
 }
 
 .agent-conv-scope button.active {
@@ -738,7 +738,7 @@ html[data-wallpaper="enabled"] .settings-panel {
 }
 
 .agent-conv-row-ws.global {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--syn-overlay-medium);
   color: var(--syn-text-muted);
 }
 
@@ -908,7 +908,7 @@ html[data-wallpaper="enabled"] .settings-panel {
 
 .input-tool-btn:hover {
   opacity: 1;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--syn-overlay-medium);
 }
 
 .mode-switch-btn {
@@ -922,13 +922,15 @@ html[data-wallpaper="enabled"] .settings-panel {
   background: transparent;
 }
 
+/* ★ P1 主题修复：原写死青色 #22d3ee 在浅色背景上对比偏低、且与主题色脱节。
+   改用语义 info 色（深浅同值但与主题协调），hover 用 info 透明叠加。 */
 .mode-switch-btn.fast {
-  border-color: #22d3ee;
-  color: #22d3ee;
+  border-color: var(--syn-info);
+  color: var(--syn-info);
 }
 
 .mode-switch-btn.fast:hover {
-  background: rgba(34, 211, 238, 0.1);
+  background: color-mix(in srgb, var(--syn-info) 12%, transparent);
 }
 
 .mode-switch-btn.planning {
@@ -1076,7 +1078,7 @@ html[data-wallpaper="enabled"] .settings-panel {
   align-items: center;
   justify-content: center;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--syn-overlay-weak);
   flex: 0 0 auto;
 }
 
@@ -1112,7 +1114,7 @@ html[data-wallpaper="enabled"] .settings-panel {
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--syn-overlay-medium);
   color: var(--syn-text-muted);
   font-size: 14px;
   line-height: 1;
@@ -1171,7 +1173,8 @@ html[data-wallpaper="enabled"] .settings-panel {
   max-height: 68vh;
   width: 100%;
   object-fit: contain;
-  background: rgba(0, 0, 0, 0.28);
+  /* ★ 主题修复：透明图衬底——原写死黑底，浅色模式下突兀。改用主题代码底（深近黑/浅浅灰），与弹窗协调。 */
+  background: var(--syn-bg-code);
 }
 
 .agent-input {

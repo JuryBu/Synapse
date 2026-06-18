@@ -3,7 +3,7 @@
   margin: 8px 0;
   border-left: 3px solid var(--syn-accent);
   border-radius: 6px;
-  background: rgba(0,0,0,0.2);
+  background: var(--syn-overlay-scrim);
   overflow: hidden;
 }
 .tool-call-header {
@@ -12,7 +12,7 @@
   background: none; color: var(--syn-text); cursor: pointer;
   font-size: 12px;
 }
-.tool-call-header:hover { background: rgba(255,255,255,0.05); }
+.tool-call-header:hover { background: var(--syn-overlay-weak); }
 .tool-call-icon { color: var(--syn-accent); }
 .tool-call-name { font-weight: 600; }
 .tool-call-args-preview { color: var(--syn-text-muted); font-size: 11px; flex:1; text-align:left; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -23,7 +23,7 @@
 .tool-call-body { padding: 0 12px 12px; }
 .tool-call-section { margin-bottom: 8px; }
 .tool-call-label { font-size: 10px; color: var(--syn-text-muted); text-transform: uppercase; margin-bottom: 4px; }
-.tool-call-code { font-family: 'JetBrains Mono',monospace; font-size: 11px; padding: 8px; border-radius: 4px; background: rgba(0,0,0,0.3); color: var(--syn-text); overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+.tool-call-code { font-family: 'JetBrains Mono',monospace; font-size: 11px; padding: 8px; border-radius: 4px; background: var(--syn-bg-code); color: var(--syn-text-code); overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
 .tool-call-result { border-left: 2px solid #22c55e; }
 .tool-calls-container { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .tool-copy-btn { background: none; border: none; color: var(--syn-text-muted); cursor: pointer; padding: 2px; border-radius: 3px; }
@@ -49,7 +49,9 @@
 .context-menu-separator { height: 1px; background: var(--syn-border); margin: 4px 8px; }
 
 /* Terminal */
-.terminal-panel { display: flex; flex-direction: column; height: 100%; background: rgba(0,0,0,0.3); font-family: 'JetBrains Mono','Cascadia Code',monospace; }
+/* ★ 主题修复：终端原写死 rgba(0,0,0,0.3) 黑底——浅色模式下 tab 标签(--syn-text-muted 变深)在深底上看不清。
+   改用代码面主题底 --syn-bg-code（深 #0d1117 / 浅 #f6f8fa），与代码编辑器统一；正文/提示色见下方改为主题适配。 */
+.terminal-panel { display: flex; flex-direction: column; height: 100%; background: var(--syn-bg-code); font-family: 'JetBrains Mono','Cascadia Code',monospace; }
 .terminal-tabs { display: flex; align-items: center; gap: 0; border-bottom: 1px solid var(--syn-border); }
 .terminal-tab { display: flex; align-items: center; gap: 4px; padding: 6px 12px; font-size: 11px; color: var(--syn-text-muted); cursor: pointer; border-bottom: 2px solid transparent; }
 .terminal-tab.active { color: var(--syn-text); border-bottom-color: var(--syn-accent); }
@@ -58,12 +60,12 @@
 .terminal-tab-close:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
 .terminal-tab-add { background: none; border: none; color: var(--syn-text-muted); cursor: pointer; padding: 4px 8px; }
 .terminal-tab-add:hover { color: var(--syn-text); }
-.terminal-output { flex: 1; overflow-y: auto; padding: 8px 12px; font-size: 12px; line-height: 1.6; color: #e2e8f0; }
+.terminal-output { flex: 1; overflow-y: auto; padding: 8px 12px; font-size: 12px; line-height: 1.6; color: var(--syn-text-code); }
 .terminal-line { white-space: pre-wrap; word-break: break-all; }
-.terminal-prompt { color: #22c55e; }
-.terminal-warning { color: #f59e0b; }
+.terminal-prompt { color: var(--syn-success); }
+.terminal-warning { color: var(--syn-warning); }
 .terminal-input-form { display: flex; align-items: center; padding: 4px 12px; border-top: 1px solid var(--syn-border); }
-.terminal-prompt-symbol { color: #22c55e; margin-right: 8px; font-size: 12px; }
+.terminal-prompt-symbol { color: var(--syn-success); margin-right: 8px; font-size: 12px; }
 .terminal-input { flex: 1; background: none; border: none; color: var(--syn-text); font-family: inherit; font-size: 12px; outline: none; }
 
 /* Synopsis */
@@ -77,12 +79,12 @@
 .synopsis-file-list { display: flex; flex-direction: column; gap: 4px; }
 .synopsis-file-item { border-radius: 6px; overflow: hidden; }
 .synopsis-file-header { display: flex; align-items: center; gap: 8px; padding: 8px; cursor: pointer; border-radius: 6px; transition: background 0.2s; }
-.synopsis-file-header:hover { background: rgba(255,255,255,0.05); }
+.synopsis-file-header:hover { background: var(--syn-overlay-weak); }
 .synopsis-file-name { flex: 1; font-size: 13px; color: var(--syn-text); }
 .synopsis-chunks { font-size: 10px; color: var(--syn-text-muted); }
 .synopsis-gen-btn { padding: 2px 8px; border: 1px solid var(--syn-accent); border-radius: 4px; background: none; color: var(--syn-accent); font-size: 10px; cursor: pointer; }
 .synopsis-gen-btn:hover { background: rgba(var(--syn-accent-rgb,139,92,246),0.2); }
-.synopsis-progress { flex: 1; max-width: 80px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; }
+.synopsis-progress { flex: 1; max-width: 80px; height: 4px; background: var(--syn-overlay-strong); border-radius: 2px; overflow: hidden; }
 .synopsis-progress-bar { height: 100%; background: var(--syn-accent); transition: width 0.3s; border-radius: 2px; }
 .synopsis-file-summary { padding: 0 8px 8px 30px; font-size: 12px; color: var(--syn-text-muted); }
 .synopsis-status-done { color: #22c55e; }
@@ -91,7 +93,7 @@
 .synopsis-status-pending { color: var(--syn-text-muted); opacity: 0.5; }
 
 /* Mermaid */
-.mermaid-container { margin: 8px 0; padding: 12px; border-radius: 8px; background: rgba(0,0,0,0.2); overflow-x: auto; }
+.mermaid-container { margin: 8px 0; padding: 12px; border-radius: 8px; background: var(--syn-overlay-scrim); overflow-x: auto; }
 .mermaid-container svg { max-width: 100%; }
 .mermaid-loading { padding: 20px; text-align: center; color: var(--syn-text-muted); font-size: 12px; }
 .mermaid-error { padding: 12px; border-radius: 8px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); }
@@ -110,7 +112,7 @@
 .quick-open-icon { color: var(--syn-text-muted); }
 .quick-open-input { flex: 1; background: none; border: none; color: var(--syn-text); font-size: 14px; outline: none; }
 .quick-open-close { background: none; border: none; color: var(--syn-text-muted); cursor: pointer; padding: 4px; border-radius: 4px; }
-.quick-open-close:hover { background: rgba(255,255,255,0.1); }
+.quick-open-close:hover { background: var(--syn-overlay-strong); }
 .quick-open-results { flex: 1; overflow-y: auto; padding: 4px; }
 .quick-open-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--syn-text); }
 .quick-open-item:hover, .quick-open-item.selected { background: rgba(var(--syn-accent-rgb,139,92,246),0.2); }
