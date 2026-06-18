@@ -17,20 +17,45 @@ R-L1~R-L5 全部实现 + 4-lens 对抗审查（「水位/幂等门」「R-L5/落
 
 回溯 undo 语义（点 user 那条回输入框、它及之后清）/ 重试·分支确认 / 工具卡片转圈 FIX-13 / PDF FIX-12+12b（缩放·滚动条·拖拽·Ctrl滚轮 + 对抗审查 6 修）/ reload 快捷键 + 未保存守卫 / UI-10 独立 tab / UI-6 文件夹默认收起+per-workspace 记忆 / UI-9 HTML 滚动条注入末尾+!important / UI-7 浮层中文+背景 / **PDF worker 回归**（vite optimizeDeps.exclude pdfjs-dist + worker.format es）/ **主题浮层浅色**（浅色补 --glass-bg + 新增 --glass-bg-solid + modal 改 --syn-bg-surface）
 
-## 🔧 P1 主题浅色对比度待修（子代理 B 全局排查，未改，下批 UI 打磨）
+## ✅ P1 主题浅色全局适配 — 完成（commit b221b81，playwright 验证）
 
-浅色模式下对比度不足/不协调（深色模式正常），子代理 B 精确清单：
-- `ErrorBoundary.tsx:22/26/33` 整页崩溃兜底写死深色 → 用 --syn-bg-base/--syn-text-*（浅色用户崩溃会黑屏割裂）
-- `conversationList.css:202 #fecaca` / `:365 #fbbf24` / `:408 #ef4444` 浅色文字贴浅底对比低 → 饱和深色或 var(--syn-error)
-- `settings.css:258/263/268` plugin-status badge 浅色字（#86efac/#fde68a/#fca5a5）→ 饱和深色版（#16a34a/#b45309/#b91c1c）；`:491 #f59e0b`
-- `layout.css:926-927` mode-switch.fast `#22d3ee` 青色浅底发飘 → var(--syn-accent)
-- `workflow .wf:423 #22c55e`
-- **P2（设计取舍，建议不改）**：代码块/编辑器固定深色主题（chat.css:342 / editor.css:134 `#0d1117`，GitHub dark 配色，浅色下深底浅字但对比 OK、可读）；语法高亮 token 色同理
+浅色模式全局梳理完成（按「成对语义变量 + 组件统一引用」根因修法，非逐处改写死值）：
+- index.css 新增成对深浅语义变量（--glass-bg-solid / --syn-bg-code / --syn-text-code / overlay 5 档 soft~scrim），浅色块补齐 --glass-bg
+- 8 处样式文件（chat/components/layout/editor/conversationList/fileTree/settings/wizard）写死深色改语义变量
+- ErrorBoundary 整页崩溃兜底改主题变量；CodeEditor prism 主题随 useResolvedTheme（深 vscDarkPlus/浅 vs）；MessageBubble mermaid 图表主题跟随（浅色 default + 浅色 themeVariables）
+- 新增 hooks/useResolvedTheme（读 redux theme.mode，system 跟 matchMedia）
+- playwright 真机扫描+诊断确认无残留真深色，截图确认整体协调美观
 
-最划算根因修法：新增成对语义变量（如 --syn-success-text 深浅各一）组件统一引用，而非逐处改写死值。
+待真机复核（小本本）：个别 badge/mode-switch 对比度边角若主人真机发现再点修；mermaid 图表渲染待有真实 mermaid 消息时一眼确认（配色取自已验证的浅色 token，编译通过）。
+P2 保留不改：代码块/编辑器固定 GitHub dark 配色（深底浅字对比 OK，设计取舍）。
 
-## ⏭ M5-BPC（后台预压缩）— 待做
+## 🟡 M5-BPC（后台预压缩）— PhaseA/B 完成，PhaseC（UI）待做
 
-- 子代理上轮只给了 phase 级概要（schema 未填详细），**需先补一轮 BPC 详细设计 workflow** 再实现
-- 规范 §8：~70% 阈值快照 → 后台 compact → 压好下一轮即用；δ 窗口（δ=2 最晚上限）；5 条边界（超大输入硬阻塞兜底 / 未替换前撞阈值转硬阻塞 / 可见可中止压缩环 / 阈值风险提醒 / 连续循环熔断）；所有可调参数进设置
-- 依赖 M5-RL（R-L4 折叠 + R-L5 硬闸已就位，是 BPC 边界5 熔断的前置保证）
+详细蓝图见 `Plan_5_梯队三实现蓝图.md`（BPC-0~BPC-8）。
+
+### ✅ PhaseA 底座（commit b2eeec5）— run() 未接线、对现有压缩零影响
+- recordStore RecordBatch/AppendBatchInput 加 source('auto'|'manual'|'bpc')
+- agentLoop compactNow 拆薄壳 + generateAndAppend（纯生成+落库，signal 入参，**零 store.dispatch** 不污染主 UI）+ bpcGenerate/computeBpcSnapshotInput；compactNow/手动两路逐字等价，AbortController 责任留壳层
+- agentSettings BpcConfig + DEFAULT_BPC_CONFIG（bpcThreshold0.68/compactThreshold0.9/deltaSteps2/abortCooldownMin3/circuitBreakGapSteps1）；store sanitizeBpcConfig（Number.isFinite 防 0 falsy）
+- conversation slice bpcThresholdOverride/compactThresholdOverride + override 全链路（DB 两 REAL 列懒迁移 + IPC + Web + persistence）
+- bpcScheduler 单例状态机（idle/snapshotting/generating/ready/replacing/cooldown/circuit-broken）+ evaluateWater/triggerSnapshot/runGeneration/takeReadyPrefix/discardCurrent/abort/restart/熔断/δ retry，全套就位
+- bpc slice 极薄 UI 投影（不持久化）
+
+### ✅ PhaseB 接线激活（commit ef7b4a3）— BPC 正式跑起来
+- compressContext 加 thresholdRatio 参（默认 0.9 向后兼容），硬阈值可配
+- agentLoop resolveCompactThreshold（本对话覆盖 ?? 全局 bpc.compactThreshold ?? 0.9，number 防 falsy）下推 compressContext + overLimit
+- AgentPanel attachLoop/detachLoop 注入 scheduler（切模型/MCP 重建自动 discard 在途）
+- run while 每轮末 evaluateBpcWater 钩子（fire-and-forget 按 run 同口径算水位）
+- run 进入 apiHistory 前裁决：撞硬阈值丢在途 BPC 防双写（边界①②），否则有 ready 则 takeReadyPrefix 收尾+记熔断游标（边界⑤）
+- **设计核心**：record 注入复用 M5-1 else 统一口径（BPC 落库下一轮 run 天然读取注入），takeReadyPrefix.recordMd 不被依赖 → 注入正确性独立于 BPC 逻辑瑕疵；store 永远全量，水位用全量算靠 batchSlice 增量门 + 熔断防原地打转
+- 双编译通过；opus 子代理对抗审查进行中
+
+### ⏭ PhaseC（待做）— UI 压缩环 + 分隔线 + 设置面板（BPC-6/7/8）
+- CompressionRing（footer/context tab/StatusBar 三处，订阅 bpc slice）：idle token% / generating 环+中止 × / cooldown / circuit-broken+重启按钮
+- CompactDivider（替内联分隔线）：按 source 三态（manual/auto/bpc 专属图标渐变）
+- SettingsPanel 压缩设置区：BPC 5 参 + recordLayering 6 参（顺手补 R-L2 欠的 UI）+ 风险校验黄字（阈值距离过近/过低）+ 本对话覆盖入口
+- BPC-8 手动自检（渐进对话触达阈值观察后台压缩→替换；δ/超大输入/中止冷却/熔断/override 持久化）
+- 注：熔断后重启入口在 PhaseC CompressionRing/设置；PhaseB 暂无 restart 入口，熔断后降级回硬阈值压缩（安全）
+
+### R-L6（BPC 衔接，可选）
+PhaseC 后评估：scheduler 生成前 predictRecordPrefixTokens 超 maxRatio 提前 foldOldBatches。
