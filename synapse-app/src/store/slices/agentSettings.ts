@@ -61,6 +61,27 @@ export interface RecordLayeringConfig {
   foldBatchK: number;
 }
 
+/**
+ * ★ M5-BPC：后台预压缩（Background Pre-Compaction）全局配置（Plan_5 §8.3 / §8.4「可调进设置」强约束）。
+ *   全部是「默认值，UI 可改」。bpcThreshold 是【预压触发】水位（低于硬阈值，提前在后台生成 record）；
+ *   compactThreshold 是【硬阻塞】水位（撞到就同步压缩，0.9 历史口径，迁移自 systemPrompt.COMPRESSION_THRESHOLD）。
+ *   deltaSteps = δ 替换窗口「最晚上限」step 数；abortCooldownMin = 手动中止后冷却分钟；
+ *   circuitBreakGapSteps = 熔断判据「替换后几乎没推进就又触发」的 step 间距（§8.4 待拍板，默认 1，UI 暴露可调）。
+ *   SettingsPanel 压缩设置区（M5-BPC-7）暴露。scheduler 读 agentSettings.bpc，对话覆盖见 conversation.*Override。
+ */
+export interface BpcConfig {
+  /** 预压触发水位（ratio >= 此值 && 空闲 → 后台拍快照生成 record）。默认 0.68。 */
+  bpcThreshold: number;
+  /** 硬阻塞压缩水位（ratio >= 此值 → 同步压缩，丢弃在途 BPC）。默认 0.9。 */
+  compactThreshold: number;
+  /** δ 替换窗口最晚上限 step 数（targetReplaceStep = snapshotStepCursor + 1 + deltaSteps）。默认 2。 */
+  deltaSteps: number;
+  /** 用户手动中止后台压缩后的冷却分钟数（冷却期不触发 BPC）。默认 3。 */
+  abortCooldownMin: number;
+  /** 熔断间距：替换后 step 推进 <= 此值又触发预压即算「立即重触发」（连续 2 次熔断）。默认 1。 */
+  circuitBreakGapSteps: number;
+}
+
 interface AgentSettingsState {
   mode: AgentMode;
   currentModel: string;
@@ -90,7 +111,21 @@ interface AgentSettingsState {
   synopsisSettings: SynopsisSettings;
   /** ★ M5-RL：record 分层/折叠/硬闸可调参数。 */
   recordLayering: RecordLayeringConfig;
+  /** ★ M5-BPC：后台预压缩可调参数（触发/硬阈值/δ窗口/冷却/熔断间距）。 */
+  bpc: BpcConfig;
 }
+
+/**
+ * ★ M5-BPC：BPC 默认配置单一真相源。initialState.bpc / store sanitize 兜底 / SettingsPanel 复位均引用此常量，
+ *   改默认值只改这一处（区别于 recordLayering 当年默认值散落三处需同步——这里收敛成共享常量）。
+ */
+export const DEFAULT_BPC_CONFIG: BpcConfig = {
+  bpcThreshold: 0.68,
+  compactThreshold: 0.9,
+  deltaSteps: 2,
+  abortCooldownMin: 3,
+  circuitBreakGapSteps: 1,
+};
 
 const initialState: AgentSettingsState = {
   mode: 'planning',
@@ -137,6 +172,7 @@ const initialState: AgentSettingsState = {
     foldThreshold: 30,
     foldBatchK: 10,
   },
+  bpc: { ...DEFAULT_BPC_CONFIG },
 };
 
 export function normalizeWallpaperImage(input: unknown, index = 0): WallpaperImage | null {
@@ -220,6 +256,20 @@ export const agentSettingsSlice = createSlice({
     // ★ M5-RL：更新 record 分层参数（部分覆盖，UI 逐项改）。
     setRecordLayering(state, action: PayloadAction<Partial<RecordLayeringConfig>>) {
       state.recordLayering = { ...state.recordLayering, ...action.payload };
+    },
+    /**
+     * ★ M5-BPC：更新后台预压缩参数（部分覆盖，UI 逐项改，仿 setRecordLayering 浅合并）。
+     *   ★ 数值口径：只接受【有限 number】的字段覆盖（typeof==='number' && isFinite），过滤掉 undefined/NaN/非数字，
+     *   绝不用 `x||fallback` 吞掉合法 0 值（虽阈值现实不为 0，但留作正确口径防未来 0.0 边界）。
+     */
+    setBpc(state, action: PayloadAction<Partial<BpcConfig>>) {
+      const patch = action.payload ?? {};
+      const next: BpcConfig = { ...state.bpc };
+      (Object.keys(next) as (keyof BpcConfig)[]).forEach(key => {
+        const v = patch[key];
+        if (typeof v === 'number' && Number.isFinite(v)) next[key] = v;
+      });
+      state.bpc = next;
     },
     setAvailableModels(state, action: PayloadAction<AIModelOption[]>) {
       state.availableModels = action.payload;
@@ -338,7 +388,7 @@ export const agentSettingsSlice = createSlice({
 });
 
 export const {
-  setMode, setCurrentModel, setSystemModel, setRecordLayering, setMaxToolRounds,
+  setMode, setCurrentModel, setSystemModel, setRecordLayering, setBpc, setMaxToolRounds,
   setAvailableModels, setConnectionStatus,
   setEnableStreaming, setOutputStrategy, setPseudoStreamSpeed,
   setShowStreamCursor, setShowGeneratingPlaceholder, setStreamThinking,

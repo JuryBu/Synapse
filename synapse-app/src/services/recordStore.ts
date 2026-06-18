@@ -63,6 +63,12 @@ export interface RecordBatch {
   meta?: boolean;
   /** ★ R-L4 折叠（设计B）：本元批覆盖的原始批 index 列表（UI/调试/解折叠用）。仅 meta 批非空，缺省 []。 */
   foldedFrom?: number[];
+  /**
+   * ★ M5-BPC：本批来源——'auto'（90% 硬阈值自动压缩）/ 'manual'（手动 /compact）/ 'bpc'（后台预压缩）。
+   *   随 batch 进 batches_json 整 JSON blob 落库（records 表非拆列，零迁移）；旧批缺省读回 'auto'。
+   *   仅供 UI（CompactDivider 分隔线，BPC-7）按来源区分三态渲染，不参与水位/边界逻辑。
+   */
+  source?: 'auto' | 'manual' | 'bpc';
 }
 
 /** record 数据模型（多批次架构，运行态 / 持久化对等结构，camelCase） */
@@ -205,6 +211,13 @@ export interface AppendBatchInput {
   phases?: number;
   /** 本批时间跨度（缺省空） */
   timeSpan?: string;
+  /** ★ M5-BPC：本批来源（'auto'|'manual'|'bpc'）。缺省 'auto'，随 batch 进 JSON blob 落库。 */
+  source?: 'auto' | 'manual' | 'bpc';
+}
+
+/** 把 RecordBatch 的 source 规范成合法枚举值（非法/缺省 → 'auto'）。 */
+function normalizeSource(raw: unknown): 'auto' | 'manual' | 'bpc' {
+  return raw === 'manual' || raw === 'bpc' ? raw : 'auto';
 }
 
 /** 把任意原始批次行规范成 RecordBatch */
@@ -232,6 +245,8 @@ function normalizeBatch(raw: unknown, fallbackIndex: number): RecordBatch | null
     archived: Boolean(b.archived ?? b.is_archived ?? false),
     meta: Boolean(b.meta ?? b.is_meta ?? false),
     foldedFrom,
+    // ★ M5-BPC：来源随 JSON blob 读回，旧批（无此字段）缺省 'auto'。
+    source: normalizeSource(b.source),
   };
 }
 
@@ -488,6 +503,8 @@ export async function appendBatch(input: AppendBatchInput): Promise<SynapseRecor
       phases: input.phases ?? 0,
       timeSpan: input.timeSpan ?? '',
       createdAt: nowSec(),
+      // ★ M5-BPC：本批来源（缺省 'auto'）随 batch 进 batches_json 落库；UI 据此区分分隔线三态。
+      source: normalizeSource(input.source),
     };
     const merged = [...prevBatches, newBatch];
     const record = buildRecord(input.conversationId, merged, nowSec());

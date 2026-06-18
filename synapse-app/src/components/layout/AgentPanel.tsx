@@ -1040,7 +1040,7 @@ export function AgentPanel() {
         const priorBatchCount = (await getRecord(convId).catch(() => null))?.batches?.length ?? 0;
         // 生成 record 批次 + 落库（compactNow 内部自算 compressedSegment = 全历史去最近 KEEP_RECENT 条，与自动同源）。
         // 不截断 store：下一轮 run 的注入前缀由 record 组装，store.messages 全量保留。
-        const recordMd = await loop.compactNow(convId);
+        const recordMd = await loop.compactNow(convId, { source: 'manual' }); // ★ M5-BPC-2：手动 /compact 标注来源 'manual'
         const after = await getRecord(convId).catch(() => null);
         const afterBatchCount = after?.batches?.length ?? 0;
         // 压缩点 UI 交还 batchDividerByIdx 分隔线：归一后 store.messages 长度不变，stepEnds effect 不会自动重算，

@@ -54,6 +54,10 @@ function mapConversation(row: any) {
         // ★ M4-6-S4 对话目标（/goal）：goal 列单字无下划线，`...row` 已自带；显式回带保证缺列时为 null。
         //   旧行/缺列为 null → 上层 loadPlatformSnapshot 视作未设目标（undefined）。
         goal: row.goal ?? null,
+        // ★ M5-BPC 本对话阈值覆盖（REAL 列，下划线 → 驼峰显式映射）。旧行/缺列为 undefined → null。
+        //   上层 loadPlatformSnapshot 用 toFiniteNumberOrUndefined 把 null 视作未覆盖（undefined）；落库 0 合法不被吞。
+        bpcThresholdOverride: row.bpc_threshold_override ?? null,
+        compactThresholdOverride: row.compact_threshold_override ?? null,
     };
 }
 
@@ -155,6 +159,14 @@ export function registerConversationHandlers(): void {
     try { ensureColumn(db, 'conversations', 'goal', 'TEXT'); } catch { /* 自愈失败则靠下方降级兜底 */ }
     const hasGoalColumn = hasColumn(db, 'conversations', 'goal');
 
+    // ★ M5-BPC 本对话阈值覆盖列同样防御性自愈 + 缺列降级（与 goal / workspace_path 同口径）：
+    //   bpc_threshold_override / compact_threshold_override 是 REAL 列（NULL=未覆盖）。注册期补一次（幂等）；
+    //   补不上则写入路径按 hasBpcOverrideColumns 降级（跳过该字段），读取路径缺列时为 null（视为未覆盖）。
+    try { ensureColumn(db, 'conversations', 'bpc_threshold_override', 'REAL'); } catch { /* 自愈失败靠下方降级 */ }
+    try { ensureColumn(db, 'conversations', 'compact_threshold_override', 'REAL'); } catch { /* 自愈失败靠下方降级 */ }
+    const hasBpcThresholdOverrideColumn = hasColumn(db, 'conversations', 'bpc_threshold_override');
+    const hasCompactThresholdOverrideColumn = hasColumn(db, 'conversations', 'compact_threshold_override');
+
     // 创建对话
     ipcMain.handle('conversation:create', (_e, data: {
         id: string; title?: string; model?: string; mode?: string; reasoningEffort?: string; workspaceId?: string;
@@ -169,6 +181,9 @@ export function registerConversationHandlers(): void {
         workspacePath?: string | null;
         // ★ M4-6-S4 对话目标（/goal）：缺省/空串 → 落 NULL（未设目标）。
         goal?: string;
+        // ★ M5-BPC 本对话阈值覆盖：缺省/undefined → 落 NULL（未覆盖）；合法 number（含 0）原样落 REAL。
+        bpcThresholdOverride?: number;
+        compactThresholdOverride?: number;
     }) => {
         // ★ 缺列降级：reasoning_effort 列缺失时，动态拼一条【不含该列】的 INSERT，
         //   保住 mode/messages 正常落库（不再因一个缺列整条失败）。列存在则带上（正常路径）。
@@ -217,6 +232,22 @@ export function registerConversationHandlers(): void {
             cols.push('goal');
             vals.push(data.goal && data.goal.trim() ? data.goal.trim() : null);
         }
+        if (hasBpcThresholdOverrideColumn) {
+            // ★ M5-BPC：缺列降级——列存在才写覆盖（typeof==='number'&&isFinite 才落值，否则 NULL=未覆盖）。
+            //   ★ 绝不用 `data.x || null` 吞 0（虽阈值现实不为 0，留作正确口径）。
+            cols.push('bpc_threshold_override');
+            vals.push(
+                typeof data.bpcThresholdOverride === 'number' && Number.isFinite(data.bpcThresholdOverride)
+                    ? data.bpcThresholdOverride : null,
+            );
+        }
+        if (hasCompactThresholdOverrideColumn) {
+            cols.push('compact_threshold_override');
+            vals.push(
+                typeof data.compactThresholdOverride === 'number' && Number.isFinite(data.compactThresholdOverride)
+                    ? data.compactThresholdOverride : null,
+            );
+        }
         const placeholders = cols.map(() => '?').join(', ');
         db.prepare(
             `INSERT INTO conversations (${cols.join(', ')}) VALUES (${placeholders})`,
@@ -258,6 +289,9 @@ export function registerConversationHandlers(): void {
         workspacePath?: string | null;
         // ★ M4-6-S4 对话目标（/goal）：undefined 不动（不覆盖既有 goal）；显式传（含空串→清空）才改目标。
         goal?: string;
+        // ★ M5-BPC 本对话阈值覆盖：undefined 不动（不覆盖既有值）；显式传合法 number 才写、显式传非数字→落 NULL（清空覆盖）。
+        bpcThresholdOverride?: number;
+        compactThresholdOverride?: number;
         // ★ M4-2-S1 systemTouch：true 时本次保存不刷 updated_at（系统性保存，不改用户感知排序时间）。
         //   若除 updated_at 外无任何字段要写，则空 set 直接 return，避免发出无意义/报错的空 UPDATE（风险4）。
         systemTouch?: boolean;
@@ -298,6 +332,18 @@ export function registerConversationHandlers(): void {
         if (hasWorkspacePathColumn && data.workspacePath !== undefined) { sets.push('workspace_path = ?'); vals.push(data.workspacePath ?? null); }
         // ★ M4-6-S4：对话目标缺列降级 + undefined 不动（显式传才写；空串落 NULL=清空目标）。
         if (hasGoalColumn && data.goal !== undefined) { sets.push('goal = ?'); vals.push(data.goal.trim() ? data.goal.trim() : null); }
+        // ★ M5-BPC：本对话阈值覆盖缺列降级 + undefined 不动（沿用 goal 口径）；
+        //   显式传合法 number（含 0）落 REAL，显式传其它（如 NaN）落 NULL（清空覆盖）。
+        //   ★ 注意：IPC/JSON 序列化会丢弃 undefined 值的 key → 清空（store 端传 undefined）经序列化后 key 消失、
+        //     走「不动」分支（DB 旧值残留）。0 值落库/读回正确（本批硬要求）；「显式清空持久化」边界留 BPC-7 处理。
+        if (hasBpcThresholdOverrideColumn && data.bpcThresholdOverride !== undefined) {
+            sets.push('bpc_threshold_override = ?');
+            vals.push(Number.isFinite(data.bpcThresholdOverride) ? data.bpcThresholdOverride : null);
+        }
+        if (hasCompactThresholdOverrideColumn && data.compactThresholdOverride !== undefined) {
+            sets.push('compact_threshold_override = ?');
+            vals.push(Number.isFinite(data.compactThresholdOverride) ? data.compactThresholdOverride : null);
+        }
         // ★ M4-2-S1：systemTouch 把 updated_at 移出 set 后，若没有任何实际字段要写，则 set 为空，
         //   直接 return（不发空 UPDATE）。非 systemTouch 路径 sets 至少含 updated_at，永不为空。
         if (sets.length === 0) return true;

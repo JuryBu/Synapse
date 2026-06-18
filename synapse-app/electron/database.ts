@@ -179,6 +179,13 @@ export function initDatabase(): Database.Database {
     //   IPC 读回时映射为 goal，写入路径按 hasColumn 缺列降级（仿 reasoning_effort / workspace_path 三件套）。
     ensureColumn(db, 'conversations', 'goal', 'TEXT');
 
+    // M5-BPC 本对话阈值覆盖：bpc_threshold_override / compact_threshold_override（REAL，NULL=未覆盖，用全局默认）。
+    //   预压触发水位 / 硬阻塞压缩水位的本对话级覆盖。旧行该列为 NULL（用全局默认），升级不丢对话；
+    //   ensureColumn 懒迁移加列不破坏旧库；IPC 读回时映射为驼峰，写入路径按 hasColumn 缺列降级。
+    //   ★ REAL 列：合法 0 值正常落库/读回（toFiniteNumberOrUndefined 不用 `x||undefined` 吞 0）。
+    ensureColumn(db, 'conversations', 'bpc_threshold_override', 'REAL');
+    ensureColumn(db, 'conversations', 'compact_threshold_override', 'REAL');
+
     ensureColumn(db, 'messages', 'model', 'TEXT');
     ensureColumn(db, 'messages', 'content_parts', 'TEXT');
     ensureColumn(db, 'messages', 'attachments', 'TEXT');

@@ -197,6 +197,12 @@ interface ConversationState {
   //   设目标后每轮 agentLoop.run 读取并经 promptBuilder.build 注入 <current_goal> 段（每轮自动注入）。
   //   空串/undefined 视为未设目标（build 不注入该段）。clearConversation 清空、setConversation 换身份时回填。
   goal?: string;
+  // ★ M5-BPC：本对话【后台预压缩触发水位】覆盖（留空=用全局 agentSettings.bpc.bpcThreshold）。
+  //   scheduler.evaluateWater 读 effectiveBpcThreshold = conversation.bpcThresholdOverride ?? agentSettings.bpc.bpcThreshold。
+  //   ★ 是 number：undefined=未覆盖；持久化/回填严禁 `x||undefined`（0 falsy 陷阱），统一 typeof==='number' 判定。
+  bpcThresholdOverride?: number;
+  // ★ M5-BPC：本对话【硬阻塞压缩水位】覆盖（留空=用全局 agentSettings.bpc.compactThreshold）。同 number 口径。
+  compactThresholdOverride?: number;
 }
 
 const CONVERSATION_SCHEMA_VERSION = 1;
@@ -313,6 +319,9 @@ const initialState: ConversationState = {
   branchedFromMessageId: null,
   workspacePath: null,
   goal: undefined,
+  // ★ M5-BPC：本对话阈值覆盖默认未设（用全局默认）。
+  bpcThresholdOverride: undefined,
+  compactThresholdOverride: undefined,
 };
 
 export const conversationSlice = createSlice({
@@ -338,6 +347,10 @@ export const conversationSlice = createSlice({
       // ★ M4-6-S4：对话目标可选回填，沿用「'goal' in payload 才覆盖」语义——懒迁移回写等不带该字段的
       //   setConversation 不会把已设目标清掉。切换/加载/恢复这类「换对话身份」的入口须显式传（含 undefined）以正确刷新。
       goal?: string;
+      // ★ M5-BPC：本对话阈值覆盖可选回填，沿用「'key' in payload 才覆盖」语义（含显式 undefined→清空）。
+      //   不带则不动（懒迁移回写等不带这两字段的 setConversation 不抹掉已设覆盖）。number 口径。
+      bpcThresholdOverride?: number;
+      compactThresholdOverride?: number;
     }>) {
       state.schemaVersion = CONVERSATION_SCHEMA_VERSION;
       state.id = action.payload.id;
@@ -354,6 +367,15 @@ export const conversationSlice = createSlice({
       if ('workspacePath' in action.payload) state.workspacePath = action.payload.workspacePath ?? null;
       // ★ M4-6-S4：换对话身份时回填 goal（'goal' in payload 才覆盖，含显式 undefined→清空；不带则不动）。
       if ('goal' in action.payload) state.goal = action.payload.goal || undefined;
+      // ★ M5-BPC：换对话身份时回填阈值覆盖（'key' in payload 才覆盖；number 用 typeof 判定，绝不用 `||` 吞 0）。
+      if ('bpcThresholdOverride' in action.payload) {
+        const v = action.payload.bpcThresholdOverride;
+        state.bpcThresholdOverride = typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+      }
+      if ('compactThresholdOverride' in action.payload) {
+        const v = action.payload.compactThresholdOverride;
+        state.compactThresholdOverride = typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+      }
     },
     // M4-2-S4：手动改当前对话工作区归属（S6/S7「移动到…」用）。null = 改归 Global。
     setConversationWorkspace(state, action: PayloadAction<string | null>) {
@@ -364,6 +386,18 @@ export const conversationSlice = createSlice({
     setGoal(state, action: PayloadAction<string | undefined>) {
       const next = (action.payload ?? '').trim();
       state.goal = next || undefined;
+    },
+    // ★ M5-BPC：设定 / 清空本对话【预压触发水位】覆盖（SettingsPanel 本对话覆盖入口 / 命令用）。
+    //   合法有限 number → 设；undefined/NaN/非数字 → 清空（视为未覆盖，回退全局默认）。
+    //   ★ 绝不用 `x||undefined`——0 是合法 number 会被吞（虽阈值现实不为 0，留作正确口径）。随对话持久化。
+    setBpcThresholdOverride(state, action: PayloadAction<number | undefined>) {
+      const v = action.payload;
+      state.bpcThresholdOverride = typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+    },
+    // ★ M5-BPC：设定 / 清空本对话【硬阻塞压缩水位】覆盖。同 number 口径。
+    setCompactThresholdOverride(state, action: PayloadAction<number | undefined>) {
+      const v = action.payload;
+      state.compactThresholdOverride = typeof v === 'number' && Number.isFinite(v) ? v : undefined;
     },
     // ★ M5-1 压缩归一：原 applyManualCompact reducer 已删除。
     //   压缩有且仅有一套（手动 /compact ＝ 自动压缩，完全同一套逻辑，仅触发方式不同）：压缩【不删任何 store.messages】，
@@ -602,6 +636,9 @@ export const conversationSlice = createSlice({
       state.workspacePath = null;
       // ★ M4-6-S4：新对话无目标——清空 goal，避免新对话误继承上条对话的 goal 注入系统提示。
       state.goal = undefined;
+      // ★ M5-BPC：新对话无阈值覆盖——清空，避免新对话误继承上条对话的 BPC/压缩阈值覆盖。
+      state.bpcThresholdOverride = undefined;
+      state.compactThresholdOverride = undefined;
     },
     setTitle(state, action: PayloadAction<string>) {
       state.title = action.payload;
@@ -649,7 +686,8 @@ export const conversationSlice = createSlice({
 });
 
 export const {
-  setConversation, setConversationWorkspace, setGoal, addMessage, updateMessage,
+  setConversation, setConversationWorkspace, setGoal,
+  setBpcThresholdOverride, setCompactThresholdOverride, addMessage, updateMessage,
   updateMessageMeta, appendMessageContent, setMessageAttachments,
   appendMessageThinking, setMessageStreamState, setMessageReconnect,
   addMessageDiff, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,

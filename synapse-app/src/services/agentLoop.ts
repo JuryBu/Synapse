@@ -756,6 +756,7 @@ export class AgentLoop {
         compressedSegment,
         workspaceName: workspaceName || undefined,
         currentModel,
+        source: 'auto', // ★ M5-BPC-2：自动压缩（90% 硬阈值）标注来源 'auto'
       });
       // ★ R-L5 token 硬闸：对最终注入的 recordMd 过一道（正常路径 no-op、逐字返回 → 不破 cache；
       //   仅超 window×maxRatio 的危险态才逐批降 titleOnly）。需 compactNow 落库后的最新 record（已含本批 + 已折叠）。
@@ -1374,6 +1375,9 @@ export class AgentLoop {
       compressedSegment?: ChatMessage[];
       workspaceName?: string;
       currentModel?: string;
+      // ★ M5-BPC-2：本次压缩来源标注（透传给 generateAndAppend → appendBatch → record 批 source）。
+      //   /compact 传 'manual'，run() 自动兜底传 'auto'（缺省 'auto'）。BPC 后台走 bpcGenerate（'bpc'），不经本壳。
+      source?: 'auto' | 'manual' | 'bpc';
     },
   ): Promise<string | null> {
     if (!conversationId) return null;
@@ -1402,17 +1406,73 @@ export class AgentLoop {
       compressedSegment = liveMessages.slice(0, keepStartIdx);
     }
 
-    const workspaceName = opts?.workspaceName
-      || ((store.getState() as RootState) as any).workspace?.name
-      || undefined;
-    const currentModel = opts?.currentModel
-      || ((store.getState() as RootState) as any).agentSettings?.currentModel
-      || '';
-
     // R5：为本次压缩生成新建独立中止器，登记到实例集合让 stop() 能遍历 abort 到它（归属隔离，finally 只删自己）。
+    //   ★ M5-BPC-2：controller 的建/登记/finally-delete 责任留在本壳层（compactNow 是【主对话】压缩入口，
+    //     stop() 管的是 compressControllers）；generateAndAppend 只认 opts.signal，不自己建 controller。
+    //     BPC 后台路径走 bpcGenerate（用 scheduler 自己的 controller 集合），绝不混进 compressControllers。
     const compressController = new AbortController();
     this.compressControllers.add(compressController);
+    try {
+      // ★ M5-BPC-2：纯生成+落库下沉到 generateAndAppend，本壳【行为逐字节等价】于拆分前——
+      //   只是把 controller 建在壳层、signal 传入；返回前缀 recordMd 不变。
+      const result = await this.generateAndAppend(conversationId, {
+        compressedSegment,
+        workspaceName: opts?.workspaceName,
+        currentModel: opts?.currentModel,
+        source: opts?.source ?? 'auto',
+        signal: compressController.signal,
+      });
+      return result.recordMd;
+    } finally {
+      // R5：本次压缩生成结束（成功/降级/中止/异常）即从集合移除【自己这个】 controller，
+      // 只 delete 局部变量，绝不整体置空——避免误清别的在途 run 登记的 controller（归属隔离）。
+      this.compressControllers.delete(compressController);
+    }
+  }
+
+  /**
+   * ★ M5-BPC-2：record 压缩的【纯生成 + 落库】核心（从 compactNow 抽出，无 controller 归属语义）。
+   *
+   *   职责 = 「getRecord → batchSlice 切片 → generateBatch → appendBatch（带 source）→ R-L4 折叠 →
+   *           压缩后同步 autosave → buildStableRecordPrefix」一体。与拆分前 compactNow 主体【行为逐字节等价】，
+   *   仅两点变化：(a) AbortController 由【调用方传入 opts.signal】（本方法不建 controller）；
+   *              (b) appendBatch 入参带 source（透传），返回结构含 appended + 落库后 totalSteps/totalRounds。
+   *
+   *   三条压缩路径共用本方法（决策③）：
+   *     - compactNow 薄壳（主对话自动 'auto' / 手动 'manual'）：壳建 controller 登记 compressControllers，传 signal。
+   *     - bpcGenerate（后台预压 'bpc'）：scheduler 用自己的 controller 集合，传其 signal（与 compressControllers 隔离）。
+   *
+   *   ★ 健壮性契约（沿用 compactNow R5，务必维持）：generateBatch 失败/中止 → 不 appendBatch → record 维持
+   *     压缩前状态，绝不丢 store.messages；appendBatch 落库原子 + 幂等；压缩后同步 autosave 失败吞异常不阻塞。
+   *
+   * @returns recordMd  注入前缀（buildStableRecordPrefix；无 record / 异常时 null，调用方据此降级字符截断）。
+   * @returns appended  本次是否真落了一个新批（batchSlice 非空 + generateBatch 成功 + appendBatch 成功）。
+   * @returns totalSteps/totalRounds  落库后 record 派生水位（appended=false 时取 existingRecord 水位，无 record 为 0）。
+   */
+  private async generateAndAppend(
+    conversationId: string,
+    opts: {
+      compressedSegment: ChatMessage[];
+      workspaceName?: string;
+      currentModel?: string;
+      source?: 'auto' | 'manual' | 'bpc';
+      signal?: AbortSignal;
+    },
+  ): Promise<{ recordMd: string | null; appended: boolean; totalSteps: number; totalRounds: number }> {
+    if (!conversationId) return { recordMd: null, appended: false, totalSteps: 0, totalRounds: 0 };
+
+    const workspaceName = opts.workspaceName
+      || ((store.getState() as RootState) as any).workspace?.name
+      || undefined;
+    const currentModel = opts.currentModel
+      || ((store.getState() as RootState) as any).agentSettings?.currentModel
+      || '';
+    const source: 'auto' | 'manual' | 'bpc' = opts.source ?? 'auto';
+
     let recordMd: string | null = null;
+    let appended = false;
+    let totalSteps = 0;
+    let totalRounds = 0;
     try {
       const existingRecord = await getRecord(conversationId);
 
@@ -1420,10 +1480,13 @@ export class AgentLoop {
       //   step 口径对齐 record（全程不含 tool）。record 增量水位 priorSteps（末批 stepEnd）以「对话 step0 累计」为绝对基准。
       //   归一后两条路径的 compressedSegment 都是「从 store 头部累计的【全量】被压段」（压缩绝不截断 store），
       //   故 batchSlice = coveredEligible.slice(priorSteps) 恒切出「上次已覆盖之后的新增段」——单一口径全覆盖。
-      const coveredEligible = compressedSegment.filter(m => m.role !== 'tool');
+      const coveredEligible = opts.compressedSegment.filter(m => m.role !== 'tool');
       const priorSteps = existingRecord?.totalSteps ?? 0;       // = 末批 stepEnd（不含 tool）
       const priorRounds = existingRecord?.totalRounds ?? 0;     // = 末批 roundEnd
       const batchSlice = coveredEligible.slice(priorSteps);     // 从全量段切掉已覆盖前缀得本批增量
+      // 默认水位（appended=false 兜底）= 现有 record 水位（无 record 为 0）。
+      totalSteps = priorSteps;
+      totalRounds = priorRounds;
 
       // ★ M4-5-S2：压缩注入改用确定性稳定前缀（不随 contextWindow 动态升降级），杜绝 apiMessages[1] 前缀漂移。
       recordMd = existingRecord ? buildStableRecordPrefix(existingRecord, (store.getState() as RootState).agentSettings?.recordLayering) : null;
@@ -1465,7 +1528,7 @@ export class AgentLoop {
           roundStart,
           roundEnd,
           workspaceName: workspaceName || undefined,
-        }, compressController.signal); // R5：透传本次压缩 controller 的 signal，用户 stop 时立即降级返回 null
+        }, opts.signal); // ★ M5-BPC-2：透传【调用方】signal，用户 stop / scheduler abort 时立即降级返回 null
         if (batchResult) {
           const updated = await appendBatch({
             conversationId,
@@ -1477,8 +1540,10 @@ export class AgentLoop {
             skeleton: batchResult.skeleton,
             phases: batchResult.phases,
             timeSpan: batchResult.timeSpan,
+            source, // ★ M5-BPC-1/2：本批来源标注随 batch 落库（'auto'|'manual'|'bpc'）
           });
           if (updated) {
+            appended = true;
             // ★ R-L4 折叠触发：appendBatch 成功落库后，若可见（非 archived、非 meta）批数 > foldThreshold，
             //   折叠最老 foldBatchK 批为 1 元批（原文 archived 留库），再用折叠后的 record 重算注入前缀。
             //   foldOldBatches 内部对未达阈值 no-op、且全程吞异常（record 是加速层，绝不阻塞主对话）。
@@ -1494,6 +1559,9 @@ export class AgentLoop {
             }
             // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性（用折叠后 record）。
             recordMd = buildStableRecordPrefix(folded, layeringForFold);
+            // ★ M5-BPC-2：落库后真实派生水位（供 BPC 算 targetReplaceStep；折叠不改水位，用 updated 口径即可）。
+            totalSteps = updated.totalSteps;
+            totalRounds = updated.totalRounds;
             // ★ R5 修复（问题3：record 水位 vs messages 缺口）：appendBatch 已把【本批覆盖到的 step】落库，
             // 但触发本轮压缩的新 user 消息此刻可能还没被 autosave（700ms 防抖 + 压缩期同步占住事件循环，
             // 且压缩成功后立即进 while 重新点亮 isStreaming 关掉 autosave 闸门）。这里主动同步持久化一次
@@ -1519,12 +1587,68 @@ export class AgentLoop {
       }
     } catch (err) {
       console.warn('[agentLoop] record 压缩失败，回退字符截断:', err);
-    } finally {
-      // R5：本次压缩生成结束（成功/降级/中止/异常）即从集合移除【自己这个】 controller，
-      // 只 delete 局部变量，绝不整体置空——避免误清别的在途 run 登记的 controller（归属隔离）。
-      this.compressControllers.delete(compressController);
     }
-    return recordMd;
+    return { recordMd, appended, totalSteps, totalRounds };
+  }
+
+  /**
+   * ★ M5-BPC-3：后台预压缩专用【public 包装】——供 bpcScheduler 调 generateAndAppend（决策④：用 public 包装
+   *   而非把 generateAndAppend 改 public，封装更干净）。scheduler 持有本 AgentLoop 实例引用（attachLoop 注入），
+   *   用【自己的 controller 集合】管 signal（与本类 compressControllers 隔离，stop() 不误伤 BPC、scheduler.abort 不误伤主对话）。
+   *
+   *   行为 = 直接转发 generateAndAppend，source 固定 'bpc'。返回结构原样透传（含 appended + 落库后水位，
+   *   scheduler 据 totalSteps/totalRounds 算 targetReplaceStep / 熔断游标）。
+   *
+   * @param compressedSegment 被压段（含 tool，scheduler 在 triggerSnapshot 瞬间从 store 现算 + structuredClone 深拷贝冻结）。
+   * @param signal scheduler 自己 controller 的 signal（discardCurrent/abort 时触发，generateBatch 立即降级返回 null）。
+   */
+  async bpcGenerate(
+    conversationId: string,
+    compressedSegment: ChatMessage[],
+    signal?: AbortSignal,
+    opts?: { workspaceName?: string; currentModel?: string },
+  ): Promise<{ recordMd: string | null; appended: boolean; totalSteps: number; totalRounds: number }> {
+    return this.generateAndAppend(conversationId, {
+      compressedSegment,
+      workspaceName: opts?.workspaceName,
+      currentModel: opts?.currentModel,
+      source: 'bpc',
+      signal,
+    });
+  }
+
+  /**
+   * ★ M5-BPC-3：从当前 store 现算 BPC 拍快照原料（被压段 + step/round 游标），口径与手动 /compact 入口完全一致。
+   *   bpcScheduler.triggerSnapshot 调本方法拿原料后 structuredClone 深拷贝冻结 compressedSegment（store 后续照常发展不影响）。
+   *
+   *   - compressedSegment：全历史（去 tool）保留最近 KEEP_RECENT_ROUNDS=2 个【整轮】后的被压段（向轮边界取整，
+   *     与 compactNow 手动入口同款，绝不轮中间切）。压缩绝不截断 store，故这是「从 store 头部累计的全量被压段」。
+   *   - snapshotStepCursor / snapshotRoundCursor：identifyRounds(过滤 tool 的全量 store.messages) 的 totalSteps/totalRounds，
+   *     在拍快照【瞬间】锁定（值拷贝），与 run()/compactNow 的现算口径一致（当前无持久 step 游标，见 BPC-0）。
+   *
+   *   ★ 复用内部 toChatMessage/getMessageText/identifyRounds 一处口径，scheduler 不碰 store message 内部结构、不重复实现转换。
+   */
+  computeBpcSnapshotInput(conversationId: string): {
+    compressedSegment: ChatMessage[];
+    snapshotStepCursor: number;
+    snapshotRoundCursor: number;
+  } {
+    void conversationId; // 现算只依赖当前 store.conversation；conversationId 由 scheduler 在外层校验身份一致
+    const liveMessages = (store.getState() as RootState).conversation.messages
+      .filter((m: any) => m.role !== 'tool')
+      .map(toChatMessage);
+    const liveRounds = identifyRounds(liveMessages);
+    // 与 compactNow 手动入口同款：保留最近 2 整轮原文，其余作被压段（尾部落轮边界）。
+    const KEEP_RECENT_ROUNDS = 2;
+    const keepFromRoundIdx = Math.max(0, liveRounds.rounds.length - KEEP_RECENT_ROUNDS);
+    const keepStartIdx = liveRounds.rounds[keepFromRoundIdx]?.stepStart ?? 0;
+    const compressedSegment = liveMessages.slice(0, keepStartIdx);
+    return {
+      compressedSegment,
+      // ★ 锁定瞬间游标 = 全量 store（去 tool）的 totalSteps/totalRounds（不是被压段的，是整对话当前水位）。
+      snapshotStepCursor: liveRounds.totalSteps,
+      snapshotRoundCursor: liveRounds.totalRounds,
+    };
   }
 
 }

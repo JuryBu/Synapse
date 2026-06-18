@@ -329,6 +329,13 @@ function getWebMock(): SynapseAPI {
             workspacePath: data.workspacePath ?? null,
             // ★ M4-6-S4 对话目标（Web 对等）：空串/缺省 → null（未设目标）。
             goal: data.goal && String(data.goal).trim() ? String(data.goal).trim() : null,
+            // ★ M5-BPC 本对话阈值覆盖（Web 对等）：合法 number（含 0）原样存，否则 null（未覆盖）。绝不用 `x||null` 吞 0。
+            bpcThresholdOverride:
+              typeof data.bpcThresholdOverride === 'number' && Number.isFinite(data.bpcThresholdOverride)
+                ? data.bpcThresholdOverride : null,
+            compactThresholdOverride:
+              typeof data.compactThresholdOverride === 'number' && Number.isFinite(data.compactThresholdOverride)
+                ? data.compactThresholdOverride : null,
           });
           writeWebConversationSummaries(summaries);
         }
@@ -370,6 +377,16 @@ function getWebMock(): SynapseAPI {
             goal: patch.goal === undefined
               ? ((summaries[idx] as any).goal ?? null)
               : (String(patch.goal).trim() ? String(patch.goal).trim() : null),
+            // ★ M5-BPC：本对话阈值覆盖（Web 对等）。undefined 不覆盖；显式传合法 number（含 0）才改，非数字→null。
+            //   ★ 绝不用 `patch.x || 旧值` 吞 0（虽阈值现实不为 0，留作正确口径）。
+            bpcThresholdOverride: patch.bpcThresholdOverride === undefined
+              ? ((summaries[idx] as any).bpcThresholdOverride ?? null)
+              : (typeof patch.bpcThresholdOverride === 'number' && Number.isFinite(patch.bpcThresholdOverride)
+                ? patch.bpcThresholdOverride : null),
+            compactThresholdOverride: patch.compactThresholdOverride === undefined
+              ? ((summaries[idx] as any).compactThresholdOverride ?? null)
+              : (typeof patch.compactThresholdOverride === 'number' && Number.isFinite(patch.compactThresholdOverride)
+                ? patch.compactThresholdOverride : null),
             // systemTouch 时保留旧 updatedAt（排序时间不变）；否则刷新为当前时间（用户主动保存正常置顶）。
             updatedAt: systemTouch ? (summaries[idx].updatedAt ?? Date.now()) : Date.now(),
           };

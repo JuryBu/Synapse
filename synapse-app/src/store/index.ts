@@ -3,7 +3,8 @@ import { layoutSlice } from './slices/layout';
 import { sidebarSlice } from './slices/sidebar';
 import { conversationSlice } from './slices/conversation';
 import { conversationHistorySlice } from './slices/conversationHistory';
-import { agentSettingsSlice, normalizeWallpaperImages } from './slices/agentSettings';
+import { agentSettingsSlice, normalizeWallpaperImages, DEFAULT_BPC_CONFIG } from './slices/agentSettings';
+import { bpcSlice } from './slices/bpc';
 import { settingsSlice } from './slices/settings';
 import { themeSlice } from './slices/theme';
 import { notificationsSlice } from './slices/notifications';
@@ -43,6 +44,26 @@ const DEFAULT_SYNOPSIS_SETTINGS = {
   autoIndexMethod: 'contentHash',
 };
 
+/**
+ * ★ M5-BPC：把持久化里的 bpc 配置规范成完整、合法的 BpcConfig。
+ *   逐字段 Number.isFinite 校验：合法有限数（含 0）原样取；缺省/NaN/非数字回退 DEFAULT_BPC_CONFIG 对应默认值。
+ *   ★ 严禁 `persisted.x || default`——0 是 falsy 会被吞，虽阈值现实不为 0，但留作正确口径防未来 0.0 边界。
+ */
+function sanitizeBpcConfig(raw: any) {
+  const src = raw ?? {};
+  const pick = (key: keyof typeof DEFAULT_BPC_CONFIG) => {
+    const v = src[key];
+    return typeof v === 'number' && Number.isFinite(v) ? v : DEFAULT_BPC_CONFIG[key];
+  };
+  return {
+    bpcThreshold: pick('bpcThreshold'),
+    compactThreshold: pick('compactThreshold'),
+    deltaSteps: pick('deltaSteps'),
+    abortCooldownMin: pick('abortCooldownMin'),
+    circuitBreakGapSteps: pick('circuitBreakGapSteps'),
+  };
+}
+
 function sanitizePersistedAgentSettings(agentSettings: any) {
   if (!agentSettings) return agentSettings;
   const availableModels = Array.isArray(agentSettings.availableModels)
@@ -81,6 +102,10 @@ function sanitizePersistedAgentSettings(agentSettings: any) {
       headFull: 2, tailFull: 1, titleThreshold: 20, maxRatio: 0.4, foldThreshold: 30, foldBatchK: 10,
       ...(agentSettings.recordLayering ?? {}),
     },
+    // ★ M5-BPC：后台预压缩配置兜底——旧持久化无此字段时补全（默认值收敛在 DEFAULT_BPC_CONFIG 单一真相源）。
+    //   数值字段逐项用 Number.isFinite 校验（持久化里若存了 NaN/字符串则回退默认），绝不用 `x||默认` 吞合法 0 值。
+    //   保证 store.agentSettings.bpc 永远是完整、合法的 BpcConfig，供 scheduler.evaluateWater 与 SettingsPanel 用。
+    bpc: sanitizeBpcConfig(agentSettings.bpc),
   };
   // ★ M4-5-S1：系统模型（systemModel）加载期失效回退，与 currentModel 同款——
   // 持久化里若存了已从端点下线的模型，启动即回退空（跟随 currentModel），防后台任务静默报错。
@@ -233,6 +258,10 @@ export const store = configureStore({
     worktreeSession: worktreeSessionSlice.reducer,
     editorTabs: editorTabsSlice.reducer,
     multiAI: multiAIReducer,
+    // ★ M5-BPC：后台预压缩 UI 投影态（极薄、纯运行态）。前缀 bpc/ 不入 persistMiddleware → 绝不持久化，
+    //   store 重启回 idle（同 worktreeSession 不持久化运行态思路）。真正的 BpcSnapshot 数据在 bpcScheduler 内存，
+    //   此 slice 仅承载 CompressionRing/StatusBar 可订阅的枚举态 + 进度，不存快照本体。
+    bpc: bpcSlice.reducer,
   },
   preloadedState: {
     ...(persisted.settings ? { settings: persisted.settings } : {}),

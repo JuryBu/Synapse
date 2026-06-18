@@ -82,6 +82,11 @@ export interface ConversationSnapshot {
   //   undefined 时 update 路径不覆盖既有 goal（沿用 mode/workspacePath 的「undefined 不动」语义）；
   //   显式空串 '' 表示清空目标。
   goal?: string;
+  // ★ M5-BPC 本对话阈值覆盖（DB bpc_threshold_override / compact_threshold_override REAL 列；缺列降级跳过）。
+  //   undefined 时 update 路径不覆盖既有值（沿用 goal 的「undefined 不动」语义）。number 口径——
+  //   ★ 落库/回填严禁 `x||null` 吞 0：用 typeof==='number'&&isFinite 判定（虽阈值现实不为 0，留作正确口径）。
+  bpcThresholdOverride?: number;
+  compactThresholdOverride?: number;
   // ★ M4-2-S1 systemTouch（控制位，不落库为数据列）：true 时本次保存不刷 updated_at。
   //   用于「切走对话的自动保存」——系统性保存不应改变用户感知的排序时间（治问题9）。
   systemTouch?: boolean;
@@ -205,6 +210,9 @@ export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Prom
     workspacePath: snapshot.workspacePath,
     // ★ M4-6-S4：autosave 行也带对话目标，使刷新/重启从 autosave 恢复对话能拿回 goal 继续注入。
     goal: snapshot.goal,
+    // ★ M5-BPC：autosave 行也带本对话阈值覆盖，使刷新/重启从 autosave 恢复对话能拿回 BPC/压缩覆盖。
+    bpcThresholdOverride: snapshot.bpcThresholdOverride,
+    compactThresholdOverride: snapshot.compactThresholdOverride,
   };
 
   // M4-2-S1：autosave 也支持透传 systemTouch（默认 false——用户正在该对话活动，刷新排序时间合理）。
@@ -274,6 +282,9 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
     workspacePath: snapshot.workspacePath,
     // ★ M4-6-S4：对话目标随对话落库（DB goal 列；undefined 时 update 不覆盖既有 goal，显式 '' 清空）。
     goal: snapshot.goal,
+    // ★ M5-BPC：本对话阈值覆盖随对话落库（DB REAL 列；undefined 时 update 不覆盖既有值）。
+    bpcThresholdOverride: snapshot.bpcThresholdOverride,
+    compactThresholdOverride: snapshot.compactThresholdOverride,
   };
 
   // M2-R6：正式保存同样落库去 base64。
@@ -816,6 +827,14 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
       // ★ M4-6-S4：对话目标随快照回带（两端 goal 驼峰 / 下划线同名；旧对话/缺列为 null/'' → undefined=未设目标）。
       //   恢复链路据此把 goal 回填进 store conversation.goal，使重启后继续每轮注入。
       goal: (conversation.goal ?? '') || undefined,
+      // ★ M5-BPC：本对话阈值覆盖随快照回带（两端驼峰 / 下划线；旧对话/缺列为 null → undefined=未覆盖）。
+      //   ★ 用 typeof==='number'&&isFinite 判定，绝不用 `x||undefined` 吞 0（虽阈值现实不为 0，留作正确口径）。
+      bpcThresholdOverride: toFiniteNumberOrUndefined(
+        conversation.bpcThresholdOverride ?? conversation.bpc_threshold_override,
+      ),
+      compactThresholdOverride: toFiniteNumberOrUndefined(
+        conversation.compactThresholdOverride ?? conversation.compact_threshold_override,
+      ),
     };
   } catch {
     return null;
@@ -846,6 +865,9 @@ async function persistPlatformSnapshot(
     workspacePath?: string | null;
     // ★ M4-6-S4 对话目标（DB goal 列；undefined 时 update 路径不覆盖旧值，缺列降级跳过）。
     goal?: string;
+    // ★ M5-BPC 本对话阈值覆盖（DB REAL 列；undefined 时 update 路径不覆盖旧值，缺列降级跳过）。
+    bpcThresholdOverride?: number;
+    compactThresholdOverride?: number;
   },
   messages: Message[],
   // ★ M4-2-S1 systemTouch：true 时本次落库不刷 updated_at（仅 update 既有行 + replaceMessages 路径生效；
@@ -903,6 +925,18 @@ function mapConversationSummary(row: any): ConversationSummary | null {
  */
 function fallbackMeta(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() !== '' ? value : fallback;
+}
+
+/**
+ * ★ M5-BPC：把 DB 读回的阈值覆盖值规范成 number | undefined。
+ *   null/缺列/NaN/非数字 → undefined（未覆盖）；合法有限数（含 0）原样取。
+ *   ★ 关键：DB REAL 列读回 0 是合法值，绝不用 `Number(v) || undefined` 吞掉 0（虽阈值现实不为 0，留作正确口径）。
+ *   注意：SQLite 也可能把数字以字符串回带，故用 Number() 转换后再 isFinite 校验（但显式拦 null/''/undefined）。
+ */
+function toFiniteNumberOrUndefined(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === '') return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 function normalizeTimestamp(value: unknown): number {
