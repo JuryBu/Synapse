@@ -25,6 +25,7 @@ import { store, type RootState } from '../store';
 import { setBpcUiState, resetBpcUi, type BpcUiStateEnum } from '../store/slices/bpc';
 import { addNotification } from '../store/slices/notifications';
 import { DEFAULT_BPC_CONFIG } from '../store/slices/agentSettings';
+import { AUTOSAVE_ID } from './conversationPersistence';
 import type { AgentLoop } from './agentLoop';
 import type { ChatMessage } from './aiClient';
 
@@ -71,8 +72,8 @@ class BpcScheduler {
   private abortControllers = new Set<AbortController>();
   /** 注入的 AgentLoop 实例（attachLoop 设置；切模型/MCP refresh 重建时重新注入 + discardCurrent 在途）。 */
   private loop: AgentLoop | null = null;
-  /** 在途生成 Promise（防并发重入 runGeneration）。 */
-  private genPromise: Promise<void> | null = null;
+  /** 在途生成 Promise（防并发重入 runGeneration）；仅作存在性标志，不被 await 取值，故类型放宽 unknown。 */
+  private genPromise: Promise<unknown> | null = null;
   /** 冷却到期时间戳（ms）；null = 非冷却。 */
   private cooldownUntil: number | null = null;
   /** 熔断态：true 时停 BPC 直到 restart()。 */
@@ -91,11 +92,22 @@ class BpcScheduler {
     return s.agentSettings?.bpc ?? DEFAULT_BPC_CONFIG;
   }
 
-  /** 生效预压触发水位 = 本对话覆盖 ?? 全局默认（number override 用 ?? 而非 ||，0 不被吞）。 */
+  /** 生效预压触发水位 = 本对话覆盖 ?? 全局默认（number override 用 typeof+isFinite 判定，0 不被吞）。 */
   private effectiveBpcThreshold(): number {
     const s = store.getState() as RootState;
     const override = s.conversation?.bpcThresholdOverride;
-    return typeof override === 'number' && Number.isFinite(override) ? override : this.config.bpcThreshold;
+    const raw = typeof override === 'number' && Number.isFinite(override) ? override : this.config.bpcThreshold;
+    // ★ 审查 L1：预压阈值必须 < 硬压缩阈值，否则 run() 先撞硬阈值同步压缩、ratio 永远到不了预压线 → BPC 静默永不触发。
+    //   clamp 到 compactThreshold - 0.05 上限（留触发空间），即便用户误配 bpcThreshold >= compactThreshold 也能工作。
+    const compactCeil = this.effectiveCompactThreshold() - 0.05;
+    return Math.min(raw, Math.max(0, compactCeil));
+  }
+
+  /** 生效硬压缩水位 = 本对话覆盖 ?? 全局默认（口径与 agentLoop.resolveCompactThreshold 一致，供 L1 clamp 用）。 */
+  private effectiveCompactThreshold(): number {
+    const s = store.getState() as RootState;
+    const override = s.conversation?.compactThresholdOverride;
+    return typeof override === 'number' && Number.isFinite(override) ? override : this.config.compactThreshold;
   }
 
   // ---- 公开只读访问器（供 UI / BPC-4 接线判断）----
@@ -167,6 +179,14 @@ class BpcScheduler {
   evaluateWater(ctx: BpcWaterContext): void {
     if (!ctx.conversationId || ctx.modelContextWindow <= 0) return;
     if (this.circuitBroken) return;
+    // ★ 审查 M3：对话切换不重建 AgentLoop（attachLoop 不重跑），单例可能被【别的对话】的在途 BPC 占用。
+    //   当前对话来评估时若在途快照属于异对话，先丢弃它（让当前对话能触发自己的 BPC，不被旧对话独占），
+    //   并清熔断游标（异对话的 lastReplaceStepCursor / 计数对当前对话无意义，顺带解决审查 L3 的切换残留）。
+    if (this.snapshot && this.snapshot.conversationId !== ctx.conversationId) {
+      this.discardCurrent('对话切换，丢弃异对话在途 BPC');
+      this.lastReplaceStepCursor = null;
+      this.consecutiveImmediateRetrigger = 0;
+    }
     if (this.state !== 'idle') return;       // 已有在途/ready/replacing BPC，不重复触发
     if (this.inCooldown()) return;           // 冷却期不触发（inCooldown 内部会惰性收尾到期态）
 
@@ -246,39 +266,48 @@ class BpcScheduler {
     this.abortControllers.add(controller);
     this.setState('generating', { progress: 0.5 });
 
-    const task = (async () => {
+    // ★ 审查 H1 修复：task 内只【收集】结果意图，绝不在 try/finally 内直接发起 retry——
+    //   旧实现 retry 在 try 块内调 handleGenerationFailureOrAbort → runGeneration，但此刻 genPromise 尚未在
+    //   finally 清空，被入口防重入闸 `if (this.genPromise) return` 误挡 → BPC 永久卡死 snapshotting。
+    //   现统一在 `await task`（finally 已执行、genPromise=null）之后再裁决 ready/idle/retry/discard。
+    // task 返回结构化裁决（用返回值而非闭包外变量——TS 控制流无法窄化闭包内异步赋值，返回值类型安全）。
+    type GenDecision = { decision: 'ready' | 'no-new-segment' | 'failed' | 'discarded'; failReason: string };
+    const task: Promise<GenDecision> = (async (): Promise<GenDecision> => {
       try {
         const result = await loop.bpcGenerate(snapshot.conversationId, snapshot.compressedSegment, controller.signal);
         // 中途被丢弃（discardCurrent 把 snapshot 置 null / 换了别的快照）→ 不回写。
-        if (this.snapshot !== snapshot) return;
-        if (controller.signal.aborted) {
-          // 被 abort：交给 finally 后的 retry/discard 判定（这里不直接转态）。
-          return;
-        }
-        if (result.appended || result.recordMd) {
+        if (this.snapshot !== snapshot) return { decision: 'discarded', failReason: '' };
+        if (controller.signal.aborted) return { decision: 'failed', failReason: '后台生成被中止' };
+        // ★ 审查 M1 修复：只有真落新批（outcome==='appended'）才算 ready；旧前缀 recordMd 非空不代表本次成功。
+        if (result.outcome === 'appended') {
           snapshot.recordMd = result.recordMd;
-          this.setState('ready', { progress: 1 });
-        } else {
-          // 没真落批（batchSlice 空 / generateBatch 返回 null）→ 视作本次无效，δ 窗口内重试或放弃。
-          this.handleGenerationFailureOrAbort(snapshot, '生成未产出 record 批');
+          return { decision: 'ready', failReason: '' };
         }
+        if (result.outcome === 'no-new-segment') {
+          return { decision: 'no-new-segment', failReason: '' }; // 无新增段可压 → 回 idle（不重试、不记 cursor、不熔断累计）
+        }
+        return { decision: 'failed', failReason: '生成未产出 record 批' };
       } catch (err) {
-        if (this.snapshot === snapshot) {
-          this.handleGenerationFailureOrAbort(snapshot, String((err as Error)?.message ?? err));
-        }
+        return { decision: 'failed', failReason: String((err as Error)?.message ?? err) };
       } finally {
         this.abortControllers.delete(controller);
         this.genPromise = null;
-        // 若 task 内因 abort 提前 return（未转 ready/重试），在此按当前态兜底判定。
-        if (this.snapshot === snapshot && this.state === 'generating') {
-          if (controller.signal.aborted) {
-            this.handleGenerationFailureOrAbort(snapshot, '后台生成被中止');
-          }
-        }
       }
     })();
     this.genPromise = task;
-    await task;
+    const { decision, failReason } = await task;
+
+    // ---- task 已结束（finally 已置 genPromise=null）后统一裁决：retry 调 runGeneration 不再被防重入闸误挡 ----
+    if (this.snapshot !== snapshot || decision === 'discarded') return; // 期间被丢弃 / 换快照
+    if (decision === 'ready') {
+      this.setState('ready', { progress: 1 });
+    } else if (decision === 'no-new-segment') {
+      // 无新增段可压：直接回 idle（正常，不算失败，不污染熔断游标）。
+      this.snapshot = null;
+      this.setState('idle', { progress: 0 });
+    } else {
+      this.handleGenerationFailureOrAbort(snapshot, failReason);
+    }
   }
 
   /**
@@ -401,7 +430,11 @@ class BpcScheduler {
   private currentStepFromStore(conversationId: string): number | null {
     if (!this.loop) return null;
     try {
-      // 复用 computeBpcSnapshotInput 的 step 口径（它内部 identifyRounds 全量 store.messages）。
+      // ★ 审查 M2：computeBpcSnapshotInput 读的是【当前激活对话】的 store（它 void 掉 conversationId）。
+      //   对话已切换时当前 store 是新对话，拿它的 step 与旧对话 snapshot 的 targetReplaceStep 比窗口会串台 →
+      //   先校验身份，不一致返回 null（让 handleGenerationFailureOrAbort 走 discard，不做错对话的窗口判定）。
+      const liveId = ((store.getState() as RootState).conversation?.id as string | null) || AUTOSAVE_ID;
+      if (liveId !== conversationId) return null;
       return this.loop.computeBpcSnapshotInput(conversationId).snapshotStepCursor;
     } catch {
       return null;

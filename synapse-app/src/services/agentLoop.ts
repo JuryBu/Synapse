@@ -1502,8 +1502,8 @@ export class AgentLoop {
       source?: 'auto' | 'manual' | 'bpc';
       signal?: AbortSignal;
     },
-  ): Promise<{ recordMd: string | null; appended: boolean; totalSteps: number; totalRounds: number }> {
-    if (!conversationId) return { recordMd: null, appended: false, totalSteps: 0, totalRounds: 0 };
+  ): Promise<{ recordMd: string | null; appended: boolean; totalSteps: number; totalRounds: number; outcome: 'appended' | 'no-new-segment' | 'failed' }> {
+    if (!conversationId) return { recordMd: null, appended: false, totalSteps: 0, totalRounds: 0, outcome: 'failed' };
 
     const workspaceName = opts.workspaceName
       || ((store.getState() as RootState) as any).workspace?.name
@@ -1517,6 +1517,10 @@ export class AgentLoop {
     let appended = false;
     let totalSteps = 0;
     let totalRounds = 0;
+    // ★ M5-BPC 审查 M1/H1：区分「无新增段（no-new-segment，正常无需 BPC，回 idle）」与「真失败（failed，δ retry）」，
+    //   不再让旧前缀 recordMd 兜底掩盖真实失败（旧逻辑 appended||recordMd 会把「generateBatch 失败但有旧 record」
+    //   误判成功 → 误熔断）。默认 no-new-segment（batchSlice 空时保持）；落批成功→appended；生成/落库失败或 catch→failed。
+    let outcome: 'appended' | 'no-new-segment' | 'failed' = 'no-new-segment';
     try {
       const existingRecord = await getRecord(conversationId);
 
@@ -1588,6 +1592,7 @@ export class AgentLoop {
           });
           if (updated) {
             appended = true;
+            outcome = 'appended';
             // ★ R-L4 折叠触发：appendBatch 成功落库后，若可见（非 archived、非 meta）批数 > foldThreshold，
             //   折叠最老 foldBatchK 批为 1 元批（原文 archived 留库），再用折叠后的 record 重算注入前缀。
             //   foldOldBatches 内部对未达阈值 no-op、且全程吞异常（record 是加速层，绝不阻塞主对话）。
@@ -1626,13 +1631,20 @@ export class AgentLoop {
             } catch (saveErr) {
               console.warn('[agentLoop] 压缩后同步 autosave 失败（不阻塞主对话）:', saveErr);
             }
+          } else {
+            // appendBatch 水位门拒绝（双写竞态输了 / stepStart 脏写）→ 本次未落批，视作失败（交给 scheduler δ retry/discard）。
+            outcome = 'failed';
           }
+        } else {
+          // generateBatch 返回 null（LLM 失败 / 超时 / 被 signal 中止）→ 失败。
+          outcome = 'failed';
         }
       }
     } catch (err) {
+      outcome = 'failed';
       console.warn('[agentLoop] record 压缩失败，回退字符截断:', err);
     }
-    return { recordMd, appended, totalSteps, totalRounds };
+    return { recordMd, appended, totalSteps, totalRounds, outcome };
   }
 
   /**
@@ -1651,7 +1663,7 @@ export class AgentLoop {
     compressedSegment: ChatMessage[],
     signal?: AbortSignal,
     opts?: { workspaceName?: string; currentModel?: string },
-  ): Promise<{ recordMd: string | null; appended: boolean; totalSteps: number; totalRounds: number }> {
+  ): Promise<{ recordMd: string | null; appended: boolean; totalSteps: number; totalRounds: number; outcome: 'appended' | 'no-new-segment' | 'failed' }> {
     return this.generateAndAppend(conversationId, {
       compressedSegment,
       workspaceName: opts?.workspaceName,
@@ -1697,8 +1709,10 @@ export class AgentLoop {
 
   /**
    * ★ M5-BPC-4：run() while 循环每轮末的 BPC 水位评估钩子（fire-and-forget，绝不阻塞主循环）。
-   *   口径与 run 进入时 triggerTokens 对齐：systemTokens + toolsTokens（本轮不变，闭包传入）+ 当前 store
-   *   全量历史文本 token（store.messages 永远全量，压缩只改发送视图不动 store）+ 非文本 part 估算。
+   *   口径 = run 进入 assembledTokens 的本地估算部分：systemTokens + toolsTokens（本轮不变，闭包传入）+ 当前
+   *   store 全量历史文本 token（store.messages 永远全量，压缩只改发送视图不动 store）+ 非文本 part 估算。
+   *   ★ 审查 L2：刻意【不】取 run 进入那样的 max(apiRealTokens)——apiRealTokens 是上一轮 API 实测、对循环末已过时，
+   *     而 liveAssembled 是当前实时全量估算更准；方向偏保守（BPC 略晚触发），因 BPC 阈值本就低于硬阈值，无害。
    *   currentStepCursor 用 identifyRounds(过滤 tool 的 store.messages).totalSteps，与 snapshotStepCursor 同口径。
    *   scheduler.evaluateWater 内部自判 idle/冷却/熔断/阈值，本方法只负责按同口径算好水位上下文传入。
    */
