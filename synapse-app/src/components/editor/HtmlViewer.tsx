@@ -8,6 +8,41 @@ import { addNotification } from '@/store/slices/notifications';
 
 type HtmlMode = 'render' | 'source';
 
+// ★ UI-9：给渲染 iframe 注入统一滚动条样式。iframe srcDoc 是独立文档（opaque origin），app 全局
+//   ::-webkit-scrollbar 样式进不去，默认是浏览器原生粗白滚动条——与 app 其它区域不一致、突兀。
+//   注入细、半透明中性灰滚动条（深浅底都可见），与 app 风格统一。
+const HTML_SCROLLBAR_STYLE = '<style>'
+  + '::-webkit-scrollbar{width:12px;height:12px;}'
+  + '::-webkit-scrollbar-track{background:transparent;}'
+  + '::-webkit-scrollbar-thumb{background:rgba(140,140,160,0.45);border-radius:6px;border:3px solid transparent;background-clip:padding-box;}'
+  + '::-webkit-scrollbar-thumb:hover{background:rgba(140,140,160,0.65);background-clip:padding-box;}'
+  + '::-webkit-scrollbar-corner{background:transparent;}'
+  + '</style>';
+
+/**
+ * 把滚动条样式注入 HTML——★ 必须注入 <head> 内，绝不前置到 <!DOCTYPE>/<html> 之前
+ * （前置非空内容会触发 quirks mode、破坏用户 HTML 的渲染）。按 head→html→body→片段前置 兜底。
+ */
+function injectHtmlScrollbar(html: string): string {
+  const head = html.match(/<head[^>]*>/i);
+  if (head && head.index !== undefined) {
+    const at = head.index + head[0].length;
+    return html.slice(0, at) + HTML_SCROLLBAR_STYLE + html.slice(at);
+  }
+  const htmlTag = html.match(/<html[^>]*>/i);
+  if (htmlTag && htmlTag.index !== undefined) {
+    const at = htmlTag.index + htmlTag[0].length;
+    return html.slice(0, at) + '<head>' + HTML_SCROLLBAR_STYLE + '</head>' + html.slice(at);
+  }
+  const body = html.match(/<body[^>]*>/i);
+  if (body && body.index !== undefined) {
+    const at = body.index + body[0].length;
+    return html.slice(0, at) + HTML_SCROLLBAR_STYLE + html.slice(at);
+  }
+  // 纯片段（无 DOCTYPE/html/body）→ 前置安全（片段本就无标准渲染模式之分）。
+  return HTML_SCROLLBAR_STYLE + html;
+}
+
 interface HtmlViewerProps {
   tabId: string;
   filePath: string;
@@ -112,7 +147,7 @@ export function HtmlViewer({
               opaque origin 已从根上切断对父窗口同源资源/synapse 桥的访问，无需再叠不可靠的属性。 */}
           <iframe
             className="html-preview-frame"
-            srcDoc={content}
+            srcDoc={injectHtmlScrollbar(content)}
             sandbox="allow-scripts allow-popups"
             title={`HTML 预览: ${fileName}`}
             onLoad={() => setFrameLoading(false)}

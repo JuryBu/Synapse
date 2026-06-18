@@ -125,25 +125,25 @@ export function TabBar() {
     }));
 
     return [
-      { label: 'Show Opened Editors', icon: <ListOrdered size={14} />, onClick: () => { }, disabled: true },
+      { label: '已打开的编辑器', icon: <ListOrdered size={14} />, onClick: () => { }, disabled: true },
       ...openedItems,
       { label: '', onClick: () => { }, separator: true },
-      { label: 'Close All', icon: <XSquare size={14} />, shortcut: 'Ctrl+K W', onClick: () => { void closeAllWithConfirm(); } },
-      { label: 'Close Saved', icon: <Save size={14} />, shortcut: 'Ctrl+K U', onClick: () => closeSavedWithConfirm() },
+      { label: '全部关闭', icon: <XSquare size={14} />, shortcut: 'Ctrl+K W', onClick: () => { void closeAllWithConfirm(); } },
+      { label: '关闭已保存', icon: <Save size={14} />, shortcut: 'Ctrl+K U', onClick: () => closeSavedWithConfirm() },
       { label: '', onClick: () => { }, separator: true },
       {
-        label: 'Enable Preview Editors',
+        label: previewEnabled ? '预览编辑器：开' : '预览编辑器：关',
         icon: previewEnabled ? <Check size={14} /> : <Eye size={14} />,
         onClick: () => dispatch(togglePreviewEnabled(undefined)),
       },
       {
-        label: 'Lock Group',
+        label: groupLocked ? '锁定分组：开' : '锁定分组：关',
         icon: groupLocked ? <Check size={14} /> : <Lock size={14} />,
         onClick: () => dispatch(lockGroup(undefined)),
       },
       { label: '', onClick: () => { }, separator: true },
       {
-        label: 'Configure',
+        label: '设置',
         icon: <SlidersHorizontal size={14} />,
         onClick: () => {
           dispatch(setSidebarVisible(true));

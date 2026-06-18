@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useMemo } from 'react';
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { ChevronRight, ChevronDown, Copy, FolderOpen, Edit, Trash2, FilePlus, FolderPlus } from 'lucide-react';
 import type { FileNode } from '@/services/fileSystem';
 import { fileSystem } from '@/services/fileSystem';
@@ -53,6 +53,10 @@ function sortNodes(nodes: FileNode[]): FileNode[] {
 interface FileTreeItemProps {
   node: FileNode;
   depth: number;
+  /** ★ UI-6：per-workspace 持久化的展开路径集合（默认空=全收起）。 */
+  expandedPaths: Set<string>;
+  /** ★ UI-6：切换某文件夹展开/收起（主组件落 localStorage）。 */
+  onToggleExpand: (path: string) => void;
   onFileClick?: (node: FileNode) => void;
   onContextMenu?: (e: React.MouseEvent, node: FileNode) => void;
   editingPath?: string | null;
@@ -62,19 +66,20 @@ interface FileTreeItemProps {
   onEditCancel?: () => void;
 }
 
-function FileTreeItem({ node, depth, onFileClick, onContextMenu, editingPath, editingName, onEditNameChange, onEditSubmit, onEditCancel }: FileTreeItemProps) {
-  const [expanded, setExpanded] = useState(depth < 1);
+function FileTreeItem({ node, depth, expandedPaths, onToggleExpand, onFileClick, onContextMenu, editingPath, editingName, onEditNameChange, onEditSubmit, onEditCancel }: FileTreeItemProps) {
+  // ★ UI-6：展开态由主组件 per-workspace 持久化集合决定（默认全收起、记住每个文件夹的展开/收起状态）。
+  const expanded = expandedPaths.has(node.path);
   const isDir = node.type === 'directory';
   const isEditing = editingPath === node.path;
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleClick = useCallback(() => {
     if (isDir) {
-      setExpanded(prev => !prev);
+      onToggleExpand(node.path);
     } else {
       onFileClick?.(node);
     }
-  }, [isDir, node, onFileClick]);
+  }, [isDir, node, onFileClick, onToggleExpand]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -132,6 +137,8 @@ function FileTreeItem({ node, depth, onFileClick, onContextMenu, editingPath, ed
               key={child.path}
               node={child}
               depth={depth + 1}
+              expandedPaths={expandedPaths}
+              onToggleExpand={onToggleExpand}
               onFileClick={onFileClick}
               onContextMenu={onContextMenu}
               editingPath={editingPath}
@@ -163,6 +170,30 @@ export function FileTree({ root, onFileClick, onRefresh, onOpenWorkspace, onClea
   const [editingName, setEditingName] = useState('');
   // ★ M4-3-S5：root 顶层 children 也走文件夹优先排序（不原地 mutate root.children）。
   const sortedRootChildren = useMemo(() => sortNodes(root.children ?? []), [root.children]);
+
+  // ★ UI-6：文件夹展开态——默认全收起 + per-workspace 持久化（记住每个文件夹展开/收起）。
+  //   key 按 root.path 区分工作区；切工作区时按新 key 重载（下方 useEffect）。
+  const expandStorageKey = root.path ? `synapse-filetree-expanded:${root.path}` : '';
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
+    try {
+      const raw = expandStorageKey ? localStorage.getItem(expandStorageKey) : null;
+      return raw ? new Set<string>(JSON.parse(raw)) : new Set<string>();
+    } catch { return new Set<string>(); }
+  });
+  useEffect(() => {
+    try {
+      const raw = expandStorageKey ? localStorage.getItem(expandStorageKey) : null;
+      setExpandedPaths(raw ? new Set<string>(JSON.parse(raw)) : new Set<string>());
+    } catch { setExpandedPaths(new Set<string>()); }
+  }, [expandStorageKey]);
+  const toggleExpand = useCallback((path: string) => {
+    setExpandedPaths(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      try { if (expandStorageKey) localStorage.setItem(expandStorageKey, JSON.stringify([...next])); } catch { /* localStorage 不可用 */ }
+      return next;
+    });
+  }, [expandStorageKey]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, node: FileNode) => {
     setContextMenu({ x: e.clientX, y: e.clientY, mode: 'node', node });
@@ -479,6 +510,8 @@ export function FileTree({ root, onFileClick, onRefresh, onOpenWorkspace, onClea
           key={child.path}
           node={child}
           depth={0}
+          expandedPaths={expandedPaths}
+          onToggleExpand={toggleExpand}
           onFileClick={onFileClick}
           onContextMenu={handleContextMenu}
           editingPath={editingPath}
