@@ -1590,7 +1590,10 @@ export class AgentLoop {
             timeSpan: batchResult.timeSpan,
             source, // ★ M5-BPC-1/2：本批来源标注随 batch 落库（'auto'|'manual'|'bpc'）
           });
-          if (updated) {
+          // ★ 审查 HIGH（verify 二轮）：appendBatch 拒写（脏写 recordStore:482 / 并发水位门 :519）返回的是【旧 record】
+          //   (existing 非空) 而非 null——BPC 稳态(已有 record)下不能只判 updated 真值，否则并发拒写会被误判 appended →
+          //   假 ready → 误熔断（M1 失败模式从 recordMd 层下移到 updated 层）。必须确认水位真推进(totalSteps>stepStart)才算真落本批。
+          if (updated && updated.totalSteps > stepStart) {
             appended = true;
             outcome = 'appended';
             // ★ R-L4 折叠触发：appendBatch 成功落库后，若可见（非 archived、非 meta）批数 > foldThreshold，
@@ -1632,7 +1635,8 @@ export class AgentLoop {
               console.warn('[agentLoop] 压缩后同步 autosave 失败（不阻塞主对话）:', saveErr);
             }
           } else {
-            // appendBatch 水位门拒绝（双写竞态输了 / stepStart 脏写）→ 本次未落批，视作失败（交给 scheduler δ retry/discard）。
+            // updated 为 null（首批被拒）或 totalSteps 未推进（拒写返回旧 record、水位没动）→ 本次未真落批，视作失败
+            //   （交给 scheduler δ retry / discard，绝不假 ready）。
             outcome = 'failed';
           }
         } else {

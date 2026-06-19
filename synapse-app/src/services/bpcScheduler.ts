@@ -100,7 +100,8 @@ class BpcScheduler {
     // ★ 审查 L1：预压阈值必须 < 硬压缩阈值，否则 run() 先撞硬阈值同步压缩、ratio 永远到不了预压线 → BPC 静默永不触发。
     //   clamp 到 compactThreshold - 0.05 上限（留触发空间），即便用户误配 bpcThreshold >= compactThreshold 也能工作。
     const compactCeil = this.effectiveCompactThreshold() - 0.05;
-    return Math.min(raw, Math.max(0, compactCeil));
+    // ★ 审查 verify 二轮 L1：raw 也做下限 clamp（Number.isFinite 不挡负数）——负 override 会让 ratio>=threshold 恒真空触发。
+    return Math.max(0, Math.min(raw, Math.max(0, compactCeil)));
   }
 
   /** 生效硬压缩水位 = 本对话覆盖 ?? 全局默认（口径与 agentLoop.resolveCompactThreshold 一致，供 L1 clamp 用）。 */
