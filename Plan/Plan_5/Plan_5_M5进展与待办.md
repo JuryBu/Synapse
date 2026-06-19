@@ -29,7 +29,7 @@ R-L1~R-L5 全部实现 + 4-lens 对抗审查（「水位/幂等门」「R-L5/落
 待真机复核（小本本）：个别 badge/mode-switch 对比度边角若主人真机发现再点修；mermaid 图表渲染待有真实 mermaid 消息时一眼确认（配色取自已验证的浅色 token，编译通过）。
 P2 保留不改：代码块/编辑器固定 GitHub dark 配色（深底浅字对比 OK，设计取舍）。
 
-## 🟡 M5-BPC（后台预压缩）— PhaseA/B 完成，PhaseC（UI）待做
+## ✅ M5-BPC（后台预压缩）— 全部完成（PhaseA 底座 + PhaseB 接线 + PhaseC UI）
 
 详细蓝图见 `Plan_5_梯队三实现蓝图.md`（BPC-0~BPC-8）。
 
@@ -52,12 +52,15 @@ P2 保留不改：代码块/编辑器固定 GitHub dark 配色（深底浅字对
   - 一轮（单 opus agent）：修 H1 retry 死锁（task 内调 retry 被 genPromise 防重入闸挡死→永卡 snapshotting）+ M1 ready 误判 + M2/M3 对话身份串台 + L1 阈值 clamp（commit 03f83d4）
   - 二轮（5 视角 verify workflow）：揪出 HIGH「appended 误判」——appendBatch 拒写(脏写 recordStore:482 / 并发水位门:519)返回的是【旧 record】(非 null)，if(updated) 把它误判落批 → 假 ready → 注入陈旧前缀+水位没降 → 下轮 gap<=1 误熔断（M1 失败模式下移到 updated 层）；改判据 `updated.totalSteps>stepStart` + L1 防负 clamp（commit 4ec25f0）。H1/M1/M2/M3/降级安全全 pass
 
-### ⏭ PhaseC（待做）— UI 压缩环 + 分隔线 + 设置面板（BPC-6/7/8）
-- CompressionRing（footer/context tab/StatusBar 三处，订阅 bpc slice）：idle token% / generating 环+中止 × / cooldown / circuit-broken+重启按钮
-- CompactDivider（替内联分隔线）：按 source 三态（manual/auto/bpc 专属图标渐变）
-- SettingsPanel 压缩设置区：BPC 5 参 + recordLayering 6 参（顺手补 R-L2 欠的 UI）+ 风险校验黄字（阈值距离过近/过低）+ 本对话覆盖入口
-- BPC-8 手动自检（渐进对话触达阈值观察后台压缩→替换；δ/超大输入/中止冷却/熔断/override 持久化）
-- 注：熔断后重启入口在 PhaseC CompressionRing/设置；PhaseB 暂无 restart 入口，熔断后降级回硬阈值压缩（安全）
+### ✅ PhaseC UI 收尾（commit 1e068d9）— BPC 完整可用
+- CompressionRing（footer/context tab/StatusBar 三处统一收敛，订阅 bpc slice）：idle token%（红黄灰）/ snapshotting·generating spin 环+「后台压缩中」+中止× / replacing / cooldown「冷却中 Nm」/ circuit-broken 红「BPC 已停」+重启↻（→ scheduler.restart，熔断重启入口已补）
+- CompactDivider（替内联虚线）：按 record 批 source 三态（manual 灰 / auto 蓝 / bpc 紫渐变）；recordBatchStepEnds 升级为带 source/index 的 BatchMark + extractBatchMarks helper 两处填充共用
+- SettingsPanel 压缩设置区（替写死占位）：BPC 5 参（预压/硬压水位滑杆 + δ/冷却/熔断间距）+ 风险校验黄字（阈值距离过近/过低，纯前端不阻止保存）+ Record 分层 6 参（补 R-L2 欠的 UI）
+- 真机验证（playwright + vite dev 深浅色）：CompressionRing idle/generating/circuit-broken 三态渲染正确；设置面板 BPC+分层区深浅色对比清晰美观；风险校验黄字触发正确（rgb(245,158,11)）。CompactDivider 三态靠 CSS+逻辑审查（web 空对话无 record，留主人真机确认）
+- 小缺口（可选）：本对话覆盖 UI（conversation override）未在设置面板暴露（设置面板全局语义）；override reducer+持久化已就位（PhaseA），后续可加 /命令入口
+
+## 🎉 M5-BPC 全部完成 + M5 梯队三收官
+后台预压缩从设计到 UI 全链路落地，两轮对抗审查通过（H1 retry 死锁 + 二轮 HIGH appended 误判均修）。M5 梯队三（M5-RL 分层 + M5-BPC 预压缩）完成。
 
 ### R-L6（BPC 衔接，可选）
 PhaseC 后评估：scheduler 生成前 predictRecordPrefixTokens 超 maxRatio 提前 foldOldBatches。
