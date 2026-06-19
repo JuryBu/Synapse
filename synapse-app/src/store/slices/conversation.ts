@@ -48,6 +48,10 @@ export interface FileDiffSummary {
   beforeHash?: string;
   afterHash?: string;
   hunks?: FileDiffHunk[];
+  /** ★ worktree 隔离（审查 HIGH）：产生此 diff 时的执行上下文 id（= ctx.contextId）。回滚/审阅据此经
+   *  resolveWorktreePath 重定向到当时的 worktree，避免落到主工作区（created 误删同名文件 / edited afterHash 不匹配）。
+   *  旧 diff 无此字段（undefined）→ 重定向短路 = 主工作区，行为同改造前，向后兼容。 */
+  contextId?: string;
 }
 
 export interface FileDiffHunk {

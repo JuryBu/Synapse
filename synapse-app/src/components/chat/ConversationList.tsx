@@ -361,9 +361,12 @@ export function ConversationList() {
 
     await deleteConversationSnapshot(id);
     dispatch(removeConversation(id));
+    // ★ 审查 LOW：删对话同步清其 worktree 运行态条目（与切换/新建/分支入口口径一致），防运行态泄漏。
+    dispatch(exitWorktree({ contextId: id }));
     if (selectedId === id) {
       dispatch(setSelectedId(null));
       dispatch(clearConversation());
+      dispatch(exitWorktree({ contextId: AUTOSAVE_ID }));
     }
     await refreshConversations();
     dispatch(addNotification({ type: 'info', title: '已删除', message: '对话已删除，工作区文件未受影响' }));
@@ -375,10 +378,14 @@ export function ConversationList() {
     setBulkBusy(true);
     try {
       await deleteConversationSnapshots(selectedIds);
-      selectedIds.forEach(id => dispatch(removeConversation(id)));
+      selectedIds.forEach(id => {
+        dispatch(removeConversation(id));
+        dispatch(exitWorktree({ contextId: id })); // ★ 审查 LOW：删对话同步清 worktree 条目
+      });
       if (selectedId && selectedIds.includes(selectedId)) {
         dispatch(setSelectedId(null));
         dispatch(clearConversation());
+        dispatch(exitWorktree({ contextId: AUTOSAVE_ID }));
       }
       setSelectedIds([]);
       await refreshConversations();

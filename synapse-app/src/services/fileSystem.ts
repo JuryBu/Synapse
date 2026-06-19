@@ -110,7 +110,7 @@ export async function resolveWorktreePath(rawPath: string, contextId?: string): 
     const baseStripped = stripTrailingSep(base);
     const norm = rawPath.replace(/\\/g, '/');
     const baseNorm = baseStripped.replace(/\\/g, '/');
-    if (norm === baseNorm) return root;
+    if (norm.toLowerCase() === baseNorm.toLowerCase()) return root; // ★ 审查 LOW：与下方前缀判断统一用不区分大小写（Windows 大小写不敏感）
     if (norm.toLowerCase().startsWith(`${baseNorm.toLowerCase()}/`)) {
       return `${root}/${norm.slice(baseNorm.length + 1)}`;
     }
@@ -465,9 +465,11 @@ class FileSystemService {
     return dirPath;
   }
 
-  async deleteFile(filePath: string): Promise<void> {
+  async deleteFile(filePath: string, contextId?: string): Promise<void> {
     if (isElectron && window.synapse) {
-      await window.synapse.file.delete(filePath);
+      // ★ worktree 隔离（审查 HIGH）：删除也走 worktree 重定向（与 readFile/writeFile 口径一致），
+      //   避免回滚 created diff 时删到主工作区同名文件。无活动 worktree 则 resolveWorktreePath 原样透传。
+      await window.synapse.file.delete(await resolveWorktreePath(filePath, contextId));
       this.notify();
       return;
     }

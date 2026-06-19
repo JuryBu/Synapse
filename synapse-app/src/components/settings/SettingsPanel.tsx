@@ -53,6 +53,7 @@ import { AIClient } from '@/services/aiClient';
 import { describeCapabilities } from '@/services/modelCapabilities';
 import type { AIModelOption } from '@/types/aiModel';
 import { addNotification } from '@/store/slices/notifications';
+import { exitWorktreeByPath } from '@/store/slices/worktreeSession';
 import { isElectron, platform } from '@/platform';
 import type { PlatformInfo, WorktreeEntry } from '@/platform';
 // ★ M4-7-S4：启停 MCP server 后刷新桥接，使工具进/出 toolRegistry。
@@ -601,6 +602,8 @@ export function SettingsPanel() {
         return;
       }
       dispatch(addNotification({ type: 'warning', title: '工作树已删除', message: targetPath }));
+      // ★ 审查 MEDIUM：清掉所有仍指向该已删 worktree 的运行态条目，防后续 fs/命令重定向到已不存在的目录。
+      dispatch(exitWorktreeByPath({ path: targetPath }));
       await refreshWorktrees();
     } catch (error: any) {
       dispatch(addNotification({ type: 'error', title: '删除工作树失败', message: error?.message ?? '未知错误' }));

@@ -957,6 +957,13 @@ export class AgentLoop {
 
     let round = 0;
 
+    // ★ 审查 LOW（lens2）：run 入口快照执行上下文 id，整轮 run 期间复用——不再 while 内每轮重读 store.conversation.id。
+    //   原每轮重读：流式中途用户切对话会让在途工具的 execContextId 漂移成新对话身份，去取新对话的 worktree 隔离根
+    //   执行旧对话的在途工具（窄串台窗口）。run 入口快照后整轮身份不可变，与子代理路径（构造期固定 contextId）口径统一。
+    const execContextId = this.contextId
+      || ((store.getState() as RootState).conversation?.id as string | null)
+      || AUTOSAVE_ID;
+
     while (this.running && round < maxRounds) {
       round++;
       store.dispatch(setStreaming(true));
@@ -1279,12 +1286,7 @@ export class AgentLoop {
 
       // Execute tool calls if any
       if (pendingToolCalls.length > 0 && this.toolExecutor) {
-        // M2-5 / M3：本轮工具执行的上下文 id。优先实例 contextId（M3 子代理各自固定），
-        // 否则回退【执行此刻】的当前对话 id ?? AUTOSAVE_ID——worktree 活动态随对话身份走，
-        // 与「切换对话清 worktree（不串台）」配套，且新对话（id=null）也有稳定键 AUTOSAVE_ID。
-        const execContextId = this.contextId
-          || ((store.getState() as RootState).conversation?.id as string | null)
-          || AUTOSAVE_ID;
+        // execContextId 已在 run 入口快照（见 while 前），整轮 run 复用，不再每轮重读 store（防流式中切对话身份漂移）。
         for (const tc of pendingToolCalls) {
           if (!this.running) break;
           const toolStartedAt = Date.now();

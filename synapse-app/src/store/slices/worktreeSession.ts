@@ -1,5 +1,10 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 
+/** worktree 路径归一（反斜杠→正斜杠 + 去尾斜杠 + 小写），用于跨 Windows 大小写/分隔符的路径相等比较。 */
+function normalizeWtPath(p: string | null | undefined): string {
+  return (p ?? '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
 /**
  * M2-5：会话级「活动 worktree」运行态（M3 演进：按执行上下文索引）。
  *
@@ -81,6 +86,17 @@ export const worktreeSessionSlice = createSlice({
     clearAllWorktrees(state) {
       state.byContext = {};
     },
+    /** ★ 审查 MEDIUM：删除某 worktree 目录后，清掉所有仍指向该路径的悬空条目（防后续 fs/命令重定向到已删目录）。
+     *  路径归一比较，兼容 Windows 大小写/分隔符差异。 */
+    exitWorktreeByPath(state, action: PayloadAction<{ path: string }>) {
+      const target = normalizeWtPath(action.payload?.path);
+      if (!target) return;
+      for (const contextId of Object.keys(state.byContext)) {
+        if (normalizeWtPath(state.byContext[contextId].activeWorktreePath) === target) {
+          delete state.byContext[contextId];
+        }
+      }
+    },
   },
   extraReducers: (builder) => {
     // ★ medium#6 次生项：工作区打开/切换/关闭 → 所有 worktree 的锚定基准（repoRoot/工作区根）都变了，
@@ -98,7 +114,7 @@ export const worktreeSessionSlice = createSlice({
   },
 });
 
-export const { enterWorktree, exitWorktree, clearAllWorktrees } = worktreeSessionSlice.actions;
+export const { enterWorktree, exitWorktree, exitWorktreeByPath, clearAllWorktrees } = worktreeSessionSlice.actions;
 
 /**
  * 从 worktreeSession state 读出某上下文的活动 worktree 条目（无则 null）。

@@ -107,7 +107,7 @@ function materializeReviewedContent(beforeContent: string, hunks: Array<FileDiff
 export async function rollbackFileDiff(diff: FileDiffSummary, snapshot?: FileSnapshot): Promise<void> {
   let currentContent = '';
   try {
-    currentContent = await fileSystem.readFile(diff.path);
+    currentContent = await fileSystem.readFile(diff.path, diff.contextId);
   } catch (err) {
     if (diff.changeType === 'created') return;
     throw err;
@@ -126,7 +126,7 @@ export async function rollbackFileDiff(diff: FileDiffSummary, snapshot?: FileSna
   }
 
   if (diff.changeType === 'created') {
-    await fileSystem.deleteFile(diff.path);
+    await fileSystem.deleteFile(diff.path, diff.contextId);
     return;
   }
 
@@ -134,7 +134,7 @@ export async function rollbackFileDiff(diff: FileDiffSummary, snapshot?: FileSna
     throw new Error(`缺少回退快照: ${diff.path}`);
   }
 
-  await fileSystem.writeFile(diff.path, snapshot.content ?? '');
+  await fileSystem.writeFile(diff.path, snapshot.content ?? '', diff.contextId);
 }
 
 export async function applyHunkReview(
@@ -162,7 +162,7 @@ export async function applyHunkReview(
   const expectedContent = materializeReviewedContent(beforeContent, currentHunks);
   let currentContent = '';
   try {
-    currentContent = await fileSystem.readFile(diff.path);
+    currentContent = await fileSystem.readFile(diff.path, diff.contextId);
   } catch (err) {
     if (diff.changeType === 'created' && expectedContent.length === 0) {
       currentContent = '';
@@ -187,10 +187,10 @@ export async function applyHunkReview(
   const normalizedNextHunks = nextHunks.map(hunk => ({ ...hunk, status: summarizeBlockStatus(hunk) }));
   const nextContent = materializeReviewedContent(beforeContent, normalizedNextHunks);
   if (diff.changeType === 'created' && nextContent.length === 0 && normalizedNextHunks.every(hunk => hunk.blocks?.every(block => block.status === 'rejected') ?? hunk.status === 'rejected')) {
-    await fileSystem.deleteFile(diff.path);
+    await fileSystem.deleteFile(diff.path, diff.contextId);
     return;
   }
-  await fileSystem.writeFile(diff.path, nextContent);
+  await fileSystem.writeFile(diff.path, nextContent, diff.contextId);
 }
 
 export async function applyDiffReview(
@@ -212,7 +212,7 @@ export async function applyDiffReview(
     }
     let currentContent = '';
     try {
-      currentContent = await fileSystem.readFile(diff.path);
+      currentContent = await fileSystem.readFile(diff.path, diff.contextId);
     } catch (err) {
       if (diff.changeType === 'created') throw err;
       throw err;
@@ -232,7 +232,7 @@ export async function applyDiffReview(
   const expectedContent = materializeReviewedContent(beforeContent, currentHunks);
   let currentContent = '';
   try {
-    currentContent = await fileSystem.readFile(diff.path);
+    currentContent = await fileSystem.readFile(diff.path, diff.contextId);
   } catch (err) {
     if (diff.changeType === 'created' && expectedContent.length === 0) {
       currentContent = '';
@@ -257,10 +257,10 @@ export async function applyDiffReview(
 
   const nextContent = materializeReviewedContent(beforeContent, nextHunks);
   if (diff.changeType === 'created' && nextContent.length === 0 && nextHunks.every(hunk => hunk.blocks?.every(block => block.status === 'rejected') ?? hunk.status === 'rejected')) {
-    await fileSystem.deleteFile(diff.path);
+    await fileSystem.deleteFile(diff.path, diff.contextId);
     return;
   }
-  await fileSystem.writeFile(diff.path, nextContent);
+  await fileSystem.writeFile(diff.path, nextContent, diff.contextId);
 }
 
 export async function applyBlockReview(
@@ -290,7 +290,7 @@ export async function applyBlockReview(
   const expectedContent = materializeReviewedContent(beforeContent, currentHunks);
   let currentContent = '';
   try {
-    currentContent = await fileSystem.readFile(diff.path);
+    currentContent = await fileSystem.readFile(diff.path, diff.contextId);
   } catch (err) {
     if (diff.changeType === 'created' && expectedContent.length === 0) {
       currentContent = '';
@@ -311,8 +311,8 @@ export async function applyBlockReview(
   });
   const nextContent = materializeReviewedContent(beforeContent, nextHunks);
   if (diff.changeType === 'created' && nextContent.length === 0 && nextHunks.every(hunk => hunk.blocks?.every(block => block.status === 'rejected') ?? hunk.status === 'rejected')) {
-    await fileSystem.deleteFile(diff.path);
+    await fileSystem.deleteFile(diff.path, diff.contextId);
     return;
   }
-  await fileSystem.writeFile(diff.path, nextContent);
+  await fileSystem.writeFile(diff.path, nextContent, diff.contextId);
 }
