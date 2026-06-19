@@ -64,3 +64,17 @@ P2 保留不改：代码块/编辑器固定 GitHub dark 配色（深底浅字对
 
 ### R-L6（BPC 衔接，可选）
 PhaseC 后评估：scheduler 生成前 predictRecordPrefixTokens 超 maxRatio 提前 foldOldBatches。
+
+## 🔍 待主人真机核验（BPC 需运行时触发，单测/playwright 注入难覆盖，攒一起验）
+
+> 这些都要真实长对话 / 真实 record 数据才能验，playwright web 模式造不出来。BPC 逻辑层已两轮对抗审查通过、
+> UI 层 playwright 注入验过三态，但「端到端真实链路」需主人 electron 真机跑。攒在这里，下次一起核验。
+
+- [ ] **BPC 端到端**：渐进对话触达 bpcThreshold(默认 68%) → footer CompressionRing 转「后台压缩中」spin 环 → 后台生成完转 ready → 下一轮发请求无缝替换（footer 回 idle + token 回落 + 消息流插入 BPC 紫色分隔线）
+- [ ] **CompactDivider 三态视觉**：manual（手动 /compact 灰）/ auto（撞 90% 自动蓝）/ bpc（后台预压紫渐变）三种分隔线配色 + 图标，需真实 record 压缩点才显示；确认浅色下也好看
+- [ ] **δ 窗口**：ready 早于 targetReplaceStep 即用；生成失败在 δ 窗口内自动 retry；越 δ 上限仍无 ready → 退硬阻塞兜底
+- [ ] **边界①②（超大输入）**：单条超大输入一瞬撞 0.9 → 直接硬阻塞同步压缩（不等 BPC，discardCurrent 丢在途）
+- [ ] **中止冷却**：footer 环上点中止 × → 进 cooldown「冷却中 Nm」，冷却期内不再触发 BPC
+- [ ] **熔断**：构造「压完几乎没推进又触发」连续 2 次 → 熔断弹窗 + footer 转红「BPC 已停」+ 重启 ↻ 按钮可恢复
+- [ ] **设置面板调参生效**：改 bpcThreshold/compactThreshold/δ/冷却/熔断间距 后行为跟随；改 recordLayering 6 参后注入前缀分层跟随
+- [ ] **中止 × / 重启 ↻ 按钮**真机点击 → scheduler.abort() / restart() 行为正确
