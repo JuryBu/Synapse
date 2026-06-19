@@ -24,6 +24,8 @@ import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fra
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { bpcScheduler } from '@/services/bpcScheduler';
+import { CompressionRing } from './CompressionRing';
+import { CompactDivider, extractBatchMarks, type BatchMark, type BatchSource } from './CompactDivider';
 import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
 import { mcpBridge } from '@/services/mcpBridge';
@@ -246,17 +248,13 @@ export function AgentPanel() {
   // 多条「压缩点」分隔线（展示仍完整原文）。空 record 时为空数组。
   // 问题1：新对话 id 为 null 时回退 AUTOSAVE_ID（autosave 落盘用同一 id），让 record 分隔线/回溯也对新对话生效。
   const conversationId = (conversation.id as string | null) || AUTOSAVE_ID;
-  const [recordBatchStepEnds, setRecordBatchStepEnds] = useState<number[]>([]);
+  const [recordBatchMarks, setRecordBatchMarks] = useState<BatchMark[]>([]);
   useEffect(() => {
     let cancelled = false;
-    if (!conversationId) { setRecordBatchStepEnds([]); return; }
+    if (!conversationId) { setRecordBatchMarks([]); return; }
     void getRecord(conversationId).then(rec => {
       if (cancelled) return;
-      const ends = (rec?.batches ?? [])
-        .filter(b => !b.meta) // ★ R-L4 审查 #1：元批 stepEnd 必等于某 archived 批，过滤防同边界分隔线重复标签
-        .map(b => b.stepEnd)
-        .filter(s => s > 0);
-      setRecordBatchStepEnds(ends);
+      setRecordBatchMarks(extractBatchMarks(rec)); // ★ M5-BPC-7：带 source 的批标记（extractBatchMarks 内部过滤元批 + 编号）
     });
     return () => { cancelled = true; };
   }, [conversationId, messages.length]);
@@ -264,19 +262,19 @@ export function AgentPanel() {
   // 把各批 stepEnd（不含 tool 计数）映射到含-tool 的真实 messages 下标：
   // 分隔线画在「该批最后一条非-tool 消息」之后。返回 Map<messageIdx, [批序号...]>。
   const batchDividerByIdx = useMemo(() => {
-    const map = new Map<number, number[]>();
-    if (recordBatchStepEnds.length === 0) return map;
-    const endSet = new Map<number, number[]>(); // stepEnd -> 批序号列表
-    recordBatchStepEnds.forEach((end, i) => {
-      const arr = endSet.get(end) ?? [];
-      arr.push(i);
-      endSet.set(end, arr);
+    const map = new Map<number, { index: number; source: BatchSource }[]>();
+    if (recordBatchMarks.length === 0) return map;
+    const endMap = new Map<number, { index: number; source: BatchSource }[]>(); // stepEnd -> 批标记列表
+    recordBatchMarks.forEach(m => {
+      const arr = endMap.get(m.stepEnd) ?? [];
+      arr.push({ index: m.index, source: m.source });
+      endMap.set(m.stepEnd, arr);
     });
     let eligibleCount = 0;
     for (let idx = 0; idx < messages.length; idx++) {
       if ((messages[idx] as any).role === 'tool') continue;
       eligibleCount += 1;
-      const hit = endSet.get(eligibleCount);
+      const hit = endMap.get(eligibleCount);
       if (hit) {
         // 分隔线挂在「下一条消息之前」，即该批最后一条非-tool 消息的下一个下标。
         const dividerIdx = idx + 1;
@@ -285,7 +283,7 @@ export function AgentPanel() {
       }
     }
     return map;
-  }, [recordBatchStepEnds, messages]);
+  }, [recordBatchMarks, messages]);
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRef[]>([]);
   const [previewAttachment, setPreviewAttachment] = useState<AttachmentRef | null>(null);
   // M2-R6 渲染还原：历史消息的 image 附件落库后只有 sha256（无 previewUrl base64），
@@ -1050,8 +1048,7 @@ export function AgentPanel() {
         const afterBatchCount = after?.batches?.length ?? 0;
         // 压缩点 UI 交还 batchDividerByIdx 分隔线：归一后 store.messages 长度不变，stepEnds effect 不会自动重算，
         // 这里主动用重读到的 record 刷新各批 stepEnd，让新批的「已压缩」分隔线立即画出。
-        const ends = (after?.batches ?? []).filter(b => !b.meta).map(b => b.stepEnd).filter(s => s > 0); // ★ R-L4 审查 #1：过滤元批防分隔线重复标签
-        setRecordBatchStepEnds(ends);
+        setRecordBatchMarks(extractBatchMarks(after)); // ★ M5-BPC-7：带 source 的批标记（extractBatchMarks 内部过滤元批 + 编号）
         if (!recordMd || afterBatchCount <= priorBatchCount) {
           dispatch(addNotification({ type: 'info', title: '手动压缩', message: '本次没有可压缩为摘要的历史（已是最新）' }));
           return;
@@ -1650,11 +1647,7 @@ export function AgentPanel() {
   // M4-1-S3：统一走 selector 纯函数版（fallback 链 capabilities.contextWindow ?? option.contextWindow ?? MAX_CONTEXT_TOKENS）
   const effectiveContextWindow = getModelContextWindowForOption(currentModelOption);
   const tokenRatio = effectiveContextWindow > 0 ? tokenCount / effectiveContextWindow : 0;
-
-  const formatTokens = (n: number) => {
-    if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-    return String(n);
-  };
+  // ★ M5-BPC-6：token 显示统一收敛进 CompressionRing（footer/context/StatusBar），原 formatTokens 局部函数随之移除。
 
   const filteredModels = useMemo(() => {
     const q = modelSearch.trim().toLowerCase();
@@ -2125,12 +2118,7 @@ export function AgentPanel() {
                 {messages.map((msg: any, idx: number) => (
                   <Fragment key={msg.id}>
                     {batchDividerByIdx.has(idx) && (
-                      <div
-                        style={{ textAlign: 'center', fontSize: 11, color: 'var(--syn-text-muted)', padding: '6px 12px', margin: '6px 0', borderTop: '1px dashed rgba(255,255,255,0.12)', opacity: 0.75 }}
-                        title="此线以上的历史已压缩为 record 摘要批次；发送给 AI 时用摘要代替原文，这里仍显示完整对话"
-                      >
-                        ⌁ record 批次 {batchDividerByIdx.get(idx)!.map(i => `#${i + 1}`).join('、')} 边界 — 以上已压缩为摘要，AI 看摘要 + 最近对话 ⌁
-                      </div>
+                      <CompactDivider marks={batchDividerByIdx.get(idx)!} />
                     )}
                   <MessageBubble
                     id={msg.id}
@@ -2219,8 +2207,13 @@ export function AgentPanel() {
             <div className="context-section">
               <div className="context-label">Token 使用</div>
               <div className="context-value">
-                {formatTokens(tokenCount)} / {formatTokens(effectiveContextWindow)}
-                ({Math.round(tokenRatio * 100)}%)
+                {/* ★ M5-BPC-6：context tab token 区同步 CompressionRing（inline 变体，无操作按钮）。 */}
+                <CompressionRing
+                  variant="inline"
+                  tokenCount={tokenCount}
+                  effectiveContextWindow={effectiveContextWindow}
+                  tokenRatio={tokenRatio}
+                />
               </div>
             </div>
             <div className="context-section">
@@ -2386,16 +2379,13 @@ export function AgentPanel() {
           )}
         </div>
         <div className="agent-input-footer">
-          <span
-            className="token-counter"
-            style={{
-              color: tokenRatio > 0.8 ? 'var(--syn-error)'
-                : tokenRatio > 0.5 ? '#f59e0b'
-                  : 'var(--syn-text-muted)'
-            }}
-          >
-            Token: {formatTokens(tokenCount)} / {formatTokens(effectiveContextWindow)} ({Math.round(tokenRatio * 100)}%)
-          </span>
+          {/* ★ M5-BPC-6：footer 主入口换成 CompressionRing——idle 显常规 token%，BPC 后台活跃时显状态环 + 中止/重启按钮。 */}
+          <CompressionRing
+            variant="full"
+            tokenCount={tokenCount}
+            effectiveContextWindow={effectiveContextWindow}
+            tokenRatio={tokenRatio}
+          />
           {capabilityLabels.length > 0 && (
             <button
               className="model-capability-row"

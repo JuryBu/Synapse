@@ -31,6 +31,9 @@ import {
   setMaxTokens,
   setReasoningEffort,
   setSpeedTier,
+  setRecordLayering,
+  setBpc,
+  DEFAULT_BPC_CONFIG,
 } from '@/store/slices/agentSettings';
 import type { WallpaperImage } from '@/store/slices/agentSettings';
 import {
@@ -1108,14 +1111,99 @@ export function SettingsPanel() {
               <span className="setting-hint">最大输出 Token 数</span>
             </div>
 
-            <h3 style={{ marginTop: 24 }}>📝 压缩策略</h3>
+            {/* ★ M5-BPC-7：后台预压缩 (BPC) 设置区（替换原写死占位）。scheduler 读 agentSettings.bpc。 */}
+            <h3 style={{ marginTop: 24 }}>🔄 后台预压缩 (BPC)</h3>
             <div className="setting-item">
-              <label>CHECKPOINT 触发阈值</label>
-              <span className="setting-hint">当上下文超过 Token 限制的 80% 时自动压缩</span>
+              <label>预压触发水位</label>
+              <input type="range" min="40" max="90" step="1"
+                value={Math.round((agentSettings.bpc?.bpcThreshold ?? DEFAULT_BPC_CONFIG.bpcThreshold) * 100)}
+                onChange={e => dispatch(setBpc({ bpcThreshold: Number(e.target.value) / 100 }))} />
+              <span>{Math.round((agentSettings.bpc?.bpcThreshold ?? DEFAULT_BPC_CONFIG.bpcThreshold) * 100)}%</span>
             </div>
             <div className="setting-item">
-              <label>每次压缩保留</label>
-              <span className="setting-hint">保留最近 4 条消息 + 系统摘要</span>
+              <label>硬压缩水位</label>
+              <input type="range" min="50" max="95" step="1"
+                value={Math.round((agentSettings.bpc?.compactThreshold ?? DEFAULT_BPC_CONFIG.compactThreshold) * 100)}
+                onChange={e => dispatch(setBpc({ compactThreshold: Number(e.target.value) / 100 }))} />
+              <span>{Math.round((agentSettings.bpc?.compactThreshold ?? DEFAULT_BPC_CONFIG.compactThreshold) * 100)}%</span>
+            </div>
+            {(() => {
+              // ★ M5-BPC-7 风险校验（§8.2④，纯前端提示、不阻止保存）：阈值距离过近 / 预压过低易频繁压缩。
+              const b = agentSettings.bpc?.bpcThreshold ?? DEFAULT_BPC_CONFIG.bpcThreshold;
+              const c = agentSettings.bpc?.compactThreshold ?? DEFAULT_BPC_CONFIG.compactThreshold;
+              return ((c - b) < 0.2 || b < 0.4) ? (
+                <div className="setting-item">
+                  <span className="setting-hint" style={{ color: 'var(--syn-warning)' }}>
+                    ⚠️ 预压与硬压阈值距离过近（&lt;20%）或预压阈值过低（&lt;40%），可能频繁触发后台压缩
+                  </span>
+                </div>
+              ) : null;
+            })()}
+            <div className="setting-item">
+              <label>δ 替换窗口</label>
+              <input type="number" min="1" max="10" step="1" style={{ width: 100 }}
+                value={agentSettings.bpc?.deltaSteps ?? DEFAULT_BPC_CONFIG.deltaSteps}
+                onChange={e => dispatch(setBpc({ deltaSteps: Number(e.target.value) }))} />
+              <span className="setting-hint">后台压缩最晚在 N step 内替换，超时退硬压缩</span>
+            </div>
+            <div className="setting-item">
+              <label>中止冷却</label>
+              <input type="number" min="0" max="30" step="1" style={{ width: 100 }}
+                value={agentSettings.bpc?.abortCooldownMin ?? DEFAULT_BPC_CONFIG.abortCooldownMin}
+                onChange={e => dispatch(setBpc({ abortCooldownMin: Number(e.target.value) }))} />
+              <span className="setting-hint">手动中止后多少分钟内不再触发后台压缩</span>
+            </div>
+            <div className="setting-item">
+              <label>熔断间距</label>
+              <input type="number" min="0" max="5" step="1" style={{ width: 100 }}
+                value={agentSettings.bpc?.circuitBreakGapSteps ?? DEFAULT_BPC_CONFIG.circuitBreakGapSteps}
+                onChange={e => dispatch(setBpc({ circuitBreakGapSteps: Number(e.target.value) }))} />
+              <span className="setting-hint">压缩后 N step 内又触发即算循环，连续 2 次停止 BPC</span>
+            </div>
+
+            {/* ★ M5-BPC-7：Record 分层设置区（顺手补 R-L2 欠的 UI）。agentLoop 注入前缀读 agentSettings.recordLayering。 */}
+            <h3 style={{ marginTop: 24 }}>📚 Record 分层</h3>
+            <div className="setting-item">
+              <label>头部全文批数</label>
+              <input type="number" min="0" max="10" step="1" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.headFull ?? 2}
+                onChange={e => dispatch(setRecordLayering({ headFull: Number(e.target.value) }))} />
+              <span className="setting-hint">最老 N 批渲染全文（背景 / 关键决策）</span>
+            </div>
+            <div className="setting-item">
+              <label>尾部全文批数</label>
+              <input type="number" min="0" max="10" step="1" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.tailFull ?? 1}
+                onChange={e => dispatch(setRecordLayering({ tailFull: Number(e.target.value) }))} />
+              <span className="setting-hint">最近 N 批渲染全文（当前上下文）</span>
+            </div>
+            <div className="setting-item">
+              <label>骨架降级阈值</label>
+              <input type="number" min="1" max="100" step="1" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.titleThreshold ?? 20}
+                onChange={e => dispatch(setRecordLayering({ titleThreshold: Number(e.target.value) }))} />
+              <span className="setting-hint">中间批数超此值时，最老中间批降为仅标题</span>
+            </div>
+            <div className="setting-item">
+              <label>注入上限比例</label>
+              <input type="number" min="0.1" max="0.9" step="0.05" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.maxRatio ?? 0.4}
+                onChange={e => dispatch(setRecordLayering({ maxRatio: Number(e.target.value) }))} />
+              <span className="setting-hint">record 前缀最多占模型窗口比例（危险态硬闸兜底）</span>
+            </div>
+            <div className="setting-item">
+              <label>折叠触发批数</label>
+              <input type="number" min="2" max="200" step="1" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.foldThreshold ?? 30}
+                onChange={e => dispatch(setRecordLayering({ foldThreshold: Number(e.target.value) }))} />
+              <span className="setting-hint">可见批数超此值则折叠最老批为元批</span>
+            </div>
+            <div className="setting-item">
+              <label>每次折叠批数</label>
+              <input type="number" min="2" max="50" step="1" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.foldBatchK ?? 10}
+                onChange={e => dispatch(setRecordLayering({ foldBatchK: Number(e.target.value) }))} />
+              <span className="setting-hint">每次折叠把最老 K 批合成 1 个元批</span>
             </div>
           </div>
         )}

@@ -4,6 +4,7 @@ import { useAppSelector } from '@/store/hooks';
 import { Wifi, Zap } from 'lucide-react';
 import { countConversationTokens } from '@/services/systemPrompt';
 import { getModelContextWindow } from '@/store/selectors/modelSelectors';
+import { CompressionRing } from './CompressionRing';
 
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
@@ -31,7 +32,6 @@ export function StatusBar() {
   const tokenCount = hasApiUsage ? tokenUsage!.promptTokens : estimatedTokenCount;
 
   const usage = tokenCount / contextWindow;
-  const usageColor = usage > 0.8 ? 'var(--syn-error)' : usage > 0.5 ? 'var(--syn-warning)' : 'var(--syn-success)';
   const hasApiKey = !!apiKey;
   const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
 
@@ -78,8 +78,14 @@ export function StatusBar() {
               + `（completion ${tokenUsage!.completionTokens}, total ${tokenUsage!.totalTokens}）`
             : `估算已用 ${tokenCount} / 上下文窗口 ${formatTokens(contextWindow)}`}
         >
-          <span style={{ color: usageColor }}>●</span>
-          Token: {formatTokens(tokenCount)} / {formatTokens(contextWindow)}
+          {/* ★ M5-BPC-6：StatusBar token 区同步 CompressionRing（inline + showDot 保留健康度状态点）。 */}
+          <CompressionRing
+            variant="inline"
+            tokenCount={tokenCount}
+            effectiveContextWindow={contextWindow}
+            tokenRatio={usage}
+            showDot
+          />
         </span>
         <span className="status-item">
           <Wifi size={12} style={{ color: connectionColor }} />
