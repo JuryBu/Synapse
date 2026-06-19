@@ -154,4 +154,4 @@ M4-1 → M4-3 → M4-8 → M4-4 → M4-2 → M4-5 → M4-7 → M4-6
 - [ ] (M4-8 真机) retry/重连/计时需主人侧用真实异常/超时端点触发验证：reconnect i/5 计数、本轮端到端计时实时刷新、重试耗尽错误文案
 - [ ] (M4-6 残留·关注) 手动 /compact 后再触发自动压缩的 record 水位错位：priorSteps 绝对基准 vs store 已截断的根本错位未根治（本次仅缓解 system 占 step 一层）；连续两次 /compact 端到端真机未跑（task_e5135885）；彻底修需重构 record 增量水位×手动截断（动自动压缩/崩溃恢复/编辑截断三条已验证链路，架构级高风险）
 - [ ] (M4-6 小) ConversationList 左侧栏切换路径未带 goal，从左栏切换可能丢 goal（autosave 重启兜底恢复），如需可后续补
-- [ ] (M3 遗留) Plan_4 worktree 打磨项 #53-59（byContext map 重构等）仍 pending，与 Plan_5 无冲突，按需推进
+- [x] (M3 遗留) Plan_4 worktree 打磨项 #53-60 完成：调研确认 byContext 重构早已落地（task 列表过时）；补子代理 worktree 条目泄漏(cca254a)；3 视角 workflow 谨慎审查挖出 HIGH「回滚链路漏 contextId → 落主工作区/误删同名文件」+ MEDIUM「removeWorktree 悬空条目」+ 3 LOW（删对话泄漏/路径大小写/execContextId 流式漂移），全修(b593f76)，双编译通过
