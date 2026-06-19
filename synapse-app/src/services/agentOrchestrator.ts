@@ -34,6 +34,7 @@ import {
   type RunningSubagent,
 } from '@/store/slices/multiAI';
 import { addNotification } from '@/store/slices/notifications';
+import { exitWorktree } from '@/store/slices/worktreeSession';
 import { toolRegistry, type ToolPermissionCategory } from './toolRegistry';
 import { saveConversationSnapshot, createConversationId } from './conversationPersistence';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
@@ -623,6 +624,10 @@ export class AgentOrchestrator {
       this.depthByContext.delete(subagentId);
       // ★ medium#2（M3-3a 审查）清理反查表，防泄漏到下次复用（实际 id 含时间戳唯一，仍按 depthByContext 同步清）。
       this.runContextBySubagent.delete(subagentId);
+      // ★ worktree byContext 收尾（调研补缺）：子代理若中途 enter_worktree 会往 worktreeSession.byContext[subagentId]
+      //   写一条；这里随其它运行态一并清，防该条目永久残留运行态 store（subagentId 唯一不会串台，但属内存泄漏）。
+      //   未 enter 过则该上下文本无条目，exitWorktree 是安全空操作。
+      store.dispatch(exitWorktree({ contextId: subagentId }));
     }
   }
 
