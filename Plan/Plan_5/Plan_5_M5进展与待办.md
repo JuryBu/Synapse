@@ -48,7 +48,9 @@ P2 保留不改：代码块/编辑器固定 GitHub dark 配色（深底浅字对
 - run while 每轮末 evaluateBpcWater 钩子（fire-and-forget 按 run 同口径算水位）
 - run 进入 apiHistory 前裁决：撞硬阈值丢在途 BPC 防双写（边界①②），否则有 ready 则 takeReadyPrefix 收尾+记熔断游标（边界⑤）
 - **设计核心**：record 注入复用 M5-1 else 统一口径（BPC 落库下一轮 run 天然读取注入），takeReadyPrefix.recordMd 不被依赖 → 注入正确性独立于 BPC 逻辑瑕疵；store 永远全量，水位用全量算靠 batchSlice 增量门 + 熔断防原地打转
-- 双编译通过；opus 子代理对抗审查进行中
+- 双编译通过；**两轮对抗审查全过**：
+  - 一轮（单 opus agent）：修 H1 retry 死锁（task 内调 retry 被 genPromise 防重入闸挡死→永卡 snapshotting）+ M1 ready 误判 + M2/M3 对话身份串台 + L1 阈值 clamp（commit 03f83d4）
+  - 二轮（5 视角 verify workflow）：揪出 HIGH「appended 误判」——appendBatch 拒写(脏写 recordStore:482 / 并发水位门:519)返回的是【旧 record】(非 null)，if(updated) 把它误判落批 → 假 ready → 注入陈旧前缀+水位没降 → 下轮 gap<=1 误熔断（M1 失败模式下移到 updated 层）；改判据 `updated.totalSteps>stepStart` + L1 防负 clamp（commit 4ec25f0）。H1/M1/M2/M3/降级安全全 pass
 
 ### ⏭ PhaseC（待做）— UI 压缩环 + 分隔线 + 设置面板（BPC-6/7/8）
 - CompressionRing（footer/context tab/StatusBar 三处，订阅 bpc slice）：idle token% / generating 环+中止 × / cooldown / circuit-broken+重启按钮
