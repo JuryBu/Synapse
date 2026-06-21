@@ -2394,7 +2394,14 @@ export function AgentPanel() {
           )}
         </div>
         <div className="agent-input-footer">
-          {bpcPopOpen && <BpcOverridePopover onClose={() => setBpcPopOpen(false)} />}
+          {bpcPopOpen && (
+            <BpcOverridePopover
+              tokenCount={tokenCount}
+              effectiveContextWindow={effectiveContextWindow}
+              tokenRatio={tokenRatio}
+              onClose={() => setBpcPopOpen(false)}
+            />
+          )}
           {/* ★ M5-BPC-6：footer 主入口换成 CompressionRing——idle 显常规 token%，BPC 后台活跃时显状态环 + 中止/重启按钮。
               ★ 验收补：点击打开本对话 BPC/硬压缩 override 浮层（CC 式每对话可调，留空=跟随全局）。 */}
           <CompressionRing
