@@ -90,6 +90,13 @@ export function insertTokenAtCaret(root: HTMLElement, t: TokenSpec): void {
     return;
   }
   const range = sel.getRangeAt(0);
+  // LOW-3：range 不在编辑器内（选区在 root 外）→ append 兜底，避免把 token 插到编辑器外部 DOM。
+  if (!root.contains(range.commonAncestorContainer)) {
+    const fb = buildTokenFragment(t);
+    root.appendChild(fb.frag);
+    collapseCaretToEnd(fb.afterNode);
+    return;
+  }
   range.deleteContents();
   const { frag, afterNode } = buildTokenFragment(t);
   range.insertNode(frag);
@@ -139,6 +146,8 @@ export function extractContent(root: HTMLElement): ExtractResult {
           const block = child.tagName === 'DIV' || child.tagName === 'P';
           if (block && text && !text.endsWith('\n')) text += '\n';
           walk(child);
+          // MEDIUM-4：块级闭合后也补换行（<div>a</div>b → "a\nb"），前后双边界容错。
+          if (block && text && !text.endsWith('\n')) text += '\n';
         }
       }
     });
@@ -174,12 +183,16 @@ export function findAtomicTokenBeforeCaret(sel: Selection, root: HTMLElement): H
   return null;
 }
 
-/** 删一个 atomic token 及其尾随零宽占位（保持 DOM 干净）。 */
+/** 删一个 atomic token 及其【前后】零宽占位（MEDIUM-1：前导也清，避免反复插删累积孤立零宽节点 + 退格手感异常）。 */
 export function removeTokenSpan(token: HTMLElement): void {
+  const prev = token.previousSibling;
   const next = token.nextSibling;
   token.remove();
   if (next && next.nodeType === Node.TEXT_NODE && next.textContent?.startsWith(ZWSP)) {
     next.textContent = next.textContent.slice(ZWSP.length);
+  }
+  if (prev && prev.nodeType === Node.TEXT_NODE && prev.textContent?.endsWith(ZWSP)) {
+    prev.textContent = prev.textContent.slice(0, -ZWSP.length);
   }
 }
 

@@ -169,6 +169,9 @@ export function AgentPanel() {
   //   全部对话存这里——不依赖左侧对话栏是否打开过，且能跨工作区引用任意历史对话。null=未 load。
   const [atConvCache, setAtConvCache] = useState<ConversationSummary[] | null>(null);
   const atConvLoadingRef = useRef(false);
+  // MEDIUM-2：稳定读取最新 cache 供 fetchSecondLevel（避免其 useCallback 随 atConvCache 变化重建 → 二级 effect 重复 fetch 抖动）。
+  const atConvCacheRef = useRef(atConvCache);
+  atConvCacheRef.current = atConvCache;
   // ★ 验收补：footer 压缩环点击打开的本对话 BPC/硬压缩 override 浮层开关。
   const [bpcPopOpen, setBpcPopOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -848,6 +851,7 @@ export function AgentPanel() {
 
   // 关闭浮层（统一收口；重置两级字段）。
   const closeMenu = useCallback(() => {
+    atRequestSeqRef.current++; // LOW-1：关菜单统一丢弃在途二级 fetch（防御性收口）。
     setMenu(m => (m.open ? { ...m, open: false, level: 'type', selectedType: null, items: [], activeIndex: 0, loading: false } : m));
   }, []);
 
@@ -855,7 +859,7 @@ export function AgentPanel() {
   const fetchSecondLevel = useCallback((type: AtType, query: string) => {
     const seq = ++atRequestSeqRef.current;
     setMenu(m => ({ ...m, loading: true }));
-    void fetchTypeItems(type, query, { convCache: atConvCache })
+    void fetchTypeItems(type, query, { convCache: atConvCacheRef.current })
       .then(items => {
         if (seq !== atRequestSeqRef.current) return;
         setMenu(m => (m.open && m.mode === 'at' && m.selectedType === type)
@@ -865,7 +869,7 @@ export function AgentPanel() {
         if (seq !== atRequestSeqRef.current) return;
         setMenu(m => (m.open && m.selectedType === type) ? { ...m, items: [], loading: false } : m);
       });
-  }, [atConvCache]);
+  }, []);
 
   // ★ M6：onContentChange 后探触发 → 刷新菜单。① @ 触发（Range 版）→ 两级类型菜单；② / 命令 → 单层命令菜单；
   //   都不命中则关闭。IME 守卫在 RichTextInput 内（onContentChange 在 composing 期间被抑制），父侧无需再判。
@@ -913,6 +917,14 @@ export function AgentPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [menu.open, menu.mode, menu.level, menu.selectedType, menu.query, fetchSecondLevel]);
 
+  // ★ MEDIUM-2：@对话二级打开期间 atConvCache 异步 load 完成 → 仅此时重取一次（其余类型不受 cache 变化干扰）。
+  useEffect(() => {
+    if (menu.open && menu.mode === 'at' && menu.level === 'item' && menu.selectedType === 'conversation') {
+      fetchSecondLevel('conversation', menu.query);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [atConvCache]);
+
   // ★ M6 一级选中某类型 → 进二级（loading；二级候选由上方 effect 触发 fetch）。
   const applyTypeSelect = useCallback((type: AtType) => {
     setMenu(m => ({ ...m, mode: 'at', level: 'item', selectedType: type, query: '', items: [], activeIndex: 0, loading: true }));
@@ -945,7 +957,8 @@ export function AgentPanel() {
       return;
     }
     // ── 其余六类（file/dir/conversation/workflow/mcp/terminal）：插内联 atomic token。
-    const trigger = menu.trigger;
+    // HIGH-1/2：插 token 前重新 detect 锚点，避免 IME normalize 后 startNode 游离 → 静默丢 token / 删错范围（P14）。
+    const trigger = richRef.current?.getAtTrigger() ?? menu.trigger;
     const id = String(meta.id ?? '');
     const value = String(meta.value ?? item.label);
     if (type && trigger && id) {

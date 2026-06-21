@@ -138,10 +138,17 @@ function RichTextInputInner(
       onPasteFiles(imageFiles);
       return;
     }
-    // 纯文本（杜绝富文本 / HTML 注入，P4）。
+    // 纯文本（杜绝富文本 / HTML 注入，P4）。MEDIUM-3：按行显式插入，换行走 insertLineBreak（与 Enter / setEditorContent
+    // 的 <br> 口径统一，避免 Chromium insertText 对 \n 插 <div> 块导致提取换行错位）。
     e.preventDefault();
     const text = dt.getData('text/plain');
-    if (text) document.execCommand('insertText', false, text);
+    if (text) {
+      const lines = text.split(/\r\n|\r|\n/);
+      lines.forEach((line, i) => {
+        if (i > 0) document.execCommand('insertLineBreak');
+        if (line) document.execCommand('insertText', false, line);
+      });
+    }
     handleInput();
   }, [onPasteFiles, handleInput]);
 
