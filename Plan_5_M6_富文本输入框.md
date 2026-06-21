@@ -78,3 +78,15 @@
 - systemPrompt 加 mcp/terminal 注入段；buildContextFromTokens 全类型分派
 - 焊死 P13 竞态 + P15 失焦 + P19 双触发器
 - **真机验收**：@ 出七类图标→选 Files 进二级→Esc 回退→各类型 token 生成→Settings 跳转不留 token→Workflow 识别为工作流→MCP/Terminal/Conversation 注入段正确
+
+## 实施状态（2026-06-22）
+
+Phase 1+2 接线**已完成并 commit**（6021089 接线 / 96b520f 对抗审查修复）。底座 5 文件 + atProviders + AtTypeMenu + AgentPanel 全链路改造 + App.tsx CSS。5 lens workflow 对抗审查 → 修 HIGH×2(token 锚点重 detect)+MEDIUM×4(ZWSP双边/粘贴/二级抖动/块级换行)+LOW×2。
+playwright dev server 真机验证通过：@→七类菜单 / 选类型→二级回退条+候选 / 内联 atomic token(绿) / 文本+token 中文混排 / 两段式退格删 token 无残留 / 空态 placeholder。双编译通过。
+
+## 待复核/小本本
+
+- [ ] **D1（Phase 1.5）**：Message 加 richTokens?:ExtractedToken[] + agentLoop user 消息透传 + sanitize 保留；refillInputFromUserMessage 改 tokens 逐个 insertToken 重建。当前编辑历史消息回填降级为纯文本（token 显示 @对话:xxx 文本，与旧版 refs 不持久化等价、非回归），D1 做了才能无损还原 atomic 块（P17）。
+- [ ] **LOW-2**：workflow token 的 modeName 含空格时 @MultiAI: 占位经 parseMultiAITrigger(^\S+) 解析失败（旧缺陷，Synapse 默认 modes 名无空格不触发）。修：TOKEN_INLINE.workflow 占位用 token id 或 workflow token 直接走 runWorkflowFromInput(token id) 不经文本往返。
+- [ ] **联动确认（真机各跑一次）**：① detectAtTrigger 跨节点回看缺失——handleInput(普通打字/粘贴)路径不 normalize，若 @ 跨文本节点边界落前一节点会漏触发（IME 路径靠 compositionend normalize 兜）；② fileSystem.getWorkspaceTree() node.path 绝对/相对口径——若 child 相对 tree 绝对则 toRelative 前缀匹配失败、@文件 value 退化 basename（根因在 fileSystem.ts）。
+- [ ] **electron 真机终判**：中文 IME composition（playwright 测不了）/ @文件·@目录·@MCP 真实候选 / @对话发送注入 / @工作流分流 / @设置跳转 / /命令 / 粘贴多行+截图 / Ctrl+Enter 发送。
