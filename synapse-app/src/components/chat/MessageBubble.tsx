@@ -11,7 +11,9 @@ import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
 import { useResolvedTheme } from '@/hooks/useResolvedTheme';
 import { RichTextInput } from '@/components/chat/RichTextInput';
 import { useAtMention } from '@/components/chat/useAtMention';
+import { useAttachments } from '@/hooks/useAttachments';
 import type { RichTextInputHandle } from '@/services/inputCommands/richInput/types';
+import type { AttachmentRef } from '@/store/slices/conversation';
 
 interface ToolCallInfo {
   id: string;
@@ -83,7 +85,7 @@ interface MessageProps {
   // ★ M4-3-S3：点击已发附件——图片走预览模态、文档走编辑器 attachment tab（由 AgentPanel 实装）。
   onOpenAttachment?: (att: AttachmentInfo) => void;
   onUndoToMessage?: (id: string) => void;
-  onEdit?: (id: string, newContent: string) => void;
+  onEdit?: (id: string, newContent: string, attachments?: AttachmentRef[]) => void;
   onRetry?: (id: string) => void;
   onDelete?: (id: string) => void;
   // M2-3 对话分支：从该消息处「从此分支」，把该消息及之前另存为新对话（源对话不变）。
@@ -212,15 +214,25 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
     // setContent + focus 在下方 effect（RichTextInput 挂载后）执行。
   }, []);
 
+  // ★ C6 附件：编辑框复用底部同款附件链路（useAttachments hook，与编辑框 @ 菜单 useAtMention 同构）。
+  const editAtt = useAttachments();
+  const editFileInputRef = useRef<HTMLInputElement>(null);
+  const editImageInputRef = useRef<HTMLInputElement>(null);
+
   const handleSubmitEdit = useCallback(() => {
     const text = (editRichRef.current?.extract().plainText ?? '').trim();
-    if (text && text !== content) onEdit?.(id, text);
+    const readyAtts = editAtt.ready();
+    // 纯空（无文本无附件）→ 取消 + release 新上传草稿；否则带文本+附件提交。
+    if (!text && readyAtts.length === 0) { setIsEditing(false); editAtt.releaseDrafts(); return; }
+    onEdit?.(id, text, readyAtts);
     setIsEditing(false);
-  }, [id, content, onEdit]);
+    editAtt.markCommitted(); // 新上传草稿引用已随消息转移走，清记录不 release（refCount 守恒路径 E）。
+  }, [id, content, onEdit, editAtt]);
 
   const handleCancelEdit = useCallback(() => {
     setIsEditing(false);
-  }, []);
+    editAtt.releaseDrafts(); // 取消：release 本次新上传草稿，原消息引用不动（路径 D）。
+  }, [editAtt]);
 
   // ★ C6：编辑框 = RichTextInput + 完整两级 @ 菜单（与底部输入框同一套 useAtMention）。Enter 保存、Shift+Enter 换行、Esc 取消。
   const { menuElement: editMenuElement, handleEditorKeyDown: editKeyDown, refreshMenu: editRefreshMenu } = useAtMention({
@@ -229,11 +241,14 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
     submitOnPlainEnter: true,
   });
 
-  // 进入编辑：RichTextInput 挂载后纯文本回填 + 聚焦（含 token 的无损还原需 D1 richTokens，当前显示为 @对话:xxx 文本）。
+  // 进入编辑：RichTextInput 挂载后纯文本回填 + 聚焦 + 还原原消息附件成可编辑草稿（含 token 无损还原需 D1，当前 token 显示为 @对话:xxx 文本）。
   useEffect(() => {
     if (!isEditing) return;
     editRichRef.current?.setContent([content]);
     editRichRef.current?.focus();
+    editAtt.restoreFrom(attachments as AttachmentRef[] | undefined);
+    // attachments/editAtt 故意不入依赖：进编辑那一刻快照即可，避免外部刷新覆盖用户增删。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEditing, content]);
 
   const handleCopy = useCallback(() => {
@@ -431,6 +446,7 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
                     className="agent-input"
                     placeholder="编辑消息... (Enter 保存，Shift+Enter 换行，Esc 取消；@ 引用，/ 命令)"
                     onContentChange={editRefreshMenu}
+                    onPasteFiles={(files) => { void editAtt.addFiles(files, 'image'); }}
                     onEditorKeyDown={(e) => {
                       if (editKeyDown(e)) return true;
                       if (e.key === 'Escape') { e.preventDefault(); handleCancelEdit(); return true; }
@@ -438,7 +454,30 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
                     }}
                   />
                 </div>
+                {/* ★ C6 附件：编辑态附件 tray（复用底部 .attachment-tray/.attachment-chip 样式 + 行为接 editAtt）。 */}
+                {editAtt.pending.length > 0 && (
+                  <div className="attachment-tray">
+                    {editAtt.pending.map(att => (
+                      <button key={att.id} className={`attachment-chip status-${att.status} kind-${att.kind}`} title={att.error || `${att.name} · ${formatBytes(att.size)}`}>
+                        {att.kind === 'image' && att.previewUrl ? (
+                          <img src={att.previewUrl} alt={att.name} />
+                        ) : (
+                          <span className="attachment-icon">{att.kind === 'document' ? '📄' : att.kind === 'archive' ? '🗜' : '📎'}</span>
+                        )}
+                        <span className="attachment-meta"><strong>{att.name}</strong><small>{att.error || formatBytes(att.size)}</small></span>
+                        <span className="attachment-remove" role="button" tabIndex={0}
+                          onClick={(e) => { e.stopPropagation(); editAtt.remove(att.id); }}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); editAtt.remove(att.id); } }}
+                          aria-label="移除附件">×</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <input ref={editFileInputRef} type="file" multiple hidden onChange={(e) => { const fs = Array.from(e.target.files ?? []); if (fs.length) void editAtt.addFiles(fs, 'file'); e.target.value = ''; }} />
+                <input ref={editImageInputRef} type="file" accept="image/*" multiple hidden onChange={(e) => { const fs = Array.from(e.target.files ?? []); if (fs.length) void editAtt.addFiles(fs, 'image'); e.target.value = ''; }} />
                 <div className="message-edit-actions">
+                  <button className="edit-btn attach" onClick={() => editFileInputRef.current?.click()} title="附加文件">📎</button>
+                  <button className="edit-btn attach" onClick={() => editImageInputRef.current?.click()} title="附加图片">🖼</button>
                   <button className="edit-btn save" onClick={handleSubmitEdit}>保存并重新发送</button>
                   <button className="edit-btn cancel" onClick={handleCancelEdit}>取消</button>
                 </div>

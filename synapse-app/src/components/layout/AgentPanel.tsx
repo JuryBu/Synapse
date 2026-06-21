@@ -46,7 +46,7 @@ import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, save
 //   与左侧栏 ConversationList 一致）。workspaceLabel 用于显示对话归属标记。
 import { useConversationManager, workspaceLabel } from '@/hooks/useConversationManager';
 import { platform } from '@/platform';
-import { releaseMessageAttachments, resolveAttachmentDataUrl, sanitizeMessagesForPersistence } from '@/services/attachmentRefs';
+import { releaseMessageAttachments, resolveAttachmentDataUrl, sanitizeMessagesForPersistence, collectMessageShas } from '@/services/attachmentRefs';
 // ★ M4-2-S2：运行态消息 id 收敛到共享 crypto.randomUUID 生成器（治问题 2b(1) 弱熵同毫秒碰撞），
 //   保留 prefix 习惯（user_/assistant_/msg_）。本地 generateMessageId 别名指向它，调用点零改动。
 import { generateId as generateMessageId } from '@/services/ids';
@@ -1145,17 +1145,30 @@ export function AgentPanel() {
     }
   }, [dispatch]);
 
-  // Edit user message → truncate after it → re-send
-  const handleEdit = useCallback((msgId: string, newContent: string) => {
-    // 截断后剩余消息 = 该消息及之前（与 editMessage reducer 的 slice(0, idx+1) 对齐）
+  // Edit user message → truncate after it → re-send（★ C6：带附件编辑——保留/新增图、删图，refCount 精确守恒）
+  const handleEdit = useCallback((msgId: string, newContent: string, attachments?: AttachmentRef[]) => {
     const editIdx = messages.findIndex((m: any) => m.id === msgId);
-    if (editIdx >= 0) {
-      invalidateRecordForTruncation(messages.slice(0, editIdx + 1));
-      // 被截断的后续消息整体移除 → GC；被编辑消息本身 editMessage 会把 contentParts 重置为纯文本（丢弃图引用）→ 也 GC。
-      gcMessages([...messages.slice(editIdx + 1), messages[editIdx]]);
+    if (editIdx < 0) return;
+    const oldMsg = messages[editIdx];
+    const newAtts = (attachments ?? []).filter(a => a.status === 'ready');
+    const keptShas = new Set(newAtts.map(a => a.sha256).filter(Boolean) as string[]);
+
+    invalidateRecordForTruncation(messages.slice(0, editIdx + 1));
+    // ★ C6 refCount 守恒（修正旧实现把 messages[editIdx] 整体 GC 导致「编辑丢图」）：
+    //   ① 后续消息整体 GC；② 被编辑消息只 release「被移除的原附件」(oldShas − keptShas)，
+    //   KEPT（保留的原图）/ADDED（新上传图）不动——引用归属平移给编辑后消息（同一条 id 原地改写）。
+    gcMessages(messages.slice(editIdx + 1));
+    const oldShas = collectMessageShas([oldMsg]);
+    for (const sha of oldShas) {
+      if (!keptShas.has(sha)) void platform.attachment.delete(sha).catch(() => undefined);
     }
-    dispatch(editMessage({ id: msgId, content: newContent }));
-    // Re-send edited message
+
+    // 图片进 contentParts（agentLoop 发 API 按 sha256 还原 base64）+ 全量进 attachments（store 持久 + 渲染）。
+    const contentParts = buildUserContentParts(newContent, newAtts);
+    const attachmentsForRun = newAtts.map(att => ({ ...att, status: 'sent' as const }));
+    dispatch(editMessage({ id: msgId, content: newContent, contentParts, attachments: attachmentsForRun }));
+
+    // skipUserMessage 重发：agentLoop 从 store 编辑后消息的 contentParts/attachments 还原图发 API（M2-R6 R6-2c）。
     if (agentLoopRef.current) {
       setTimeout(() => {
         agentLoopRef.current?.run(newContent, { skipUserMessage: true }).catch((err: any) => {
@@ -1163,7 +1176,7 @@ export function AgentPanel() {
         });
       }, 100);
     }
-  }, [dispatch, messages, invalidateRecordForTruncation, gcMessages]);
+  }, [dispatch, messages, invalidateRecordForTruncation, gcMessages, buildUserContentParts]);
 
   // ★ Plan_5 M5-4 重试（规范 §5）：入口改挂【user 消息】（不再挂 AI 消息）。
   //   点某条 user 的「重新生成」= 回溯到该 user 所在轮（截断该 user 段之后全部，含本轮 model 段所有

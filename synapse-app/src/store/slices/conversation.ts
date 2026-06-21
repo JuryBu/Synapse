@@ -648,14 +648,16 @@ export const conversationSlice = createSlice({
       state.title = action.payload;
     },
     // 编辑用户消息 → 修改内容 + 截断该消息之后的所有消息
-    editMessage(state, action: PayloadAction<{ id: string; content: string }>) {
+    editMessage(state, action: PayloadAction<{ id: string; content: string; contentParts?: MessageContentPart[]; attachments?: AttachmentRef[] }>) {
       const idx = state.messages.findIndex(m => m.id === action.payload.id);
       if (idx >= 0) {
         state.messages[idx].content = action.payload.content;
-        state.messages[idx].contentParts = textToContentParts(action.payload.content);
-        // M2-R6：编辑后消息变纯文本，原附件引用一并丢弃（contentParts 已重置，attachments 也清空），
-        // 与 AgentPanel.handleEdit 对被编辑消息的 release 守恒；否则 store 残留指向已 GC 实体的 sha256。
-        state.messages[idx].attachments = undefined;
+        // ★ C6：带 contentParts/attachments 则写入（编辑保留/新增图，AgentPanel.handleEdit 已按 KEPT/REMOVED 守恒 release）；
+        //   不带（旧调用）则退回纯文本（向后兼容）。
+        state.messages[idx].contentParts = action.payload.contentParts ?? textToContentParts(action.payload.content);
+        state.messages[idx].attachments = action.payload.attachments && action.payload.attachments.length > 0
+          ? action.payload.attachments
+          : undefined;
         // 截断后续消息
         state.messages = state.messages.slice(0, idx + 1);
       }
