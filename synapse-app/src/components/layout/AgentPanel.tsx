@@ -25,6 +25,7 @@ import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { bpcScheduler } from '@/services/bpcScheduler';
 import { CompressionRing } from './CompressionRing';
+import { BpcOverridePopover } from './BpcOverridePopover';
 import { CompactDivider, extractBatchMarks, type BatchMark, type BatchSource } from './CompactDivider';
 import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
@@ -161,6 +162,8 @@ export function AgentPanel() {
   //   全部对话存这里——不依赖左侧对话栏是否打开过，且能跨工作区引用任意历史对话。null=未 load。
   const [atConvCache, setAtConvCache] = useState<ConversationSummary[] | null>(null);
   const atConvLoadingRef = useRef(false);
+  // ★ 验收补：footer 压缩环点击打开的本对话 BPC/硬压缩 override 浮层开关。
+  const [bpcPopOpen, setBpcPopOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -2400,12 +2403,15 @@ export function AgentPanel() {
           )}
         </div>
         <div className="agent-input-footer">
-          {/* ★ M5-BPC-6：footer 主入口换成 CompressionRing——idle 显常规 token%，BPC 后台活跃时显状态环 + 中止/重启按钮。 */}
+          {bpcPopOpen && <BpcOverridePopover onClose={() => setBpcPopOpen(false)} />}
+          {/* ★ M5-BPC-6：footer 主入口换成 CompressionRing——idle 显常规 token%，BPC 后台活跃时显状态环 + 中止/重启按钮。
+              ★ 验收补：点击打开本对话 BPC/硬压缩 override 浮层（CC 式每对话可调，留空=跟随全局）。 */}
           <CompressionRing
             variant="full"
             tokenCount={tokenCount}
             effectiveContextWindow={effectiveContextWindow}
             tokenRatio={tokenRatio}
+            onConfigClick={() => setBpcPopOpen(o => !o)}
           />
           {capabilityLabels.length > 0 && (
             <button

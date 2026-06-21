@@ -1224,6 +1224,7 @@ html[data-wallpaper="enabled"] .settings-panel {
 }
 
 .agent-input-footer {
+  position: relative; /* ★ 验收补：BpcOverridePopover 相对它 absolute 定位（弹在 footer 上方） */
   display: flex;
   justify-content: space-between;
   align-items: center;

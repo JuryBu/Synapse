@@ -130,6 +130,22 @@
 .cr-btn { display: inline-flex; align-items: center; background: none; border: none; color: inherit; cursor: pointer; padding: 1px; margin-left: 2px; border-radius: 3px; opacity: 0.75; }
 .cr-btn:hover { opacity: 1; background: var(--syn-overlay-weak); }
 .cr-dot-static { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 5px; flex-shrink: 0; }
+.cr-clickable { cursor: pointer; border-radius: 5px; padding: 1px 5px; margin: -1px -5px; transition: background 0.15s; }
+.cr-clickable:hover { background: var(--syn-overlay-weak); }
+
+/* BpcOverridePopover（footer 压缩环点击 → 本对话 BPC/硬压缩阈值浮层） */
+.bpc-override-popover { position: absolute; bottom: 100%; left: 0; margin-bottom: 8px; width: 280px; padding: 12px 14px; border-radius: 10px; z-index: 50; box-shadow: 0 8px 30px rgba(0,0,0,0.4); border: 1px solid var(--syn-border); background: var(--glass-bg-solid); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+.bpc-pop-header { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 600; color: var(--syn-text); margin-bottom: 12px; }
+.bpc-pop-close { background: none; border: none; color: var(--syn-text-muted); cursor: pointer; padding: 2px; display: inline-flex; border-radius: 4px; }
+.bpc-pop-close:hover { color: var(--syn-text); background: var(--syn-overlay-weak); }
+.bpc-pop-row { margin-bottom: 12px; }
+.bpc-pop-row label { display: block; font-size: 11px; color: var(--syn-text-muted); margin-bottom: 5px; }
+.bpc-pop-row input[type=range] { width: 100%; }
+.bpc-pop-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 2px; }
+.bpc-pop-hint { font-size: 10px; color: var(--syn-text-muted); }
+.bpc-pop-reset { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--syn-border); background: none; color: var(--syn-text); cursor: pointer; white-space: nowrap; }
+.bpc-pop-reset:disabled { opacity: 0.4; cursor: default; }
+.bpc-pop-reset:not(:disabled):hover { background: var(--syn-overlay-weak); }
 
 /* CompactDivider（record 压缩点分隔线，按 source 三态：manual 灰 / auto 蓝 / bpc 紫渐变） */
 .compact-divider { display: flex; align-items: center; gap: 8px; margin: 8px 0; padding: 0 12px; }

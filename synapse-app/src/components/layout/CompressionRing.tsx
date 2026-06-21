@@ -9,8 +9,9 @@
  *   仅中止 / 重启两个按钮反向调 bpcScheduler.abort() / restart()（其余纯订阅，不直接读 scheduler 内存）。
  *
  * variant：
- *   - 'full'（footer 主入口）：活跃态显环 + 文案 + 暗色 token + 中止×/重启↻ 按钮。
- *   - 'inline'（context tab / StatusBar）：活跃态显环 + 文案（无按钮，省空间）。
+ *   - 'full'（footer 主入口）：活跃态显环 + 文案 + 暗色 token + 中止×/重启↻ 按钮；idle/活跃均可点击打开
+ *     本对话 BPC/硬压缩 override 浮层（onConfigClick，CC 式「每对话可调」）。
+ *   - 'inline'（context tab / StatusBar）：活跃态显环 + 文案（无按钮、不可点，省空间）。
  * showDot：StatusBar 专用——idle 态在 token 文本前置一个健康度状态点（保留 StatusBar 原 ● 语义）。
  */
 
@@ -32,6 +33,8 @@ interface Props {
   variant?: 'full' | 'inline';
   /** StatusBar 用：idle 态前置健康度状态点（绿/黄/红），保留 StatusBar 原 ● 语义。 */
   showDot?: boolean;
+  /** ★ 验收新增：full（footer）点击打开本对话 BPC/硬压缩 override 浮层（CC 式每对话可调）。仅 full variant 生效。 */
+  onConfigClick?: () => void;
 }
 
 export function CompressionRing({
@@ -40,6 +43,7 @@ export function CompressionRing({
   tokenRatio,
   variant = 'full',
   showDot = false,
+  onConfigClick,
 }: Props) {
   const bpc = useAppSelector((s: RootState) => s.bpc);
   const [, tick] = useState(0);
@@ -51,13 +55,15 @@ export function CompressionRing({
     return () => clearInterval(t);
   }, [bpc.state, bpc.cooldownUntil]);
 
+  const isFull = variant === 'full';
+  const clickable = isFull && !!onConfigClick;
   const pct = Math.round(tokenRatio * 100);
   const tokenText = `Token: ${fmt(tokenCount)} / ${fmt(effectiveContextWindow)} (${pct}%)`;
   // 文本分级（footer/context）：低水位灰；圆点分级（StatusBar）：低水位绿（保留健康语义）。
   const textColor = tokenRatio > 0.8 ? 'var(--syn-error)' : tokenRatio > 0.5 ? 'var(--syn-warning)' : 'var(--syn-text-muted)';
   const dotColor = tokenRatio > 0.8 ? 'var(--syn-error)' : tokenRatio > 0.5 ? 'var(--syn-warning)' : 'var(--syn-success)';
 
-  // ── idle / aborted（瞬态）→ 常规 token 文本（与改造前逐字一致，仅多了 % 在 StatusBar 上） ──
+  // ── idle / aborted（瞬态）→ 常规 token 文本（full 可点击打开本对话 override 浮层） ──
   if (bpc.state === 'idle' || bpc.state === 'aborted') {
     if (showDot) {
       return (
@@ -67,11 +73,20 @@ export function CompressionRing({
         </span>
       );
     }
-    return <span className="token-counter" style={{ color: textColor }}>{tokenText}</span>;
+    return (
+      <span
+        className={`token-counter${clickable ? ' cr-clickable' : ''}`}
+        style={{ color: textColor }}
+        onClick={clickable ? onConfigClick : undefined}
+        title={clickable ? '点击调整本对话 BPC / 硬压缩阈值（留空=用全局默认）' : undefined}
+        role={clickable ? 'button' : undefined}
+      >
+        {tokenText}
+      </span>
+    );
   }
 
   // ── 活跃态映射 ──
-  const isFull = variant === 'full';
   let label = '';
   let spinning = false;
   let tone = 'var(--syn-text-muted)';
@@ -99,20 +114,22 @@ export function CompressionRing({
 
   return (
     <span
-      className={`compression-ring ${isFull ? 'cr-full' : 'cr-inline'}`}
+      className={`compression-ring ${isFull ? 'cr-full' : 'cr-inline'}${clickable ? ' cr-clickable' : ''}`}
       style={{ color: tone }}
-      title={`${tokenText}｜后台预压缩：${label}`}
+      title={`${tokenText}｜后台预压缩：${label}${clickable ? '（点击调本对话阈值）' : ''}`}
+      onClick={clickable ? onConfigClick : undefined}
+      role={clickable ? 'button' : undefined}
     >
       <span className={`cr-ring ${spinning ? 'cr-spin' : ''}`} style={{ borderTopColor: tone }} />
       <span className="cr-label">{label}</span>
       {isFull && <span className="cr-token-dim">{tokenText}</span>}
       {showAbort && (
-        <button type="button" className="cr-btn" title="中止后台压缩（进入冷却期）" onClick={() => bpcScheduler.abort()}>
+        <button type="button" className="cr-btn" title="中止后台压缩（进入冷却期）" onClick={(e) => { e.stopPropagation(); bpcScheduler.abort(); }}>
           <X size={12} />
         </button>
       )}
       {showRestart && (
-        <button type="button" className="cr-btn" title="重启后台预压缩" onClick={() => bpcScheduler.restart()}>
+        <button type="button" className="cr-btn" title="重启后台预压缩" onClick={(e) => { e.stopPropagation(); bpcScheduler.restart(); }}>
           <RotateCw size={12} />
         </button>
       )}
