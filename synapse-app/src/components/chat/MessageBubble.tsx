@@ -9,6 +9,9 @@ import { ToolCallCard } from './ToolCallCard';
 import { WorkflowCard } from './WorkflowCard';
 import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
 import { useResolvedTheme } from '@/hooks/useResolvedTheme';
+import { RichTextInput } from '@/components/chat/RichTextInput';
+import { useAtMention } from '@/components/chat/useAtMention';
+import type { RichTextInputHandle } from '@/services/inputCommands/richInput/types';
 
 interface ToolCallInfo {
   id: string;
@@ -176,13 +179,14 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
   const [copied, setCopied] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
-  const [editContent, setEditContent] = useState(content);
+  // ★ C6：编辑框改用 RichTextInput（DOM 唯一真值，与底部输入框完全一致），不再用 editContent 受控字符串。
+  const editRichRef = useRef<RichTextInputHandle>(null);
   const [thinkingOpen, setThinkingOpen] = useState(!thinking?.collapsed);
   // ★ M3-3a：工作流卡片消息默认折叠纯文本汇总（卡片是主视图，文本汇总作为可展开 fallback）。
   const [workflowSummaryOpen, setWorkflowSummaryOpen] = useState(false);
   // ★ M5-1 压缩归一：原 role==='system' 压缩摘要卡片的折叠 state 已删除（不再渲染 system 摘要卡片）。
   const [now, setNow] = useState(() => Date.now());
-  const editRef = useRef<HTMLTextAreaElement>(null);
+  // ★ C6：editRef(textarea) 移除，改 editRichRef(RichTextInput)。
   const live = isStreaming || streamState === 'pending' || streamState === 'streaming';
   const elapsedMs = durationMs ?? (timestamp ? now - timestamp : 0);
   const streamLabel = streamMode === 'pseudo'
@@ -204,22 +208,33 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
   }, [thinking?.collapsed]);
 
   const handleStartEdit = useCallback(() => {
-    setEditContent(content);
     setIsEditing(true);
-    setTimeout(() => editRef.current?.focus(), 50);
-  }, [content]);
+    // setContent + focus 在下方 effect（RichTextInput 挂载后）执行。
+  }, []);
 
   const handleSubmitEdit = useCallback(() => {
-    if (editContent.trim() && editContent !== content) {
-      onEdit?.(id, editContent.trim());
-    }
+    const text = (editRichRef.current?.extract().plainText ?? '').trim();
+    if (text && text !== content) onEdit?.(id, text);
     setIsEditing(false);
-  }, [id, editContent, content, onEdit]);
+  }, [id, content, onEdit]);
 
   const handleCancelEdit = useCallback(() => {
     setIsEditing(false);
-    setEditContent(content);
-  }, [content]);
+  }, []);
+
+  // ★ C6：编辑框 = RichTextInput + 完整两级 @ 菜单（与底部输入框同一套 useAtMention）。Enter 保存、Shift+Enter 换行、Esc 取消。
+  const { menuElement: editMenuElement, handleEditorKeyDown: editKeyDown, refreshMenu: editRefreshMenu } = useAtMention({
+    richRef: editRichRef,
+    onSubmit: handleSubmitEdit,
+    submitOnPlainEnter: true,
+  });
+
+  // 进入编辑：RichTextInput 挂载后纯文本回填 + 聚焦（含 token 的无损还原需 D1 richTokens，当前显示为 @对话:xxx 文本）。
+  useEffect(() => {
+    if (!isEditing) return;
+    editRichRef.current?.setContent([content]);
+    editRichRef.current?.focus();
+  }, [isEditing, content]);
 
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(content);
@@ -408,17 +423,21 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
           {isUser ? (
             isEditing ? (
               <div className="message-edit-area">
-                <textarea
-                  ref={editRef}
-                  className="message-edit-input"
-                  value={editContent}
-                  onChange={e => setEditContent(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmitEdit(); }
-                    if (e.key === 'Escape') handleCancelEdit();
-                  }}
-                  rows={Math.min(editContent.split('\n').length + 1, 8)}
-                />
+                {/* ★ C6：编辑框与底部输入框完全一致——RichTextInput + 两级 @ 菜单（复用 .agent-input 样式）。 */}
+                <div className="agent-input-container message-edit-rich">
+                  {editMenuElement}
+                  <RichTextInput
+                    ref={editRichRef}
+                    className="agent-input"
+                    placeholder="编辑消息... (Enter 保存，Shift+Enter 换行，Esc 取消；@ 引用，/ 命令)"
+                    onContentChange={editRefreshMenu}
+                    onEditorKeyDown={(e) => {
+                      if (editKeyDown(e)) return true;
+                      if (e.key === 'Escape') { e.preventDefault(); handleCancelEdit(); return true; }
+                      return false;
+                    }}
+                  />
+                </div>
                 <div className="message-edit-actions">
                   <button className="edit-btn save" onClick={handleSubmitEdit}>保存并重新发送</button>
                   <button className="edit-btn cancel" onClick={handleCancelEdit}>取消</button>
