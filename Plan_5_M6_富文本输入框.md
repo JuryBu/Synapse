@@ -88,7 +88,7 @@ playwright dev server 真机验证通过：@→七类菜单 / 选类型→二级
 
 ## 待复核/小本本
 
-- [ ] **C6-附件（主人验收补充）**：编辑历史消息时编辑框也要支持附件/图片——显示原消息带的图/附件、可增删、保存重发带上。底部已有完整链路（addPendingFiles + pendingAttachments tray + 上传按钮 + refillInputFromUserMessage 的附件还原），MessageBubble 编辑 UI 加附件 tray + onEdit 签名带 attachments + AgentPanel handleEdit 接附件即可。主人定级「小问题」、优先级中。
+- [x] **C6-附件（主人验收补充）已完成**（87a4859）：编辑历史消息支持附件/图片——还原原消息带图/附件、可增删、保存重发带上。落地：新建 `useAttachments` hook（addFiles/remove/restoreFrom/releaseDrafts/markCommitted/ready，`newlyPutShasRef` 区分「新上传草稿」vs「还原的原消息引用」，**refCount 守恒**：只 release 新上传、还原项只移 UI 不物理 delete）+ `utils/attachments.ts`（共享常量/纯函数）；MessageBubble 编辑态加附件 tray + 📎🖼 上传按钮 + restoreFrom，保存接 markCommitted、取消接 releaseDrafts；AgentPanel.handleEdit 重写（KEPT/REMOVED 精确 release，gcMessages 只 GC 后续不含编辑消息→修「编辑丢图」根因）；editMessage reducer 带 contentParts/attachments。真机验证（playwright）：还原原附件进 tray ✓ / 点 × 移除 ✓ / 上传新文件 ready ✓ / 空 tray 自动隐藏 ✓。**剩余真机项（Web mock 测不了，需主人实体环境+真 API）**：① 保存重发带图的 refCount 账本守恒（KEPT/ADDED/REMOVED 三路径 put/delete 计数核对）② skipUserMessage 重发把图真实带进 API payload。
 - [ ] **D1（Phase 1.5）**：Message 加 richTokens?:ExtractedToken[] + agentLoop user 消息透传 + sanitize 保留；refillInputFromUserMessage 改 tokens 逐个 insertToken 重建。当前编辑历史消息回填降级为纯文本（token 显示 @对话:xxx 文本，与旧版 refs 不持久化等价、非回归），D1 做了才能无损还原 atomic 块（P17）。
 - [ ] **LOW-2**：workflow token 的 modeName 含空格时 @MultiAI: 占位经 parseMultiAITrigger(^\S+) 解析失败（旧缺陷，Synapse 默认 modes 名无空格不触发）。修：TOKEN_INLINE.workflow 占位用 token id 或 workflow token 直接走 runWorkflowFromInput(token id) 不经文本往返。
 - [ ] **联动确认（真机各跑一次）**：① detectAtTrigger 跨节点回看缺失——handleInput(普通打字/粘贴)路径不 normalize，若 @ 跨文本节点边界落前一节点会漏触发（IME 路径靠 compositionend normalize 兜）；② fileSystem.getWorkspaceTree() node.path 绝对/相对口径——若 child 相对 tree 绝对则 toRelative 前缀匹配失败、@文件 value 退化 basename（根因在 fileSystem.ts）。
