@@ -848,18 +848,9 @@ export function AgentPanel() {
     setMenu(m => (m.open ? { ...m, open: false, items: [], activeIndex: 0 } : m));
   }, []);
 
-  // 移除一条对话引用（同时把输入框里对应的「@对话:标题」可见 token 删除，保持 token 与引用表一致）。
-  const removeRef = useCallback((id: string, title: string) => {
+  // 移除一条对话引用（验收简化后芯片即引用，输入框不再有「@对话:标题」token，故只删芯片表）。
+  const removeRef = useCallback((id: string) => {
     setRefs(prev => prev.filter(r => r.id !== id));
-    // 删除输入框里第一处匹配的 token 文本（含尾随空格）。token 已被用户改坏则删不到，无副作用。
-    setInput(prev => {
-      const token = `@对话:${title}`;
-      const idx = prev.indexOf(token);
-      if (idx < 0) return prev;
-      const after = prev.slice(idx + token.length);
-      const trimmedAfter = after.startsWith(' ') ? after.slice(1) : after;
-      return prev.slice(0, idx) + trimmedAfter;
-    });
   }, []);
 
   // 按触发类型取候选：at → 合并三源；slash → 命令注册表过滤。
@@ -924,10 +915,11 @@ export function AgentPanel() {
   const applyCompletion = useCallback((item: CompletionItem) => {
     const meta = item.meta || {};
     if (item.group === '对话') {
-      // @对话 = 插可见 token「@对话:标题」+ 记一条引用（发送时注入，S4 落地）。
+      // ★ 验收简化：@对话 只加上方简洁芯片（可 × 删），删掉 @query token、不再往输入框插长「@对话:全文」
+      //   （避免「上方芯片 + 输入框长文本」重复 + 啰嗦，仿 Antigravity 输入框干净）。引用以芯片表 refs 为准。
       const title = String(meta.title ?? item.label);
       const id = String(meta.conversationId ?? '');
-      replaceTokenInInput(menu.tokenStart, `@对话:${title} `);
+      replaceTokenInInput(menu.tokenStart, '');
       if (id) {
         setRefs(prev => prev.some(r => r.id === id) ? prev : [...prev, { kind: 'conversation', id, title }]);
       }
@@ -1168,11 +1160,10 @@ export function AgentPanel() {
       return;
     }
 
-    // ★ M4-6-S5 引用一致性校验（以引用表为准，不盲信输入框文本）：发送前对每条引用核对输入框里
-    //   对应的可见 token「@对话:标题」是否仍存在。被用户手改/删坏的引用予以丢弃（不注入），保证
-    //   「引用表 ↔ token 文本」一致——只注入用户当前确实保留 token 的那些引用。
-    const validRefs = refs.filter(r => input.includes(`@对话:${r.title}`));
-    const droppedRefCount = refs.length - validRefs.length;
+    // ★ 验收简化：@对话 改为「上方芯片即引用」（不再往输入框插 token），故引用有效性以芯片表 refs 为准，
+    //   不再依赖输入框文本匹配（旧 token 联动已移除）；删芯片即去引用（removeRef）。
+    const validRefs = refs;
+    const droppedRefCount = 0;
 
     setInput('');
     setPendingAttachments([]);
@@ -2299,10 +2290,10 @@ export function AgentPanel() {
             {refs.map(r => (
               <span key={r.id} className="agent-ref-chip" title={`引用对话：${r.title}`}>
                 <MessageSquare size={11} />
-                <span className="agent-ref-chip-title">{r.title}</span>
+                <span className="agent-ref-chip-title">{r.title.length > 16 ? `${r.title.slice(0, 16)}…` : r.title}</span>
                 <button
                   className="agent-ref-chip-remove"
-                  onClick={() => removeRef(r.id, r.title)}
+                  onClick={() => removeRef(r.id)}
                   aria-label="移除引用"
                   title="移除引用"
                 >×</button>

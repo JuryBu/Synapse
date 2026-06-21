@@ -477,9 +477,15 @@ export async function branchConversation(
   const keptRounds = identifyRounds(subset.filter(m => m.role !== 'tool')).totalRounds;
 
   const newId = createConversationId();
-  // ★ 验收修复：fork 标题加分支标记（⑂ 前缀）与源对话区分；已带标记则不叠（fork-of-fork 不重复前缀）。
-  const baseTitle = meta?.title || getFallbackTitle(subset);
-  const title = baseTitle.startsWith('⑂ ') ? baseTitle : `⑂ ${baseTitle}`;
+  // ★ 验收修复：fork 标题用「⑂-N」编号区分同源多个分支（N=源对话现有分支数+1）；baseTitle 去掉已有 ⑂-X 前缀防叠（fork-of-fork）。
+  const rawBase = meta?.title || getFallbackTitle(subset);
+  const baseTitle = rawBase.replace(/^⑂[-\d]*\s+/, '');
+  let branchSeq = 1;
+  try {
+    const allForSeq = await listConversationSummaries({});
+    branchSeq = allForSeq.filter((c) => (c as any).parentId === srcId).length + 1;
+  } catch { branchSeq = 1; }
+  const title = `⑂-${branchSeq} ${baseTitle}`;
 
   // 3. 落新对话（带 parent 溯源）。源对话完全不动。
   const summary = await saveConversationSnapshot({
