@@ -60,15 +60,11 @@ import { identifyRounds } from '@/services/roundBoundary';
 // ★ Plan_5 梯队二 M5-3/4/5：回溯 / 重试 / 分支共用「按轮截断 + record 砍批到轮边界」helper（复用 roundBoundary）。
 import { computeRoundTruncation, clampRecordToRoundTruncation, type RoundTruncationResult } from '@/services/roundTruncation';
 // ★ M4-6 输入区命令层：触发检测（@艾特 / 斜杠命令）+ 内联补全浮层 + @数据源 + /命令注册表/执行器。
-// ★ M6 富文本：textarea 的 detectTrigger(字符下标版)/getAtCompletions/InlineCompletionMenu 弃用，
-//   改 contenteditable(RichTextInput) + 两级 @ 菜单(AtTypeMenu) + Range 版 @触发 + 七类 provider。
-import type { CompletionItem } from '@/services/inputCommands/types';
-import { commandRegistry } from '@/services/inputCommands/commandRegistry';
+// ★ M6 富文本：textarea 弃用，改 contenteditable(RichTextInput)。
+//   ★ C6/去重：两级 @ 菜单整套逻辑封装在 useAtMention hook，与编辑框(MessageBubble)共用。
 import { RichTextInput } from '@/components/chat/RichTextInput';
-import { AtTypeMenu } from '@/components/chat/AtTypeMenu';
-import type { RichTextInputHandle, AtType, AtTrigger, ExtractedToken } from '@/services/inputCommands/richInput/types';
-import { detectSlashTrigger } from '@/services/inputCommands/richInput/atTrigger';
-import { AT_TYPE_ENTRIES, fetchTypeItems } from '@/services/inputCommands/atProviders';
+import { useAtMention } from '@/components/chat/useAtMention';
+import type { RichTextInputHandle, ExtractedToken } from '@/services/inputCommands/richInput/types';
 import { parseAndDispatch } from '@/services/inputCommands/commandExecutor';
 // ★ M4-6-S4：/loop 最小循环驱动器（串行重发 N 次，可 handleStop 中断）。
 import { loopRunner } from '@/services/inputCommands/loopRunner';
@@ -141,37 +137,20 @@ export function AgentPanel() {
   // ★ M6 富文本：DOM 唯一真值，不再有受控 input 字符串态。richRef 命令式句柄 + canSend 派生发送可用性（P10）。
   const richRef = useRef<RichTextInputHandle>(null);
   const [canSend, setCanSend] = useState(false);
-  // ★ P13：二级 fetchTypeItems async（Files/Dir/MCP），requestSeq 守卫——回调比对，stale 丢弃。
-  const atRequestSeqRef = useRef(0);
+  // ★ C6/去重：@ 两级菜单整套逻辑抽到 useAtMention hook（与编辑框 MessageBubble 共用）。
+  //   handleSend 在 hook 之后定义且用到 hook 的 closeMenu，故 onSubmit 经 ref 破环
+  //   （hook 在前，提供 menuElement/handleEditorKeyDown/refreshMenu/closeMenu；handleSend 在后赋值给 ref）。
+  const handleSendRef = useRef<() => void>(() => {});
+  const { menuElement, handleEditorKeyDown, refreshMenu, closeMenu } = useAtMention({
+    richRef,
+    onSubmit: () => handleSendRef.current(),
+    submitOnPlainEnter: false,
+    onAfterMutate: () => setCanSend(!richRef.current?.isEmpty()),
+  });
   const [activeAgentTab, setActiveAgentTab] = useState<'chat' | 'plan' | 'context'>('chat');
 
-  // ★ M4-6 输入区命令层状态：
-  //   - menu：当前内联补全浮层状态（open + 触发类型 + query + token 起点 + 候选 + 高亮）。
-  //   - isComposing：IME 中文输入法 composition 期间抑制触发检测（S5 边界，先在 S1 接好骨架避免误弹）。
-  //   - refs：本轮【对话引用表】（@对话 选中后插可见 token + 记一条引用，发送时注入；发送后清空）。
-  // ★ M6 两级 @ 菜单 + 单层 / 命令菜单统一状态机（P19：mode 区分 @ / 斜杠，二者不同时 open）。
-  //   mode='at'：level 'type'(一级类型) / 'item'(二级具体项)；selectedType 记一级所选类型；trigger=@ Range 锚点。
-  //   mode='slash'：单层命令菜单（level='item'、selectedType=null）。
-  const [menu, setMenu] = useState<{
-    open: boolean;
-    mode: 'at' | 'slash';
-    level: 'type' | 'item';
-    selectedType: AtType | null;
-    query: string;
-    trigger: AtTrigger | null;
-    items: CompletionItem[];
-    activeIndex: number;
-    loading: boolean;
-  }>({ open: false, mode: 'at', level: 'type', selectedType: null, query: '', trigger: null, items: [], activeIndex: 0, loading: false });
-  // ★ M6：isComposingRef 移除——IME 守卫已内置在 RichTextInput（onContentChange 在 composing 期间被抑制）。
-  // ★ M6：上方引用卡片表 refs 移除——引用改内联 atomic token，发送时 extract().tokens 取。
-  // ★ @对话候选独立缓存（验收修复）：@ 的对话候选不读受工作区过滤的共享 slice，而是 @ 首次触发时独立 load
-  //   全部对话存这里——不依赖左侧对话栏是否打开过，且能跨工作区引用任意历史对话。null=未 load。
-  const [atConvCache, setAtConvCache] = useState<ConversationSummary[] | null>(null);
-  const atConvLoadingRef = useRef(false);
-  // MEDIUM-2：稳定读取最新 cache 供 fetchSecondLevel（避免其 useCallback 随 atConvCache 变化重建 → 二级 effect 重复 fetch 抖动）。
-  const atConvCacheRef = useRef(atConvCache);
-  atConvCacheRef.current = atConvCache;
+  // ★ C6/去重：menu 两级状态机已移入 useAtMention hook（上方）。
+  // ★ C6/去重：atConvCache / atConvLoadingRef / 竞态守卫已移入 useAtMention hook。
   // ★ 验收补：footer 压缩环点击打开的本对话 BPC/硬压缩 override 浮层开关。
   const [bpcPopOpen, setBpcPopOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -847,126 +826,8 @@ export function AgentPanel() {
     }
   }, [dispatch]);
 
-  // ============ M4-6 输入区命令层：浮层取数 / 触发更新 / 选中插入 ============
-
-  // 关闭浮层（统一收口；重置两级字段）。
-  const closeMenu = useCallback(() => {
-    atRequestSeqRef.current++; // LOW-1：关菜单统一丢弃在途二级 fetch（防御性收口）。
-    setMenu(m => (m.open ? { ...m, open: false, level: 'type', selectedType: null, items: [], activeIndex: 0, loading: false } : m));
-  }, []);
-
-  // ★ M6 二级 fetch（竞态守卫 P13）：每次 ++requestSeq，回调比对丢弃 stale 响应。
-  const fetchSecondLevel = useCallback((type: AtType, query: string) => {
-    const seq = ++atRequestSeqRef.current;
-    setMenu(m => ({ ...m, loading: true }));
-    void fetchTypeItems(type, query, { convCache: atConvCacheRef.current })
-      .then(items => {
-        if (seq !== atRequestSeqRef.current) return;
-        setMenu(m => (m.open && m.mode === 'at' && m.selectedType === type)
-          ? { ...m, items, activeIndex: 0, loading: false } : m);
-      })
-      .catch(() => {
-        if (seq !== atRequestSeqRef.current) return;
-        setMenu(m => (m.open && m.selectedType === type) ? { ...m, items: [], loading: false } : m);
-      });
-  }, []);
-
-  // ★ M6：onContentChange 后探触发 → 刷新菜单。① @ 触发（Range 版）→ 两级类型菜单；② / 命令 → 单层命令菜单；
-  //   都不命中则关闭。IME 守卫在 RichTextInput 内（onContentChange 在 composing 期间被抑制），父侧无需再判。
-  const refreshMenu = useCallback(() => {
-    const root = richRef.current?.getElement();
-    if (!root) { closeMenu(); return; }
-    // ① @ 触发 → 两级菜单。@对话二级要全量对话缓存：@ 一出现就预热 load（async，不阻塞一级类型菜单）。
-    const at = richRef.current!.getAtTrigger();
-    if (at) {
-      if (atConvCache === null && !atConvLoadingRef.current) {
-        atConvLoadingRef.current = true;
-        void listConversationSummaries({})
-          .then(list => setAtConvCache(list))
-          .catch(() => setAtConvCache([]))
-          .finally(() => { atConvLoadingRef.current = false; });
-      }
-      setMenu(m => ({
-        ...m,
-        open: true,
-        mode: 'at',
-        // 已进入二级（selectedType 选定）→ 停二级、刷新 query（候选由下方 effect 按 query 重取）；否则回一级类型。
-        level: m.open && m.mode === 'at' && m.selectedType ? 'item' : 'type',
-        query: at.query,
-        trigger: at,
-        items: m.open && m.mode === 'at' && m.selectedType ? m.items : [],
-        activeIndex: 0,
-      }));
-      return;
-    }
-    // ② / 命令触发 → 单层命令菜单（selectedType=null，AtTypeMenu 不显回退条）。
-    const slash = detectSlashTrigger(root);
-    if (slash) {
-      const items = commandRegistry.filter(slash.query);
-      if (items.length === 0) { closeMenu(); return; }
-      setMenu(m => ({ ...m, open: true, mode: 'slash', level: 'item', selectedType: null, query: slash.query, trigger: null, items, activeIndex: 0, loading: false }));
-      return;
-    }
-    closeMenu();
-  }, [closeMenu, atConvCache]);
-
-  // ★ M6 二级：query / 类型变化 → 重取候选（统一入口 + 竞态守卫；conversation 也走 fetchTypeItems 透传 convCache）。
-  useEffect(() => {
-    if (!menu.open || menu.mode !== 'at' || menu.level !== 'item' || !menu.selectedType) return;
-    fetchSecondLevel(menu.selectedType, menu.query);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [menu.open, menu.mode, menu.level, menu.selectedType, menu.query, fetchSecondLevel]);
-
-  // ★ MEDIUM-2：@对话二级打开期间 atConvCache 异步 load 完成 → 仅此时重取一次（其余类型不受 cache 变化干扰）。
-  useEffect(() => {
-    if (menu.open && menu.mode === 'at' && menu.level === 'item' && menu.selectedType === 'conversation') {
-      fetchSecondLevel('conversation', menu.query);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [atConvCache]);
-
-  // ★ M6 一级选中某类型 → 进二级（loading；二级候选由上方 effect 触发 fetch）。
-  const applyTypeSelect = useCallback((type: AtType) => {
-    setMenu(m => ({ ...m, mode: 'at', level: 'item', selectedType: type, query: '', items: [], activeIndex: 0, loading: true }));
-  }, []);
-
-  // ★ M6 二级选中具体项 → 据类型落 token / 跳转 / 命令文本。统一用 atProviders 注入的 meta 三元组 {type,id,value}。
-  const applyTokenCompletion = useCallback((item: CompletionItem) => {
-    const meta = (item.meta ?? {}) as Record<string, unknown>;
-    // ── / 命令：编辑器开头 /query 整体替换为 /name + 空格（不执行，执行在 handleSend）。
-    if (menu.mode === 'slash') {
-      const name = String(meta.name ?? item.label.replace(/^\//, '').split(/\s/)[0]);
-      richRef.current?.setContent([`/${name} `]);
-      richRef.current?.focus();
-      setCanSend(!richRef.current?.isEmpty());
-      closeMenu();
-      return;
-    }
-    const type = (meta.type as AtType) ?? menu.selectedType;
-    // ── 设置：纯跳转，不插 token。
-    if (type === 'settings') {
-      const sectionId = String(meta.sectionId ?? meta.id ?? '');
-      dispatch(setActiveView('settings'));
-      dispatch(setSidebarVisible(true));
-      if (sectionId) {
-        requestAnimationFrame(() => {
-          window.dispatchEvent(new CustomEvent('synapse:settings-focus-section', { detail: sectionId }));
-        });
-      }
-      closeMenu();
-      return;
-    }
-    // ── 其余六类（file/dir/conversation/workflow/mcp/terminal）：插内联 atomic token。
-    // HIGH-1/2：插 token 前重新 detect 锚点，避免 IME normalize 后 startNode 游离 → 静默丢 token / 删错范围（P14）。
-    const trigger = richRef.current?.getAtTrigger() ?? menu.trigger;
-    const id = String(meta.id ?? '');
-    const value = String(meta.value ?? item.label);
-    if (type && trigger && id) {
-      richRef.current?.insertTokenAt(trigger, { type, id, value });
-      setCanSend(!richRef.current?.isEmpty());
-    }
-    closeMenu();
-  }, [menu.mode, menu.selectedType, menu.trigger, dispatch, closeMenu]);
+  // ★ C6/去重：closeMenu / fetchSecondLevel / refreshMenu / 二级 effect / applyTypeSelect / applyTokenCompletion
+  //   全部移入 useAtMention hook（见组件顶部 hook 调用），与编辑框 MessageBubble 共用，消除两套分叉。
 
   // ★ M4-6-S4 @对话引用注入组装：把本轮引用表 refs 的每条历史对话，按【record 摘要优先、无 record 回退最近 N 条原文】
   //   组装成一段 <referenced_conversation> 注入文本（经 agentLoop.run 的 opts.injectedContext 透传，不污染可见流）。
@@ -1606,51 +1467,9 @@ export function AgentPanel() {
     }));
   }, [dispatch]);
 
-  // ★ M6 父侧键盘处理（RichTextInput.onEditorKeyDown 调用，返回 true=父已消费、编辑器不再默认处理）。
-  //   分工：Ctrl+Enter 始终发送（最前 P20）；菜单 open 时 ArrowUp/Down 移高亮、Enter/Tab 选中（一级进二级/二级落项）、
-  //   Esc 两级回退（@二级→一级 / @一级或命令→关）；其余键（普通输入、单 Enter 换行、Backspace 删 token）父不消费、
-  //   返回 false 交编辑器（退格删 token 在 RichTextInput 内，父绝不重复处理）。IME 守卫已在 RichTextInput 前置。
-  const handleEditorKeyDown = useCallback((e: React.KeyboardEvent): boolean => {
-    if (e.key === 'Enter' && e.ctrlKey) {
-      e.preventDefault();
-      handleSend();
-      return true;
-    }
-    if (!menu.open) return false;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      const len = menu.mode === 'at' && menu.level === 'type' ? AT_TYPE_ENTRIES.length : menu.items.length;
-      setMenu(m => ({ ...m, activeIndex: Math.min(m.activeIndex + 1, Math.max(0, len - 1)) }));
-      return true;
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setMenu(m => ({ ...m, activeIndex: Math.max(m.activeIndex - 1, 0) }));
-      return true;
-    }
-    if (e.key === 'Enter' || e.key === 'Tab') {
-      e.preventDefault();
-      if (menu.mode === 'at' && menu.level === 'type') {
-        const entry = AT_TYPE_ENTRIES[menu.activeIndex];
-        if (entry) applyTypeSelect(entry.type);
-      } else {
-        const item = menu.items[menu.activeIndex];
-        if (item) applyTokenCompletion(item);
-      }
-      return true;
-    }
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      if (menu.mode === 'at' && menu.level === 'item') {
-        ++atRequestSeqRef.current; // 丢弃在途二级 fetch
-        setMenu(m => ({ ...m, level: 'type', selectedType: null, items: [], activeIndex: 0, loading: false }));
-      } else {
-        closeMenu();
-      }
-      return true;
-    }
-    return false;
-  }, [menu.open, menu.mode, menu.level, menu.items, menu.activeIndex, applyTypeSelect, applyTokenCompletion, closeMenu, handleSend]);
+  // ★ C6/去重：handleEditorKeyDown 移入 useAtMention hook（onSubmit=handleSend 经 handleSendRef 破环）。
+  //   handleSend 已定义，回填 handleSendRef 供 hook 的提交回调调用最新实现。
+  handleSendRef.current = handleSend;
 
   const hasMessages = messages.length > 0;
 
@@ -2328,19 +2147,7 @@ export function AgentPanel() {
         )}
         <div className="agent-input-container">
           {/* ★ M6：两级 @ 菜单 + 单层 / 命令菜单（受控；键盘交互由 handleEditorKeyDown 拦截，鼠标交互见回调）。 */}
-          <AtTypeMenu
-            open={menu.open}
-            level={menu.level}
-            typeEntries={AT_TYPE_ENTRIES}
-            items={menu.items}
-            activeIndex={menu.activeIndex}
-            loading={menu.loading}
-            selectedType={menu.selectedType}
-            onSelectType={applyTypeSelect}
-            onSelectItem={applyTokenCompletion}
-            onActiveIndexChange={(idx) => setMenu(m => ({ ...m, activeIndex: idx }))}
-            onBack={() => { ++atRequestSeqRef.current; setMenu(m => ({ ...m, level: 'type', selectedType: null, items: [], activeIndex: 0, loading: false })); }}
-          />
+          {menuElement}
           <RichTextInput
             ref={richRef}
             className="agent-input"
