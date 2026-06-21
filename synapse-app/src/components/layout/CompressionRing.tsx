@@ -26,6 +26,26 @@ function fmt(n: number): string {
   return String(n);
 }
 
+/**
+ * UsageDonut —— 常驻使用量圆环（SVG donut，仿 CC footer 环）。
+ * 底环灰 + 前景弧按 tokenRatio 填充（从 12 点方向顺时针），颜色由调用方按水位分级传入。
+ */
+function UsageDonut({ ratio, color, size = 14, stroke = 2.5 }: { ratio: number; color: string; size?: number; stroke?: number }) {
+  const r = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * r;
+  const filled = Math.min(Math.max(ratio, 0), 1) * circumference;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="cr-donut" aria-hidden="true">
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--syn-overlay-strong)" strokeWidth={stroke} />
+      <circle
+        cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke}
+        strokeDasharray={`${filled} ${circumference}`} strokeLinecap="round"
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+      />
+    </svg>
+  );
+}
+
 interface Props {
   tokenCount: number;
   effectiveContextWindow: number;
@@ -59,29 +79,23 @@ export function CompressionRing({
   const clickable = isFull && !!onConfigClick;
   const pct = Math.round(tokenRatio * 100);
   const tokenText = `Token: ${fmt(tokenCount)} / ${fmt(effectiveContextWindow)} (${pct}%)`;
-  // 文本分级（footer/context）：低水位灰；圆点分级（StatusBar）：低水位绿（保留健康语义）。
+  // 文本分级（footer/context）：低水位灰。圆环分级：低水位 accent 紫（仿 CC 蓝调健康色）→ 中橙 → 高红。
   const textColor = tokenRatio > 0.8 ? 'var(--syn-error)' : tokenRatio > 0.5 ? 'var(--syn-warning)' : 'var(--syn-text-muted)';
-  const dotColor = tokenRatio > 0.8 ? 'var(--syn-error)' : tokenRatio > 0.5 ? 'var(--syn-warning)' : 'var(--syn-success)';
+  const ringColor = tokenRatio > 0.8 ? 'var(--syn-error)' : tokenRatio > 0.5 ? 'var(--syn-warning)' : 'var(--syn-accent)';
 
-  // ── idle / aborted（瞬态）→ 常规 token 文本（full 可点击打开本对话 override 浮层） ──
+  // ── idle / aborted（瞬态）→ 常驻使用量圆环 + token 文本（仿 CC footer 环，full 可点击打开本对话 override 浮层） ──
   if (bpc.state === 'idle' || bpc.state === 'aborted') {
-    if (showDot) {
-      return (
-        <span className="token-counter">
-          <span className="cr-dot-static" style={{ background: dotColor }} />
-          {tokenText}
-        </span>
-      );
-    }
+    // StatusBar（showDot）：环略小、用 token-counter 间距口径；footer/context：标准环。
+    const cls = showDot ? 'compression-ring cr-statusbar' : `compression-ring ${isFull ? 'cr-full' : 'cr-inline'}`;
     return (
       <span
-        className={`token-counter${clickable ? ' cr-clickable' : ''}`}
-        style={{ color: textColor }}
+        className={`${cls}${clickable ? ' cr-clickable' : ''}`}
         onClick={clickable ? onConfigClick : undefined}
-        title={clickable ? '点击调整本对话 BPC / 硬压缩阈值（留空=用全局默认）' : undefined}
+        title={clickable ? `${tokenText}（点击调本对话 BPC / 硬压缩阈值）` : tokenText}
         role={clickable ? 'button' : undefined}
       >
-        {tokenText}
+        <UsageDonut ratio={tokenRatio} color={ringColor} size={showDot ? 12 : 14} />
+        <span className="cr-token-dim" style={{ color: textColor }}>{tokenText}</span>
       </span>
     );
   }
