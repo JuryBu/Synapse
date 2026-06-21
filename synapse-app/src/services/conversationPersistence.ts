@@ -477,7 +477,9 @@ export async function branchConversation(
   const keptRounds = identifyRounds(subset.filter(m => m.role !== 'tool')).totalRounds;
 
   const newId = createConversationId();
-  const title = meta?.title || getFallbackTitle(subset);
+  // ★ 验收修复：fork 标题加分支标记（⑂ 前缀）与源对话区分；已带标记则不叠（fork-of-fork 不重复前缀）。
+  const baseTitle = meta?.title || getFallbackTitle(subset);
+  const title = baseTitle.startsWith('⑂ ') ? baseTitle : `⑂ ${baseTitle}`;
 
   // 3. 落新对话（带 parent 溯源）。源对话完全不动。
   const summary = await saveConversationSnapshot({
