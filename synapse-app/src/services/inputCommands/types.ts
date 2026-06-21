@@ -6,7 +6,7 @@
  */
 
 /** 候选分组（浮层按此分组渲染分组标题）。 */
-export type CompletionGroup = '对话' | '工作流' | '设置' | '命令';
+export type CompletionGroup = '对话' | '工作流' | '设置' | '命令' | '文件' | '目录' | 'MCP' | '终端' | '类型';
 
 /**
  * 一条补全候选。

@@ -7,6 +7,7 @@ import '@/styles/ui.css';
 import '@/styles/conversationList.css';
 import '@/styles/components.css';
 import '@/styles/wizard.css';
+import '@/styles/richInput.css';
 import { AppLayout } from '@components/layout/AppLayout';
 import { useThemeEffect } from '@/hooks/useThemeEffect';
 import { useEffect, useState } from 'react';

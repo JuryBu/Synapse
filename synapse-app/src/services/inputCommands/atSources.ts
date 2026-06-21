@@ -49,7 +49,7 @@ function relativeTime(ts: number): string {
 
 /** ① @对话候选。优先用调用方传入的 convOverride（AgentPanel @ 触发时独立 load 的全部对话，不受左侧栏工作区过滤限制、
  *  也不依赖列表 UI 是否挂载过）；未传时回退共享 slice conversationHistory.conversations。按 title/lastMessage 模糊匹配。 */
-function getConversationItems(query: string, convOverride?: ConversationSummary[]): CompletionItem[] {
+export function getConversationItems(query: string, convOverride?: ConversationSummary[]): CompletionItem[] {
   const state = store.getState() as any;
   const conversations: ConversationSummary[] = convOverride ?? state?.conversationHistory?.conversations ?? [];
   return conversations
@@ -70,7 +70,7 @@ function getConversationItems(query: string, convOverride?: ConversationSummary[
 }
 
 /** ② @工作流候选（来源 multiAI.modes 中 workflow 非空者，与 resolveWorkflowMode 命名口径一致）。 */
-function getWorkflowItems(query: string): CompletionItem[] {
+export function getWorkflowItems(query: string): CompletionItem[] {
   const state = store.getState() as any;
   const modes: MultiAIMode[] = state?.multiAI?.modes ?? [];
   return modes
@@ -87,7 +87,7 @@ function getWorkflowItems(query: string): CompletionItem[] {
 }
 
 /** ③ @设置候选（来源 SETTINGS_INDEX，label + keywords 参与模糊匹配）。 */
-function getSettingsItems(query: string): CompletionItem[] {
+export function getSettingsItems(query: string): CompletionItem[] {
   return SETTINGS_INDEX
     .filter(s => fuzzyMatch(query, [s.label, ...s.keywords]))
     .slice(0, PER_GROUP_LIMIT)

@@ -20,7 +20,7 @@ import { toggleAgentPanel, setSidebarVisible } from '@/store/slices/layout';
 // ★ M4-6-S2：@设置选中后跳转——切到设置分区（sidebar）+ 展开侧栏（layout）。
 import { setActiveView } from '@/store/slices/sidebar';
 import { MessageBubble } from '@/components/chat/MessageBubble';
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fragment } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { bpcScheduler } from '@/services/bpcScheduler';
@@ -60,11 +60,15 @@ import { identifyRounds } from '@/services/roundBoundary';
 // ★ Plan_5 梯队二 M5-3/4/5：回溯 / 重试 / 分支共用「按轮截断 + record 砍批到轮边界」helper（复用 roundBoundary）。
 import { computeRoundTruncation, clampRecordToRoundTruncation, type RoundTruncationResult } from '@/services/roundTruncation';
 // ★ M4-6 输入区命令层：触发检测（@艾特 / 斜杠命令）+ 内联补全浮层 + @数据源 + /命令注册表/执行器。
-import { detectTrigger, type TriggerKind } from '@/services/inputCommands/triggerDetect';
-import { InlineCompletionMenu } from '@/components/chat/InlineCompletionMenu';
+// ★ M6 富文本：textarea 的 detectTrigger(字符下标版)/getAtCompletions/InlineCompletionMenu 弃用，
+//   改 contenteditable(RichTextInput) + 两级 @ 菜单(AtTypeMenu) + Range 版 @触发 + 七类 provider。
 import type { CompletionItem } from '@/services/inputCommands/types';
-import { getAtCompletions } from '@/services/inputCommands/atSources';
 import { commandRegistry } from '@/services/inputCommands/commandRegistry';
+import { RichTextInput } from '@/components/chat/RichTextInput';
+import { AtTypeMenu } from '@/components/chat/AtTypeMenu';
+import type { RichTextInputHandle, AtType, AtTrigger, ExtractedToken } from '@/services/inputCommands/richInput/types';
+import { detectSlashTrigger } from '@/services/inputCommands/richInput/atTrigger';
+import { AT_TYPE_ENTRIES, fetchTypeItems } from '@/services/inputCommands/atProviders';
 import { parseAndDispatch } from '@/services/inputCommands/commandExecutor';
 // ★ M4-6-S4：/loop 最小循环驱动器（串行重发 N 次，可 handleStop 中断）。
 import { loopRunner } from '@/services/inputCommands/loopRunner';
@@ -86,14 +90,7 @@ function formatBytes(bytes?: number): string {
   return `${bytes} B`;
 }
 
-// ★ M4-3-S1：输入框 auto-resize —— 高度先归 0 再贴合 scrollHeight（封顶 120px，与 .agent-input max-height 一致）。
-//   超过 120px 由 CSS overflow-y:auto 出滚动条，不裁切。el 为空（未挂载）时安全跳过。
-const AGENT_INPUT_MAX_HEIGHT = 120;
-function autoResizeTextarea(el: HTMLTextAreaElement | null): void {
-  if (!el) return;
-  el.style.height = 'auto';
-  el.style.height = `${Math.min(el.scrollHeight, AGENT_INPUT_MAX_HEIGHT)}px`;
-}
+// ★ M6 富文本：autoResizeTextarea 移除——RichTextInput 自管高度（组件内部 autoResize + CSS max-height）。
 
 function getAttachmentKind(file: File): AttachmentRef['kind'] {
   if (file.type.startsWith('image/')) return 'image';
@@ -141,23 +138,33 @@ export function AgentPanel() {
   const agentMetaRef = useRef({ mode, reasoningEffort: agentSettings.reasoningEffort as string });
   agentMetaRef.current = { mode, reasoningEffort: agentSettings.reasoningEffort };
   const apiTokenCount = useAppSelector((s: RootState) => s.conversation.tokenCount);
-  const [input, setInput] = useState('');
+  // ★ M6 富文本：DOM 唯一真值，不再有受控 input 字符串态。richRef 命令式句柄 + canSend 派生发送可用性（P10）。
+  const richRef = useRef<RichTextInputHandle>(null);
+  const [canSend, setCanSend] = useState(false);
+  // ★ P13：二级 fetchTypeItems async（Files/Dir/MCP），requestSeq 守卫——回调比对，stale 丢弃。
+  const atRequestSeqRef = useRef(0);
   const [activeAgentTab, setActiveAgentTab] = useState<'chat' | 'plan' | 'context'>('chat');
 
   // ★ M4-6 输入区命令层状态：
   //   - menu：当前内联补全浮层状态（open + 触发类型 + query + token 起点 + 候选 + 高亮）。
   //   - isComposing：IME 中文输入法 composition 期间抑制触发检测（S5 边界，先在 S1 接好骨架避免误弹）。
   //   - refs：本轮【对话引用表】（@对话 选中后插可见 token + 记一条引用，发送时注入；发送后清空）。
+  // ★ M6 两级 @ 菜单 + 单层 / 命令菜单统一状态机（P19：mode 区分 @ / 斜杠，二者不同时 open）。
+  //   mode='at'：level 'type'(一级类型) / 'item'(二级具体项)；selectedType 记一级所选类型；trigger=@ Range 锚点。
+  //   mode='slash'：单层命令菜单（level='item'、selectedType=null）。
   const [menu, setMenu] = useState<{
     open: boolean;
-    kind: TriggerKind;
+    mode: 'at' | 'slash';
+    level: 'type' | 'item';
+    selectedType: AtType | null;
     query: string;
-    tokenStart: number;
+    trigger: AtTrigger | null;
     items: CompletionItem[];
     activeIndex: number;
-  }>({ open: false, kind: 'at', query: '', tokenStart: 0, items: [], activeIndex: 0 });
-  const isComposingRef = useRef(false);
-  const [refs, setRefs] = useState<{ kind: 'conversation'; id: string; title: string }[]>([]);
+    loading: boolean;
+  }>({ open: false, mode: 'at', level: 'type', selectedType: null, query: '', trigger: null, items: [], activeIndex: 0, loading: false });
+  // ★ M6：isComposingRef 移除——IME 守卫已内置在 RichTextInput（onContentChange 在 composing 期间被抑制）。
+  // ★ M6：上方引用卡片表 refs 移除——引用改内联 atomic token，发送时 extract().tokens 取。
   // ★ @对话候选独立缓存（验收修复）：@ 的对话候选不读受工作区过滤的共享 slice，而是 @ 首次触发时独立 load
   //   全部对话存这里——不依赖左侧对话栏是否打开过，且能跨工作区引用任意历史对话。null=未 load。
   const [atConvCache, setAtConvCache] = useState<ConversationSummary[] | null>(null);
@@ -297,14 +304,10 @@ export function AgentPanel() {
   // 按 sha256 懒加载还原成 dataUrl 供 MessageBubble 渲染。Map<sha256, dataUrl>。
   const [resolvedPreviews, setResolvedPreviews] = useState<Map<string, string>>(new Map());
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // ★ M6：inputRef 移除（textarea→RichTextInput，命令式句柄用 richRef）。
   const agentLoopRef = useRef<AgentLoop | null>(null);
 
-  // ★ M4-3-S1：input 变化（含外部置空——发送后 setInput('')、suggestion-chip、event 注入、切换对话）后
-  //   同步在 paint 前重算高度，避免「发送后仍停在多行高度」「程序化填值不撑高」。useLayoutEffect 防闪烁。
-  useLayoutEffect(() => {
-    autoResizeTextarea(inputRef.current);
-  }, [input]);
+  // ★ M6：autoResize useLayoutEffect 移除——RichTextInput 内部自管高度（onInput/rAF + CSS max-height）。
   const hasApiKey = !!settings.apiKeys?.openai;
   const hasModel = !!model;
   const availableModels = useMemo(() => agentSettings.availableModels ?? [], [agentSettings.availableModels]);
@@ -435,8 +438,8 @@ export function AgentPanel() {
   useEffect(() => {
     const focusInput = (event: Event) => {
       const detail = (event as CustomEvent<string | undefined>).detail;
-      if (detail) setInput(detail);
-      inputRef.current?.focus();
+      if (detail) { richRef.current?.setContent([detail]); setCanSend(!richRef.current?.isEmpty()); }
+      richRef.current?.focus();
       setActiveAgentTab('chat');
     };
     window.addEventListener('synapse:focus-agent-input', focusInput);
@@ -843,115 +846,114 @@ export function AgentPanel() {
 
   // ============ M4-6 输入区命令层：浮层取数 / 触发更新 / 选中插入 ============
 
-  // 关闭浮层（统一收口，便于各处复用）。
+  // 关闭浮层（统一收口；重置两级字段）。
   const closeMenu = useCallback(() => {
-    setMenu(m => (m.open ? { ...m, open: false, items: [], activeIndex: 0 } : m));
+    setMenu(m => (m.open ? { ...m, open: false, level: 'type', selectedType: null, items: [], activeIndex: 0, loading: false } : m));
   }, []);
 
-  // 移除一条对话引用（验收简化后芯片即引用，输入框不再有「@对话:标题」token，故只删芯片表）。
-  const removeRef = useCallback((id: string) => {
-    setRefs(prev => prev.filter(r => r.id !== id));
-  }, []);
-
-  // 按触发类型取候选：at → 合并三源；slash → 命令注册表过滤。
-  const computeMenuItems = useCallback((kind: TriggerKind, query: string): CompletionItem[] => {
-    return kind === 'at' ? getAtCompletions(query, atConvCache ?? undefined) : commandRegistry.filter(query);
-  }, [atConvCache]);
-
-  // onChange / 光标移动后：检测触发上下文并刷新浮层。IME composition 期间抑制（S5 边界，先接好）。
-  const refreshMenu = useCallback((text: string, caretPos: number) => {
-    if (isComposingRef.current) return; // 中文拼音未上屏，不弹菜单。
-    const detected = detectTrigger(text, caretPos);
-    if (!detected) { closeMenu(); return; }
-    // ★ @对话候选独立 load（验收修复）：@ 首次触发时拉全部对话填 atConvCache（async，不阻塞菜单先弹设置/工作流）；
-    //   load 完下方 effect 会在菜单仍开时补算含对话的候选。不依赖左侧对话栏是否挂载、可跨工作区引用。
-    if (detected.kind === 'at' && atConvCache === null && !atConvLoadingRef.current) {
-      atConvLoadingRef.current = true;
-      void listConversationSummaries({})
-        .then(list => setAtConvCache(list))
-        .catch(() => setAtConvCache([]))
-        .finally(() => { atConvLoadingRef.current = false; });
-    }
-    const items = computeMenuItems(detected.kind, detected.query);
-    if (items.length === 0) { closeMenu(); return; }
-    setMenu({
-      open: true,
-      kind: detected.kind,
-      query: detected.query,
-      tokenStart: detected.tokenStart,
-      items,
-      activeIndex: 0,
-    });
-  }, [closeMenu, computeMenuItems, atConvCache]);
-
-  // ★ @对话候选 async load 完成后：若 @ 菜单仍开着，补算含对话的候选（首次 @ 时对话比设置/工作流来得晚）。
-  useEffect(() => {
-    if (atConvCache === null) return;
-    setMenu(m => (m.open && m.kind === 'at')
-      ? { ...m, items: getAtCompletions(m.query, atConvCache), activeIndex: 0 }
-      : m);
-  }, [atConvCache]);
-
-  // 把输入框 [tokenStart, caret) 这段（即 @query / /query token）替换为 replacement，并把光标置于替换串之后。
-  const replaceTokenInInput = useCallback((tokenStart: number, replacement: string) => {
-    const el = inputRef.current;
-    const caret = el?.selectionStart ?? input.length;
-    const before = input.slice(0, tokenStart);
-    const after = input.slice(caret);
-    const next = before + replacement + after;
-    setInput(next);
-    // 置光标到替换串末尾（下一帧 DOM 已更新）。
-    const nextCaret = (before + replacement).length;
-    requestAnimationFrame(() => {
-      const node = inputRef.current;
-      if (node) {
-        node.focus();
-        node.setSelectionRange(nextCaret, nextCaret);
-      }
-    });
-  }, [input]);
-
-  // 选中候选：按 group 落三类插入语义。
-  const applyCompletion = useCallback((item: CompletionItem) => {
-    const meta = item.meta || {};
-    if (item.group === '对话') {
-      // ★ 验收简化：@对话 只加上方简洁芯片（可 × 删），删掉 @query token、不再往输入框插长「@对话:全文」
-      //   （避免「上方芯片 + 输入框长文本」重复 + 啰嗦，仿 Antigravity 输入框干净）。引用以芯片表 refs 为准。
-      const title = String(meta.title ?? item.label);
-      const id = String(meta.conversationId ?? '');
-      replaceTokenInInput(menu.tokenStart, '');
-      if (id) {
-        setRefs(prev => prev.some(r => r.id === id) ? prev : [...prev, { kind: 'conversation', id, title }]);
-      }
-    } else if (item.group === '工作流') {
-      // @工作流 = 糖衣：整段替换成 @MultiAI:模式名（复用既有链路），光标停模式名后让用户补任务。
-      const modeName = String(meta.modeName ?? item.label);
-      setInput(`@MultiAI:${modeName} `);
-      const caret = `@MultiAI:${modeName} `.length;
-      requestAnimationFrame(() => {
-        const node = inputRef.current;
-        if (node) { node.focus(); node.setSelectionRange(caret, caret); }
+  // ★ M6 二级 fetch（竞态守卫 P13）：每次 ++requestSeq，回调比对丢弃 stale 响应。
+  const fetchSecondLevel = useCallback((type: AtType, query: string) => {
+    const seq = ++atRequestSeqRef.current;
+    setMenu(m => ({ ...m, loading: true }));
+    void fetchTypeItems(type, query, { convCache: atConvCache })
+      .then(items => {
+        if (seq !== atRequestSeqRef.current) return;
+        setMenu(m => (m.open && m.mode === 'at' && m.selectedType === type)
+          ? { ...m, items, activeIndex: 0, loading: false } : m);
+      })
+      .catch(() => {
+        if (seq !== atRequestSeqRef.current) return;
+        setMenu(m => (m.open && m.selectedType === type) ? { ...m, items: [], loading: false } : m);
       });
-    } else if (item.group === '设置') {
-      // @设置 = 纯跳转：openSettings + 发 focus-section 事件；删除输入框里的 @query 片段（不插 token）。
-      const sectionId = String(meta.sectionId ?? '');
-      replaceTokenInInput(menu.tokenStart, '');
+  }, [atConvCache]);
+
+  // ★ M6：onContentChange 后探触发 → 刷新菜单。① @ 触发（Range 版）→ 两级类型菜单；② / 命令 → 单层命令菜单；
+  //   都不命中则关闭。IME 守卫在 RichTextInput 内（onContentChange 在 composing 期间被抑制），父侧无需再判。
+  const refreshMenu = useCallback(() => {
+    const root = richRef.current?.getElement();
+    if (!root) { closeMenu(); return; }
+    // ① @ 触发 → 两级菜单。@对话二级要全量对话缓存：@ 一出现就预热 load（async，不阻塞一级类型菜单）。
+    const at = richRef.current!.getAtTrigger();
+    if (at) {
+      if (atConvCache === null && !atConvLoadingRef.current) {
+        atConvLoadingRef.current = true;
+        void listConversationSummaries({})
+          .then(list => setAtConvCache(list))
+          .catch(() => setAtConvCache([]))
+          .finally(() => { atConvLoadingRef.current = false; });
+      }
+      setMenu(m => ({
+        ...m,
+        open: true,
+        mode: 'at',
+        // 已进入二级（selectedType 选定）→ 停二级、刷新 query（候选由下方 effect 按 query 重取）；否则回一级类型。
+        level: m.open && m.mode === 'at' && m.selectedType ? 'item' : 'type',
+        query: at.query,
+        trigger: at,
+        items: m.open && m.mode === 'at' && m.selectedType ? m.items : [],
+        activeIndex: 0,
+      }));
+      return;
+    }
+    // ② / 命令触发 → 单层命令菜单（selectedType=null，AtTypeMenu 不显回退条）。
+    const slash = detectSlashTrigger(root);
+    if (slash) {
+      const items = commandRegistry.filter(slash.query);
+      if (items.length === 0) { closeMenu(); return; }
+      setMenu(m => ({ ...m, open: true, mode: 'slash', level: 'item', selectedType: null, query: slash.query, trigger: null, items, activeIndex: 0, loading: false }));
+      return;
+    }
+    closeMenu();
+  }, [closeMenu, atConvCache]);
+
+  // ★ M6 二级：query / 类型变化 → 重取候选（统一入口 + 竞态守卫；conversation 也走 fetchTypeItems 透传 convCache）。
+  useEffect(() => {
+    if (!menu.open || menu.mode !== 'at' || menu.level !== 'item' || !menu.selectedType) return;
+    fetchSecondLevel(menu.selectedType, menu.query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [menu.open, menu.mode, menu.level, menu.selectedType, menu.query, fetchSecondLevel]);
+
+  // ★ M6 一级选中某类型 → 进二级（loading；二级候选由上方 effect 触发 fetch）。
+  const applyTypeSelect = useCallback((type: AtType) => {
+    setMenu(m => ({ ...m, mode: 'at', level: 'item', selectedType: type, query: '', items: [], activeIndex: 0, loading: true }));
+  }, []);
+
+  // ★ M6 二级选中具体项 → 据类型落 token / 跳转 / 命令文本。统一用 atProviders 注入的 meta 三元组 {type,id,value}。
+  const applyTokenCompletion = useCallback((item: CompletionItem) => {
+    const meta = (item.meta ?? {}) as Record<string, unknown>;
+    // ── / 命令：编辑器开头 /query 整体替换为 /name + 空格（不执行，执行在 handleSend）。
+    if (menu.mode === 'slash') {
+      const name = String(meta.name ?? item.label.replace(/^\//, '').split(/\s/)[0]);
+      richRef.current?.setContent([`/${name} `]);
+      richRef.current?.focus();
+      setCanSend(!richRef.current?.isEmpty());
+      closeMenu();
+      return;
+    }
+    const type = (meta.type as AtType) ?? menu.selectedType;
+    // ── 设置：纯跳转，不插 token。
+    if (type === 'settings') {
+      const sectionId = String(meta.sectionId ?? meta.id ?? '');
       dispatch(setActiveView('settings'));
       dispatch(setSidebarVisible(true));
       if (sectionId) {
-        // ★ M4-6-S5：SettingsPanel 此刻可能刚由 setActiveView 触发挂载（监听 useEffect 在 React commit 后才注册）。
-        //   用 rAF 把事件推迟到下一帧派发，让监听先就绪，首次打开也能定位到分区。SettingsPanel 未挂载时事件无监听者 → 天然 no-op。
         requestAnimationFrame(() => {
           window.dispatchEvent(new CustomEvent('synapse:settings-focus-section', { detail: sectionId }));
         });
       }
-    } else if (item.group === '命令') {
-      // / 命令 = 补全命令名（不执行；执行在 handleSend 经 parseAndDispatch）。保留参数提示让用户补参数。
-      const name = String(meta.name ?? item.label.replace(/^\//, ''));
-      replaceTokenInInput(menu.tokenStart, `/${name} `);
+      closeMenu();
+      return;
+    }
+    // ── 其余六类（file/dir/conversation/workflow/mcp/terminal）：插内联 atomic token。
+    const trigger = menu.trigger;
+    const id = String(meta.id ?? '');
+    const value = String(meta.value ?? item.label);
+    if (type && trigger && id) {
+      richRef.current?.insertTokenAt(trigger, { type, id, value });
+      setCanSend(!richRef.current?.isEmpty());
     }
     closeMenu();
-  }, [menu.tokenStart, replaceTokenInInput, dispatch, closeMenu]);
+  }, [menu.mode, menu.selectedType, menu.trigger, dispatch, closeMenu]);
 
   // ★ M4-6-S4 @对话引用注入组装：把本轮引用表 refs 的每条历史对话，按【record 摘要优先、无 record 回退最近 N 条原文】
   //   组装成一段 <referenced_conversation> 注入文本（经 agentLoop.run 的 opts.injectedContext 透传，不污染可见流）。
@@ -1091,125 +1093,100 @@ export function AgentPanel() {
     },
   }), [dispatch]);
 
+  // ★ M6：把发送时 extract 的有序 token 按类型分派组装注入上下文（经 opts.injectedContext 透传，不污染可见流）。
+  //   conversation 复用 buildInjectedContext；file/dir 给清单提示（AI 按需 view_file/list_dir）；mcp/terminal 预留。
+  const buildContextFromTokens = useCallback(async (tokens: ExtractedToken[]): Promise<string> => {
+    if (tokens.length === 0) return '';
+    const blocks: string[] = [];
+    const convRefs = tokens
+      .filter(t => t.type === 'conversation' && t.id)
+      .map(t => ({ kind: 'conversation' as const, id: t.id, title: t.value }))
+      .filter((r, i, arr) => arr.findIndex(x => x.id === r.id) === i);
+    if (convRefs.length > 0) {
+      const conv = await buildInjectedContext(convRefs).catch(() => '');
+      if (conv) blocks.push(conv);
+    }
+    const fileTokens = tokens.filter(t => t.type === 'file' || t.type === 'directory');
+    if (fileTokens.length > 0) {
+      const lines = fileTokens.map(t => `- ${t.value}`).join('\n');
+      blocks.push(`# 用户引用的文件 / 目录（按需用 view_file / list_dir 查看）\n${lines}`);
+    }
+    // mcp / terminal：Phase 2 预留（buildMcpContext / buildTerminalContext）。
+    return blocks.join('\n\n');
+  }, [buildInjectedContext]);
+
   const handleSend = useCallback(() => {
-    const text = input.trim();
+    // ★ M6：数据源从受控 input → richRef.extract()（DOM 唯一真值）。plainText 已内建 token 占位语义（P10），
+    //   下游 parseAndDispatch/parseMultiAITrigger 直接吃 plainText 即命中；tokens 供 buildContextFromTokens 注入。
+    const extracted = richRef.current?.extract() ?? { plainText: '', tokens: [] };
+    const text = extracted.plainText.trim();
+    const tokens = extracted.tokens;
     const readyAttachments = pendingAttachments.filter(att => att.status === 'ready');
     if ((!text && readyAttachments.length === 0) || isStreaming) return;
 
     if (!hasApiKey) {
-      dispatch(addNotification({
-        type: 'warning',
-        title: '未配置 API',
-        message: '请先在设置 → AI 中配置 API Key 和端点',
-      }));
+      dispatch(addNotification({ type: 'warning', title: '未配置 API', message: '请先在设置 → AI 中配置 API Key 和端点' }));
       return;
     }
-
     if (!hasModel) {
-      dispatch(addNotification({
-        type: 'warning',
-        title: '未选择模型',
-        message: '请先在设置 → AI 中获取并选择模型',
-      }));
+      dispatch(addNotification({ type: 'warning', title: '未选择模型', message: '请先在设置 → AI 中获取并选择模型' }));
       return;
     }
-
     if (!agentLoopRef.current) {
-      dispatch(addNotification({
-        type: 'warning',
-        title: 'AI 未就绪',
-        message: '请确认 API Key、端点和模型均已配置',
-      }));
+      dispatch(addNotification({ type: 'warning', title: 'AI 未就绪', message: '请确认 API Key、端点和模型均已配置' }));
       return;
     }
 
-    // ★ M4-6-S3/S5：斜杠命令分流——先 parseAndDispatch（命中即 handled，由命令体经 helpers 执行）。
-    //   ★ 主人决策「命令未知不误吞(走普通消息)」：未命中的 `/xxx`【不 return】，继续往下走普通发送链路
-    //     （把整条 /xxx 当普通消息发给模型，用户能看到自己发了什么），仅给一条轻提示告知。这与「吞掉/拦截」
-    //     相反——「不误吞」的精确语义是不把未知命令静默拦下，而是照常发出去。命令路径（handled）才不消费附件。
+    // 斜杠命令分流（/命令场景无 token，plainText 即 /cmd args，命中正确；未知命令不误吞，照常发）。
     {
       const dispatchResult = parseAndDispatch(text, buildSlashHelpers());
       if (dispatchResult.handled) {
-        setInput('');
-        setMenu(m => ({ ...m, open: false, items: [], activeIndex: 0 }));
+        richRef.current?.clear(); setCanSend(false);
+        closeMenu();
         return;
       }
       if (dispatchResult.suggestion) {
-        // 未知命令：仅提示，不拦截——落入下方普通发送链路当作普通消息发出。
         dispatch(addNotification({ type: 'info', title: '未知命令', message: `${dispatchResult.suggestion}，已作为普通消息发送` }));
       }
     }
 
-    // ★ M3-2b：检测 @MultiAI:模式名 前缀 → 分流到固定工作流（不走普通 agentLoop.run）。
-    //   parseMultiAITrigger 返回 null（非触发）时完全走下方原有发送链路，普通对话零改动。
+    // @MultiAI 工作流分流（workflow token 在最前时 plainText 形如 @MultiAI:modeName ...，命中，P10）。
     if (parseMultiAITrigger(text)) {
-      setInput('');
-      // ★ M3-2b 修复（medium refCount 泄漏）：工作流路径不把附件转交给任何消息（runWorkflow 只收 string），
-      //   也不走 removePendingAttachment 的 GC。若直接 setPendingAttachments([]) 丢弃，带 sha256 的草稿图
-      //   （addPendingFiles 已 platform.attachment.put → refCount=1）会变成孤儿实体，违反 M2-R6 refCount 守恒契约。
-      //   故清空前对每个带 sha256 的草稿附件 release（复用 removePendingAttachment 同款逻辑）止血。
-      //   注：用 pendingAttachments（含 ready 与非 ready），凡 put 过的（有 sha256）都要 release。
+      richRef.current?.clear(); setCanSend(false);
+      // 工作流路径不转交附件给消息（runWorkflow 只收 string），清空前 release 带 sha256 草稿图（refCount 守恒）。
       for (const att of pendingAttachments) {
         if (att.sha256) void platform.attachment.delete(att.sha256).catch(() => undefined);
       }
       setPendingAttachments([]);
       setPreviewAttachment(null);
-      setRefs([]);
-      setMenu(m => ({ ...m, open: false, items: [], activeIndex: 0 }));
+      closeMenu();
       void runWorkflowFromInput(text);
       return;
     }
 
-    // ★ 验收简化：@对话 改为「上方芯片即引用」（不再往输入框插 token），故引用有效性以芯片表 refs 为准，
-    //   不再依赖输入框文本匹配（旧 token 联动已移除）；删芯片即去引用（removeRef）。
-    const validRefs = refs;
-    const droppedRefCount = 0;
-
-    setInput('');
+    richRef.current?.clear(); setCanSend(false);
     setPendingAttachments([]);
     setPreviewAttachment(null);
-    // ★ M4-6：发送后清空本轮引用表 + 关闭浮层（引用是本轮一次性的，发完即清，不跨轮残留）。
-    setRefs([]);
-    setMenu(m => ({ ...m, open: false, items: [], activeIndex: 0 }));
-    if (droppedRefCount > 0) {
-      dispatch(addNotification({
-        type: 'warning',
-        title: '部分引用已忽略',
-        message: `${droppedRefCount} 条对话引用的标记已被改动，本次未注入`,
-        duration: 3000,
-      }));
-    }
+    closeMenu();
 
     const contentParts = buildUserContentParts(text, readyAttachments);
     const attachmentsForRun = readyAttachments.map(att => ({ ...att, status: 'sent' as const }));
-    // ★ M4-6-S4 @对话引用：有有效引用时先组装 injectedContext（record 摘要优先 / 回退最近 N 条），
-    //   经 opts.injectedContext → <referenced_conversation> 注入（不污染可见流）。无引用时走原同步路径。
-    if (validRefs.length > 0) {
+    // ★ M6：有 token → 先 buildContextFromTokens 组装注入（conversation 复用 buildInjectedContext，其余按需）。
+    if (tokens.length > 0) {
       void (async () => {
-        const injectedContext = await buildInjectedContext(validRefs).catch(() => '');
+        const injectedContext = await buildContextFromTokens(tokens).catch(() => '');
         try {
-          await agentLoopRef.current!.run(text, {
-            contentParts,
-            attachments: attachmentsForRun,
-            injectedContext: injectedContext || undefined,
-          });
+          await agentLoopRef.current!.run(text, { contentParts, attachments: attachmentsForRun, injectedContext: injectedContext || undefined });
         } catch (err: any) {
           dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err?.message || '未知错误' }));
         }
       })();
       return;
     }
-    agentLoopRef.current.run(text, {
-      contentParts,
-      attachments: attachmentsForRun,
-    }).catch((err: any) => {
-      dispatch(addNotification({
-        type: 'error',
-        title: 'AI 请求失败',
-        message: err.message || '未知错误',
-      }));
+    agentLoopRef.current.run(text, { contentParts, attachments: attachmentsForRun }).catch((err: any) => {
+      dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err.message || '未知错误' }));
     });
-  }, [input, refs, pendingAttachments, isStreaming, hasApiKey, hasModel, buildUserContentParts, buildInjectedContext, runWorkflowFromInput, buildSlashHelpers, dispatch]);
+  }, [pendingAttachments, isStreaming, hasApiKey, hasModel, buildUserContentParts, buildContextFromTokens, runWorkflowFromInput, buildSlashHelpers, closeMenu, dispatch]);
 
   const handleStop = useCallback(() => {
     // ★ M3-2b 修复（high）：Stop 按钮要同时管「普通对话」与「@MultiAI 工作流」两条路。
@@ -1264,7 +1241,9 @@ export function AgentPanel() {
   //     还原 dataUrl 回填（与 resolveAttachmentsForRender 同源 resolveAttachmentDataUrl）。
   const refillInputFromUserMessage = useCallback((userMsg: { content?: string; attachments?: AttachmentRef[] } | null | undefined) => {
     const text = userMsg?.content ?? '';
-    setInput(text);
+    // ★ M6：纯文本回填（含 token 的无损还原需 D1 richTokens 持久化，作为 Phase 1.5 跟进；当前 token 显示为 @对话:xxx 文本）。
+    richRef.current?.setContent([text]);
+    setCanSend(!richRef.current?.isEmpty());
     dispatch(setPendingMessage(text));
     const atts = userMsg?.attachments ?? [];
     if (atts.length === 0) {
@@ -1614,42 +1593,51 @@ export function AgentPanel() {
     }));
   }, [dispatch]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    // ★ M4-6 审查修复（medium 问题5，S5「IME 必过项」）：IME 中文输入法 composition 期间，keydown 必须整体放行。
-    //   复现：键入 @ 打开菜单 → 切中文输入法打拼音（composing 期间 onChange 被 isComposingRef 抑制、菜单保持旧候选）
-    //   → 按 Enter 确认拼音候选时 keydown 仍携 isComposing===true，会命中下方 Enter/Tab 分支被 preventDefault + 插入
-    //   一个 stale 候选，同时劫持输入法上屏。故 composing 期间（含 keyCode 229 兼容旧浏览器）直接 return，让上屏不被劫持。
-    if ((e.nativeEvent as any).isComposing || (e as any).keyCode === 229) return;
-    // ★ M4-6-S1：浮层 open 时优先处理导航键（ArrowUp/Down/Enter/Tab/Esc）。
-    //   Ctrl+Enter 始终走发送（即使浮层开着，用户想直接发就发），其余 Enter/Tab 在浮层 open 时选中候选。
-    if (menu.open && menu.items.length > 0 && !(e.key === 'Enter' && e.ctrlKey)) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setMenu(m => ({ ...m, activeIndex: Math.min(m.activeIndex + 1, m.items.length - 1) }));
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setMenu(m => ({ ...m, activeIndex: Math.max(m.activeIndex - 1, 0) }));
-        return;
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault();
-        const item = menu.items[menu.activeIndex];
-        if (item) applyCompletion(item);
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        closeMenu();
-        return;
-      }
-    }
+  // ★ M6 父侧键盘处理（RichTextInput.onEditorKeyDown 调用，返回 true=父已消费、编辑器不再默认处理）。
+  //   分工：Ctrl+Enter 始终发送（最前 P20）；菜单 open 时 ArrowUp/Down 移高亮、Enter/Tab 选中（一级进二级/二级落项）、
+  //   Esc 两级回退（@二级→一级 / @一级或命令→关）；其余键（普通输入、单 Enter 换行、Backspace 删 token）父不消费、
+  //   返回 false 交编辑器（退格删 token 在 RichTextInput 内，父绝不重复处理）。IME 守卫已在 RichTextInput 前置。
+  const handleEditorKeyDown = useCallback((e: React.KeyboardEvent): boolean => {
     if (e.key === 'Enter' && e.ctrlKey) {
       e.preventDefault();
       handleSend();
+      return true;
     }
-  }, [menu.open, menu.items, menu.activeIndex, applyCompletion, closeMenu, handleSend]);
+    if (!menu.open) return false;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const len = menu.mode === 'at' && menu.level === 'type' ? AT_TYPE_ENTRIES.length : menu.items.length;
+      setMenu(m => ({ ...m, activeIndex: Math.min(m.activeIndex + 1, Math.max(0, len - 1)) }));
+      return true;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setMenu(m => ({ ...m, activeIndex: Math.max(m.activeIndex - 1, 0) }));
+      return true;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      if (menu.mode === 'at' && menu.level === 'type') {
+        const entry = AT_TYPE_ENTRIES[menu.activeIndex];
+        if (entry) applyTypeSelect(entry.type);
+      } else {
+        const item = menu.items[menu.activeIndex];
+        if (item) applyTokenCompletion(item);
+      }
+      return true;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (menu.mode === 'at' && menu.level === 'item') {
+        ++atRequestSeqRef.current; // 丢弃在途二级 fetch
+        setMenu(m => ({ ...m, level: 'type', selectedType: null, items: [], activeIndex: 0, loading: false }));
+      } else {
+        closeMenu();
+      }
+      return true;
+    }
+    return false;
+  }, [menu.open, menu.mode, menu.level, menu.items, menu.activeIndex, applyTypeSelect, applyTokenCompletion, closeMenu, handleSend]);
 
   const hasMessages = messages.length > 0;
 
@@ -2117,13 +2105,13 @@ export function AgentPanel() {
                 )}
                 <p>上传课件，或直接向我提问</p>
                 <div className="agent-suggestions">
-                  <button className="suggestion-chip" onClick={() => setInput('帮我总结这节课的重点')}>
+                  <button className="suggestion-chip" onClick={() => { richRef.current?.setContent(['帮我总结这节课的重点']); richRef.current?.focus(); setCanSend(true); }}>
                     📖 帮我总结这节课的重点
                   </button>
-                  <button className="suggestion-chip" onClick={() => setInput('解释这道题的解题思路')}>
+                  <button className="suggestion-chip" onClick={() => { richRef.current?.setContent(['解释这道题的解题思路']); richRef.current?.focus(); setCanSend(true); }}>
                     🧮 解释这道题的解题思路
                   </button>
-                  <button className="suggestion-chip" onClick={() => setInput('用简单的例子解释概念')}>
+                  <button className="suggestion-chip" onClick={() => { richRef.current?.setContent(['用简单的例子解释概念']); richRef.current?.focus(); setCanSend(true); }}>
                     💡 用简单的例子解释概念
                   </button>
                 </div>
@@ -2283,24 +2271,7 @@ export function AgentPanel() {
             {mode === 'fast' ? '⚡ Fast' : '✨ Planning'}
           </button>
         </div>
-        {/* ★ M4-6-S2：本轮对话引用条（@对话 选中后记录的引用，与输入框可见 token 关联；× 同步删 token）。
-            发送时注入引用内容是 S4 的活，本阶段先呈现引用表并支持移除（token/引用一致性见 S5）。 */}
-        {refs.length > 0 && (
-          <div className="agent-ref-tray">
-            {refs.map(r => (
-              <span key={r.id} className="agent-ref-chip" title={`引用对话：${r.title}`}>
-                <MessageSquare size={11} />
-                <span className="agent-ref-chip-title">{r.title.length > 16 ? `${r.title.slice(0, 16)}…` : r.title}</span>
-                <button
-                  className="agent-ref-chip-remove"
-                  onClick={() => removeRef(r.id)}
-                  aria-label="移除引用"
-                  title="移除引用"
-                >×</button>
-              </span>
-            ))}
-          </div>
-        )}
+        {/* ★ M6：上方独立引用卡片移除——引用改内联 atomic token（在 RichTextInput 编辑器里，发送时 extract）。 */}
         {pendingAttachments.length > 0 && (
           <div className="attachment-tray">
             {pendingAttachments.map(att => (
@@ -2343,40 +2314,27 @@ export function AgentPanel() {
           </div>
         )}
         <div className="agent-input-container">
-          {/* ★ M4-6-S1：输入区内联补全浮层（@ 艾特 / 斜杠命令）。受控展示，键盘交互由 handleKeyDown 拦截。 */}
-          <InlineCompletionMenu
+          {/* ★ M6：两级 @ 菜单 + 单层 / 命令菜单（受控；键盘交互由 handleEditorKeyDown 拦截，鼠标交互见回调）。 */}
+          <AtTypeMenu
             open={menu.open}
+            level={menu.level}
+            typeEntries={AT_TYPE_ENTRIES}
             items={menu.items}
             activeIndex={menu.activeIndex}
-            onSelect={applyCompletion}
+            loading={menu.loading}
+            selectedType={menu.selectedType}
+            onSelectType={applyTypeSelect}
+            onSelectItem={applyTokenCompletion}
             onActiveIndexChange={(idx) => setMenu(m => ({ ...m, activeIndex: idx }))}
+            onBack={() => { ++atRequestSeqRef.current; setMenu(m => ({ ...m, level: 'type', selectedType: null, items: [], activeIndex: 0, loading: false })); }}
           />
-          <textarea
-            ref={inputRef}
+          <RichTextInput
+            ref={richRef}
             className="agent-input"
-            placeholder={!hasApiKey ? "请先配置 API Key..." : !hasModel ? "请先选择模型..." : "输入消息... (Ctrl+Enter 发送；@ 引用对话/工作流/设置，/ 命令)"}
-            rows={1}
-            value={input}
-            onChange={e => {
-              setInput(e.target.value);
-              autoResizeTextarea(e.target);
-              // ★ M4-6：实时触发检测刷新浮层（IME composing 期间 refreshMenu 内部已抑制）。
-              refreshMenu(e.target.value, e.target.selectionStart ?? e.target.value.length);
-            }}
-            onKeyDown={handleKeyDown}
-            onCompositionStart={() => { isComposingRef.current = true; }}
-            onCompositionEnd={(e) => {
-              // 中文上屏：composition 结束后再做一次触发检测（拼音上屏后才是真实文本）。
-              isComposingRef.current = false;
-              const el = e.target as HTMLTextAreaElement;
-              refreshMenu(el.value, el.selectionStart ?? el.value.length);
-            }}
-            onBlur={() => { closeMenu(); }}
-            onClick={(e) => {
-              // 点击移动光标后重新检测（光标移出/移入 token 时同步浮层）。
-              const el = e.currentTarget;
-              refreshMenu(el.value, el.selectionStart ?? el.value.length);
-            }}
+            placeholder={!hasApiKey ? '请先配置 API Key...' : !hasModel ? '请先选择模型...' : '输入消息... (Ctrl+Enter 发送；@ 引用文件/对话/工作流/设置/MCP/终端，/ 命令)'}
+            onContentChange={() => { setCanSend(!richRef.current?.isEmpty()); refreshMenu(); }}
+            onEditorKeyDown={handleEditorKeyDown}
+            onPasteFiles={(files) => { void addPendingFiles(files, 'image'); }}
           />
           {isStreaming ? (
             <button className="agent-send-btn" onClick={handleStop} title="停止">
@@ -2386,7 +2344,7 @@ export function AgentPanel() {
             <button
               className="agent-send-btn"
               onClick={handleSend}
-              disabled={(!input.trim() && pendingAttachments.filter(att => att.status === 'ready').length === 0) || !hasApiKey || !hasModel}
+              disabled={(!canSend && pendingAttachments.filter(att => att.status === 'ready').length === 0) || !hasApiKey || !hasModel}
               title="发送"
             >
               <SendHorizontal size={18} />
