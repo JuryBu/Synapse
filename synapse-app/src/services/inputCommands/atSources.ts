@@ -47,10 +47,11 @@ function relativeTime(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
-/** ① @对话候选（来源 conversationHistory.conversations，按 title/lastMessage 模糊匹配）。 */
-function getConversationItems(query: string): CompletionItem[] {
+/** ① @对话候选。优先用调用方传入的 convOverride（AgentPanel @ 触发时独立 load 的全部对话，不受左侧栏工作区过滤限制、
+ *  也不依赖列表 UI 是否挂载过）；未传时回退共享 slice conversationHistory.conversations。按 title/lastMessage 模糊匹配。 */
+function getConversationItems(query: string, convOverride?: ConversationSummary[]): CompletionItem[] {
   const state = store.getState() as any;
-  const conversations: ConversationSummary[] = state?.conversationHistory?.conversations ?? [];
+  const conversations: ConversationSummary[] = convOverride ?? state?.conversationHistory?.conversations ?? [];
   return conversations
     .filter(c => fuzzyMatch(query, [c.title, c.lastMessage]))
     .slice(0, PER_GROUP_LIMIT)
@@ -102,9 +103,9 @@ function getSettingsItems(query: string): CompletionItem[] {
  * 合并三源 → 扁平有序候选（对话 → 工作流 → 设置），各组 ≤ PER_GROUP_LIMIT，按 query 模糊过滤。
  * @param query @ 之后到光标的片段（可空）。
  */
-export function getAtCompletions(query: string): CompletionItem[] {
+export function getAtCompletions(query: string, convOverride?: ConversationSummary[]): CompletionItem[] {
   return [
-    ...getConversationItems(query),
+    ...getConversationItems(query, convOverride),
     ...getWorkflowItems(query),
     ...getSettingsItems(query),
   ];

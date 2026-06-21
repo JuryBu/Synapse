@@ -157,6 +157,10 @@ export function AgentPanel() {
   }>({ open: false, kind: 'at', query: '', tokenStart: 0, items: [], activeIndex: 0 });
   const isComposingRef = useRef(false);
   const [refs, setRefs] = useState<{ kind: 'conversation'; id: string; title: string }[]>([]);
+  // ★ @对话候选独立缓存（验收修复）：@ 的对话候选不读受工作区过滤的共享 slice，而是 @ 首次触发时独立 load
+  //   全部对话存这里——不依赖左侧对话栏是否打开过，且能跨工作区引用任意历史对话。null=未 load。
+  const [atConvCache, setAtConvCache] = useState<ConversationSummary[] | null>(null);
+  const atConvLoadingRef = useRef(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -857,14 +861,23 @@ export function AgentPanel() {
 
   // 按触发类型取候选：at → 合并三源；slash → 命令注册表过滤。
   const computeMenuItems = useCallback((kind: TriggerKind, query: string): CompletionItem[] => {
-    return kind === 'at' ? getAtCompletions(query) : commandRegistry.filter(query);
-  }, []);
+    return kind === 'at' ? getAtCompletions(query, atConvCache ?? undefined) : commandRegistry.filter(query);
+  }, [atConvCache]);
 
   // onChange / 光标移动后：检测触发上下文并刷新浮层。IME composition 期间抑制（S5 边界，先接好）。
   const refreshMenu = useCallback((text: string, caretPos: number) => {
     if (isComposingRef.current) return; // 中文拼音未上屏，不弹菜单。
     const detected = detectTrigger(text, caretPos);
     if (!detected) { closeMenu(); return; }
+    // ★ @对话候选独立 load（验收修复）：@ 首次触发时拉全部对话填 atConvCache（async，不阻塞菜单先弹设置/工作流）；
+    //   load 完下方 effect 会在菜单仍开时补算含对话的候选。不依赖左侧对话栏是否挂载、可跨工作区引用。
+    if (detected.kind === 'at' && atConvCache === null && !atConvLoadingRef.current) {
+      atConvLoadingRef.current = true;
+      void listConversationSummaries({})
+        .then(list => setAtConvCache(list))
+        .catch(() => setAtConvCache([]))
+        .finally(() => { atConvLoadingRef.current = false; });
+    }
     const items = computeMenuItems(detected.kind, detected.query);
     if (items.length === 0) { closeMenu(); return; }
     setMenu({
@@ -875,7 +888,15 @@ export function AgentPanel() {
       items,
       activeIndex: 0,
     });
-  }, [closeMenu, computeMenuItems]);
+  }, [closeMenu, computeMenuItems, atConvCache]);
+
+  // ★ @对话候选 async load 完成后：若 @ 菜单仍开着，补算含对话的候选（首次 @ 时对话比设置/工作流来得晚）。
+  useEffect(() => {
+    if (atConvCache === null) return;
+    setMenu(m => (m.open && m.kind === 'at')
+      ? { ...m, items: getAtCompletions(m.query, atConvCache), activeIndex: 0 }
+      : m);
+  }, [atConvCache]);
 
   // 把输入框 [tokenStart, caret) 这段（即 @query / /query token）替换为 replacement，并把光标置于替换串之后。
   const replaceTokenInInput = useCallback((tokenStart: number, replacement: string) => {
@@ -981,7 +1002,7 @@ export function AgentPanel() {
       if (!body) continue;
       const remaining = REF_TOTAL_CHAR_BUDGET - used;
       const clippedBody = body.length > remaining ? `${body.slice(0, remaining)}…` : body;
-      blocks.push(`# 引用对话：${ref.title}\n${clippedBody}`);
+      blocks.push(`# 引用对话：${ref.title}（ID: ${ref.id}）\n${clippedBody}`);
       used += clippedBody.length;
     }
     return blocks.join('\n\n');
