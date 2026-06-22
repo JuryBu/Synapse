@@ -490,7 +490,19 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
                 </div>
               </div>
             ) : (
-              <p>{content}</p>
+              // ★ M6 验收 bug6：已发 user 消息复用 buildRichParts 把 @ 占位还原成只读高亮 chip（与编辑态口径一致）。
+              //   只读：不加 contentEditable/data-token（避免被任何编辑逻辑误判）；旧消息无 richTokens 时降级为整段纯文本。
+              <p className="message-text">
+                {buildRichParts(content, richTokens).map((part, i) =>
+                  typeof part === 'string'
+                    ? part
+                    : (
+                      <span key={i} className={`rt-token rt-token-${part.type} rt-token-readonly`}>
+                        {'@' + (part.displayLabel ?? part.value)}
+                      </span>
+                    )
+                )}
+              </p>
             )
           ) : workflowRunId ? (
             // ★ M3-3a：工作流汇总消息——实时四色卡片为主视图，纯文本汇总折叠为 fallback。

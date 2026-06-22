@@ -2,6 +2,7 @@
 
 .rich-input {
   flex: 1;
+  position: relative; /* ★ M6 验收 bug10：作为 placeholder ::before 绝对定位的锚点 */
   min-height: 24px;
   max-height: 200px;
   overflow-y: auto;
@@ -15,11 +16,19 @@
   word-break: break-word;
 }
 
-/* 空态 placeholder（纯 CSS，data-empty 由 JS dataset 切换，不触发 React 重渲染）。 */
+/* 空态 placeholder（纯 CSS，data-empty 由 JS dataset 切换，不触发 React 重渲染）。
+   ★ M6 验收 bug10：绝对定位脱离内容流 + 单行省略——长文案不再换行把输入框撑高（容器保持 min-height:24px）。 */
 .rich-input[data-empty="true"]::before {
   content: attr(data-placeholder);
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  right: 12px;
   color: var(--syn-text-muted);
   pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 细滚动条（与 app 风格统一）。 */
@@ -39,6 +48,12 @@
   cursor: default;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* ★ M6 验收 bug6：已发消息气泡里的只读 token chip——覆盖 .rt-token 的 user-select:none，让 @ 块能被选中复制。 */
+.rt-token-readonly {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* 七类配色（Phase 1 先接对话，其余为 Phase 2 预置）。 */
