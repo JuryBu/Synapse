@@ -55,6 +55,8 @@ interface Props {
   showDot?: boolean;
   /** ★ 验收新增：full（footer）点击打开本对话 BPC/硬压缩 override 浮层（CC 式每对话可调）。仅 full variant 生效。 */
   onConfigClick?: () => void;
+  /** ★ M6 验收 bug7：token 是否精确（API 实测 / gpt 分词器=true；非 gpt 字符估算=false）。false 时数字前缀 ≈。 */
+  exact?: boolean;
 }
 
 export function CompressionRing({
@@ -64,6 +66,7 @@ export function CompressionRing({
   variant = 'full',
   showDot = false,
   onConfigClick,
+  exact = true,
 }: Props) {
   const bpc = useAppSelector((s: RootState) => s.bpc);
   const [, tick] = useState(0);
@@ -78,7 +81,7 @@ export function CompressionRing({
   const isFull = variant === 'full';
   const clickable = isFull && !!onConfigClick;
   const pct = Math.round(tokenRatio * 100);
-  const tokenText = `Token: ${fmt(tokenCount)} / ${fmt(effectiveContextWindow)} (${pct}%)`;
+  const tokenText = `Token: ${exact ? '' : '≈'}${fmt(tokenCount)} / ${fmt(effectiveContextWindow)} (${pct}%)`;
   // 文本分级（footer/context）：低水位灰。圆环分级：低水位 accent 紫（仿 CC 蓝调健康色）→ 中橙 → 高红。
   const textColor = tokenRatio > 0.8 ? 'var(--syn-error)' : tokenRatio > 0.5 ? 'var(--syn-warning)' : 'var(--syn-text-muted)';
   const ringColor = tokenRatio > 0.8 ? 'var(--syn-error)' : tokenRatio > 0.5 ? 'var(--syn-warning)' : 'var(--syn-accent)';

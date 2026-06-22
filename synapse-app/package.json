@@ -39,6 +39,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/katex": "^0.16.8",
     "better-sqlite3": "^12.9.0",
+    "gpt-tokenizer": "^3.4.0",
     "katex": "^0.16.40",
     "lucide-react": "^0.577.0",
     "mammoth": "^1.12.0",

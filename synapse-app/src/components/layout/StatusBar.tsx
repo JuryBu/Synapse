@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { isElectron } from '@platform/index';
 import { useAppSelector } from '@/store/hooks';
 import { Wifi, Zap } from 'lucide-react';
-import { countConversationTokens } from '@/services/systemPrompt';
+import { countConversationTokensExact } from '@/services/tokenizer';
 import { getModelContextWindow } from '@/store/selectors/modelSelectors';
 import { CompressionRing } from './CompressionRing';
 
@@ -22,14 +22,17 @@ export function StatusBar() {
   // 替代此前「模型名 includes('gpt-4') → 128000」硬编码映射（机制错：换模型/真有 context 字段时会偏）。
   const contextWindow = useAppSelector(getModelContextWindow);
 
-  const estimatedTokenCount = useMemo(() => {
-    return countConversationTokens(messages.map(m => ({ role: m.role, content: m.content })));
-  }, [messages]);
+  // ★ M6 验收 bug7：本地 token 计数——gpt 系模型用 gpt-tokenizer o200k_base 精确 encode，非 gpt 字符估算（exact 标志）。
+  //   useMemo 缓存（仅 messages/model 变时重算），避免流式每帧 encode 整对话。
+  const localToken = useMemo(() => {
+    return countConversationTokensExact(messages.map(m => ({ role: m.role, content: m.content })), model);
+  }, [messages, model]);
   // M4-1-S3（openQuestions 4 决议）：「已用 token」与「上下文窗口」分母同口径（纯输入侧）。
-  //   有 API 实测时优先 tokenUsage.promptTokens（纯输入），而非 conversation.tokenCount(=totalTokens 含上一轮 completion)；
-  //   无实测时回退本地估算 estimatedTokenCount。两态由下方 title 区分（实测态 / 估算态）。
+  //   有 API 实测时优先 tokenUsage.promptTokens（纯输入，恒精确）；无实测时回退本地 localToken（gpt 系精确 / 其它估算）。
   const hasApiUsage = !!tokenUsage;
-  const tokenCount = hasApiUsage ? tokenUsage!.promptTokens : estimatedTokenCount;
+  const tokenCount = hasApiUsage ? tokenUsage!.promptTokens : localToken.count;
+  // 当前 token 数是否精确：API 实测恒精确；否则取决于本地分词器（gpt 系精确 / 非 gpt 估算）。
+  const tokenExact = hasApiUsage ? true : localToken.exact;
 
   const usage = tokenCount / contextWindow;
   const hasApiKey = !!apiKey;
@@ -74,17 +77,19 @@ export function StatusBar() {
         <span
           className="status-item"
           title={hasApiUsage
-            ? `API 实测已用(prompt) ${tokenUsage!.promptTokens} / 上下文窗口 ${formatTokens(contextWindow)}`
+            ? `精确·API 实测已用(prompt) ${tokenUsage!.promptTokens} / 上下文窗口 ${formatTokens(contextWindow)}`
               + `（completion ${tokenUsage!.completionTokens}, total ${tokenUsage!.totalTokens}）`
-            : `估算已用 ${tokenCount} / 上下文窗口 ${formatTokens(contextWindow)}`}
+            : `${tokenExact ? '精确·分词器' : '≈估算·非 gpt 模型'} 已用 ${tokenCount} / 上下文窗口 ${formatTokens(contextWindow)}`}
         >
           {/* ★ M5-BPC-6：StatusBar token 区同步 CompressionRing（inline + showDot 保留健康度状态点）。 */}
+          {/* ★ M6 验收 bug7：exact 透传给 CompressionRing，估算态（非 gpt 模型）token 前缀 ≈。 */}
           <CompressionRing
             variant="inline"
             tokenCount={tokenCount}
             effectiveContextWindow={contextWindow}
             tokenRatio={usage}
             showDot
+            exact={tokenExact}
           />
         </span>
         <span className="status-item">

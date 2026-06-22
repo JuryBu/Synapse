@@ -25,10 +25,12 @@ interface Props {
   tokenCount: number;
   effectiveContextWindow: number;
   tokenRatio: number;
+  /** ★ M6 验收 bug7：token 是否精确（API 实测 / gpt 分词器=true；非 gpt 估算=false）。false 时数字前缀 ≈。 */
+  exact?: boolean;
   onClose: () => void;
 }
 
-export function BpcOverridePopover({ tokenCount, effectiveContextWindow, tokenRatio, onClose }: Props) {
+export function BpcOverridePopover({ tokenCount, effectiveContextWindow, tokenRatio, exact = true, onClose }: Props) {
   const dispatch = useAppDispatch();
   const ref = useRef<HTMLDivElement>(null);
   const bpcCfg = useAppSelector((s: RootState) => s.agentSettings.bpc);
@@ -69,7 +71,7 @@ export function BpcOverridePopover({ tokenCount, effectiveContextWindow, tokenRa
       <div className="bpc-pop-ctx">
         <div className="bpc-pop-ctx-head">
           <span>Context window</span>
-          <span className="bpc-pop-ctx-val">{fmt(tokenCount)} / {fmt(effectiveContextWindow)} · {pct}%</span>
+          <span className="bpc-pop-ctx-val">{exact ? '' : '≈'}{fmt(tokenCount)} / {fmt(effectiveContextWindow)} · {pct}%</span>
         </div>
         <div className="bpc-pop-bar">
           <div className="bpc-pop-bar-fill" style={{ width: `${Math.min(pct, 100)}%`, background: ctxColor }} />

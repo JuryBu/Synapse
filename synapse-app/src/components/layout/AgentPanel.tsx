@@ -38,7 +38,7 @@ import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@
 // ★ M3-2b 修复：工作流走 agentOrchestrator（非 agentLoop），handleStop 需直接调 abortAll() 才能真正中止工作流。
 import { agentOrchestrator } from '@/services/agentOrchestrator';
 import { exitWorktree } from '@/store/slices/worktreeSession';
-import { countConversationTokens } from '@/services/systemPrompt';
+import { countConversationTokensExact } from '@/services/tokenizer';
 import { getModelContextWindowForOption } from '@/store/selectors/modelSelectors';
 import { conversationExporter } from '@/services/conversationExporter';
 import { clearAutosaveSnapshot, loadAutosaveSnapshot, saveAutosaveSnapshot, saveConversationSnapshot, loadConversationSnapshot, migrateSnapshotAttachments, branchConversation, beginConversationSwitch, endConversationSwitch, listConversationSummaries, AUTOSAVE_ID } from '@/services/conversationPersistence';
@@ -1518,11 +1518,14 @@ export function AgentPanel() {
   const hasMessages = messages.length > 0;
 
   // Token counter
-  const estimatedTokenCount = useMemo(() => {
-    if (!messages.length) return 0;
-    return countConversationTokens(messages.map((m: any) => ({ role: m.role, content: m.content })));
-  }, [messages]);
-  const tokenCount = apiTokenCount || estimatedTokenCount;
+  // ★ M6 验收 bug7：本地计数 gpt 系用分词器精确、其它字符估算（exact 标志）；useMemo 缓存避免流式每帧 encode。
+  const localToken = useMemo(() => {
+    if (!messages.length) return { count: 0, exact: true };
+    return countConversationTokensExact(messages.map((m: any) => ({ role: m.role, content: m.content })), model);
+  }, [messages, model]);
+  const tokenCount = apiTokenCount || localToken.count;
+  // 当前 token 是否精确：API 实测恒精确；否则取决于本地分词器（gpt 系精确 / 非 gpt 估算）。
+  const tokenExact = apiTokenCount ? true : localToken.exact;
   // M4-1-S3：统一走 selector 纯函数版（fallback 链 capabilities.contextWindow ?? option.contextWindow ?? MAX_CONTEXT_TOKENS）
   const effectiveContextWindow = getModelContextWindowForOption(currentModelOption);
   const tokenRatio = effectiveContextWindow > 0 ? tokenCount / effectiveContextWindow : 0;
@@ -2111,6 +2114,7 @@ export function AgentPanel() {
                   tokenCount={tokenCount}
                   effectiveContextWindow={effectiveContextWindow}
                   tokenRatio={tokenRatio}
+                  exact={tokenExact}
                 />
               </div>
             </div>
@@ -2240,6 +2244,7 @@ export function AgentPanel() {
               tokenCount={tokenCount}
               effectiveContextWindow={effectiveContextWindow}
               tokenRatio={tokenRatio}
+              exact={tokenExact}
               onClose={() => setBpcPopOpen(false)}
             />
           )}
@@ -2251,6 +2256,7 @@ export function AgentPanel() {
             effectiveContextWindow={effectiveContextWindow}
             tokenRatio={tokenRatio}
             onConfigClick={() => setBpcPopOpen(o => !o)}
+            exact={tokenExact}
           />
           {capabilityLabels.length > 0 && (
             <button
