@@ -183,8 +183,14 @@ export function findAtomicTokenBeforeCaret(sel: Selection, root: HTMLElement): H
   return null;
 }
 
-/** 删一个 atomic token 及其【前后】零宽占位（MEDIUM-1：前导也清，避免反复插删累积孤立零宽节点 + 退格手感异常）。 */
+/**
+ * 删一个 atomic token 及其【前后】零宽占位（MEDIUM-1：前导也清，避免反复插删累积孤立零宽节点 + 退格手感异常）。
+ * Plan_5_M6 收尾 C1：删 token 后 normalize 父节点合并相邻文本节点（消掉「退格删 token 后留下相邻文本碎片
+ * → 立刻打 @ 跨节点漏触发」的最频发路径，与 insertTokenAtTrigger/insertTokenAtCaret/setEditorContent 的
+ * normalize 行为对称）。RichTextInput.handleKeyDown 退格分支已被 isComposing 守卫（IME 期间走不到），无需重复守卫。
+ */
 export function removeTokenSpan(token: HTMLElement): void {
+  const parent = token.parentNode as (Element | null);
   const prev = token.previousSibling;
   const next = token.nextSibling;
   token.remove();
@@ -194,6 +200,7 @@ export function removeTokenSpan(token: HTMLElement): void {
   if (prev && prev.nodeType === Node.TEXT_NODE && prev.textContent?.endsWith(ZWSP)) {
     prev.textContent = prev.textContent.slice(0, -ZWSP.length);
   }
+  parent?.normalize();
 }
 
 /** 清理空节点 + 合并相邻文本节点（全选删除残留 / IME 后 normalize，P8/P1/P14）。 */

@@ -86,6 +86,10 @@ playwright dev server 真机验证通过：@→七类菜单 / 选类型→二级
 
 **C6（编辑框统一）已完成**（1068349 抽 useAtMention hook + MessageBubble 接入 / ee3bada AgentPanel 迁 hook 去重，净删 ~193 行）：编辑历史消息的输入框 = 底部同款 RichTextInput + 两级 @ 菜单（Enter 保存 / Shift+Enter 换行 / Esc 取消）。真机验证底部零回归 + 编辑框生效。
 
+## 收尾施工 → 见 [Plan_5_M6_收尾大扫除.md](Plan_5_M6_收尾大扫除.md)
+
+D1 + LOW-2 + 联动①② 一次清空的施工细化（含 4 项 verdict / 跨项协调 / C1-C2-C3 分批 commit）。
+
 ## 待复核/小本本
 
 - [x] **C6-附件（主人验收补充）已完成**（87a4859）：编辑历史消息支持附件/图片——还原原消息带图/附件、可增删、保存重发带上。落地：新建 `useAttachments` hook（addFiles/remove/restoreFrom/releaseDrafts/markCommitted/ready，`newlyPutShasRef` 区分「新上传草稿」vs「还原的原消息引用」，**refCount 守恒**：只 release 新上传、还原项只移 UI 不物理 delete）+ `utils/attachments.ts`（共享常量/纯函数）；MessageBubble 编辑态加附件 tray + 📎🖼 上传按钮 + restoreFrom，保存接 markCommitted、取消接 releaseDrafts；AgentPanel.handleEdit 重写（KEPT/REMOVED 精确 release，gcMessages 只 GC 后续不含编辑消息→修「编辑丢图」根因）；editMessage reducer 带 contentParts/attachments。真机验证（playwright）：还原原附件进 tray ✓ / 点 × 移除 ✓ / 上传新文件 ready ✓ / 空 tray 自动隐藏 ✓。**剩余真机项（Web mock 测不了，需主人实体环境+真 API）**：① 保存重发带图的 refCount 账本守恒（KEPT/ADDED/REMOVED 三路径 put/delete 计数核对）② skipUserMessage 重发把图真实带进 API payload。
