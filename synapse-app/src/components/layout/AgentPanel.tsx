@@ -21,6 +21,7 @@ import { toggleAgentPanel, setSidebarVisible } from '@/store/slices/layout';
 import { setActiveView } from '@/store/slices/sidebar';
 import { MessageBubble } from '@/components/chat/MessageBubble';
 import { ApprovalDialog, type ApprovalRequest } from '@/components/ui/ApprovalDialog';
+import { TaskBoundaryCard } from '@/components/chat/TaskBoundaryCard';
 import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
@@ -2109,6 +2110,10 @@ export function AgentPanel() {
                 ))}
               </>
             )}
+            {/* ★ task_boundary：对话级任务边界卡片（反重力式，含历史标题概括变迁），渲染在消息流末尾。 */}
+            {conversation.taskBoundaries && conversation.taskBoundaries.length > 0 && conversation.taskBoundaries.map((b: any) => (
+              <TaskBoundaryCard key={b.id} boundary={b} />
+            ))}
             <div ref={messagesEndRef} />
           </>
         )}

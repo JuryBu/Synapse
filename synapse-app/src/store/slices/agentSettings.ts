@@ -84,6 +84,8 @@ export interface BpcConfig {
 
 interface AgentSettingsState {
   mode: AgentMode;
+  /** ★ task_boundary：是否启用 Plan 模式任务边界卡片（开关，默认 true；关闭则 systemPrompt 不引导 AI 用这些工具）。 */
+  taskBoundaryEnabled: boolean;
   currentModel: string;
   /**
    * ★ M4-5-S1：系统模型（后台任务专用），空字符串 = 跟随 currentModel。
@@ -129,6 +131,7 @@ export const DEFAULT_BPC_CONFIG: BpcConfig = {
 
 const initialState: AgentSettingsState = {
   mode: 'planning',
+  taskBoundaryEnabled: true,
   currentModel: '',
   systemModel: '', // M4-5-S1：空 = 跟随 currentModel
   availableModels: [],
@@ -242,6 +245,10 @@ export const agentSettingsSlice = createSlice({
   reducers: {
     setMode(state, action: PayloadAction<AgentMode>) {
       state.mode = action.payload;
+    },
+    // ★ task_boundary：开关启用/停用 Plan 模式任务边界（关闭后 systemPrompt 不引导、不再生成新边界）。
+    setTaskBoundaryEnabled(state, action: PayloadAction<boolean>) {
+      state.taskBoundaryEnabled = action.payload;
     },
     setCurrentModel(state, action: PayloadAction<string>) {
       state.currentModel = action.payload;
@@ -388,7 +395,7 @@ export const agentSettingsSlice = createSlice({
 });
 
 export const {
-  setMode, setCurrentModel, setSystemModel, setRecordLayering, setBpc, setMaxToolRounds,
+  setMode, setTaskBoundaryEnabled, setCurrentModel, setSystemModel, setRecordLayering, setBpc, setMaxToolRounds,
   setAvailableModels, setConnectionStatus,
   setEnableStreaming, setOutputStrategy, setPseudoStreamSpeed,
   setShowStreamCursor, setShowGeneratingPlaceholder, setStreamThinking,

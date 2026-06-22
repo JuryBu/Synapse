@@ -186,6 +186,13 @@ export function initDatabase(): Database.Database {
     ensureColumn(db, 'conversations', 'bpc_threshold_override', 'REAL');
     ensureColumn(db, 'conversations', 'compact_threshold_override', 'REAL');
 
+    // ★ task_boundary（Plan_5 §10）：对话级任务边界数组 + 大标题镜像，随对话持久化的 JSON 串（不是 goal 那种裸 TEXT）。
+    //   TaskBoundary[] 是复杂对象，列类型 TEXT 存 JSON.stringify 结果（仿 assistant_runs / pending_diffs / file_snapshots），
+    //   IPC 读回 fromJson 解析、写入 toJson 序列化。NULL = 无边界；旧行该列 NULL，升级不丢对话；
+    //   ensureColumn 懒迁移加列不破坏旧库；读取路径缺列降级 undefined（视为未设边界）。
+    ensureColumn(db, 'conversations', 'task_boundaries_json', 'TEXT');
+    ensureColumn(db, 'conversations', 'task_headline_json', 'TEXT');
+
     ensureColumn(db, 'messages', 'model', 'TEXT');
     ensureColumn(db, 'messages', 'content_parts', 'TEXT');
     ensureColumn(db, 'messages', 'attachments', 'TEXT');

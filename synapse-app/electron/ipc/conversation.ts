@@ -54,6 +54,10 @@ function mapConversation(row: any) {
         // ★ M4-6-S4 对话目标（/goal）：goal 列单字无下划线，`...row` 已自带；显式回带保证缺列时为 null。
         //   旧行/缺列为 null → 上层 loadPlatformSnapshot 视作未设目标（undefined）。
         goal: row.goal ?? null,
+        // ★ task_boundary：JSON 列（TEXT 存 JSON 串），fromJson 解析成对象返回（仿 assistant_runs/pending_diffs）。
+        //   缺列/旧行为 null（fromJson(null) → undefined，`?? null` 兜回 null）→ 上层 loadPlatformSnapshot 视作未设边界。
+        taskBoundaries: fromJson(row.task_boundaries_json) ?? null,
+        taskHeadline: fromJson(row.task_headline_json) ?? null,
         // ★ M5-BPC 本对话阈值覆盖（REAL 列，下划线 → 驼峰显式映射）。旧行/缺列为 undefined → null。
         //   上层 loadPlatformSnapshot 用 toFiniteNumberOrUndefined 把 null 视作未覆盖（undefined）；落库 0 合法不被吞。
         bpcThresholdOverride: row.bpc_threshold_override ?? null,
@@ -169,6 +173,14 @@ export function registerConversationHandlers(): void {
     const hasBpcThresholdOverrideColumn = hasColumn(db, 'conversations', 'bpc_threshold_override');
     const hasCompactThresholdOverrideColumn = hasColumn(db, 'conversations', 'compact_threshold_override');
 
+    // ★ task_boundary JSON 列同样防御性自愈 + 缺列降级（与 goal / BPC override 同口径）：
+    //   task_boundaries_json / task_headline_json 是 ensureColumn 后加的 TEXT 列（存 JSON 串）。注册期补一次（幂等）；
+    //   补不上则写入路径按 has*Column 降级（跳过该字段），读取路径缺列时 fromJson(undefined) → null（视为未设边界）。
+    try { ensureColumn(db, 'conversations', 'task_boundaries_json', 'TEXT'); } catch { /* 自愈失败靠下方降级 */ }
+    try { ensureColumn(db, 'conversations', 'task_headline_json', 'TEXT'); } catch { /* 自愈失败靠下方降级 */ }
+    const hasTaskBoundariesColumn = hasColumn(db, 'conversations', 'task_boundaries_json');
+    const hasTaskHeadlineColumn = hasColumn(db, 'conversations', 'task_headline_json');
+
     // 创建对话
     ipcMain.handle('conversation:create', (_e, data: {
         id: string; title?: string; model?: string; mode?: string; reasoningEffort?: string; workspaceId?: string;
@@ -186,6 +198,10 @@ export function registerConversationHandlers(): void {
         // ★ M5-BPC 本对话阈值覆盖：缺省/undefined → 落 NULL（未覆盖）；合法 number（含 0）原样落 REAL。
         bpcThresholdOverride?: number;
         compactThresholdOverride?: number;
+        // ★ task_boundary：对话级任务边界数组 + 大标题镜像（复杂对象，toJson 序列化落 JSON 列）。
+        //   空数组/缺省 → 落 NULL（视为未设边界）；非空才 toJson。
+        taskBoundaries?: unknown;
+        taskHeadline?: unknown;
     }) => {
         // ★ 缺列降级：reasoning_effort 列缺失时，动态拼一条【不含该列】的 INSERT，
         //   保住 mode/messages 正常落库（不再因一个缺列整条失败）。列存在则带上（正常路径）。
@@ -250,6 +266,16 @@ export function registerConversationHandlers(): void {
                     ? data.compactThresholdOverride : null,
             );
         }
+        if (hasTaskBoundariesColumn) {
+            // ★ task_boundary：缺列降级——列存在才写。复杂对象 toJson 序列化（非 goal 的 .trim()）；
+            //   空数组/缺省落 NULL（与「未设边界」对齐），非空数组才 toJson。
+            cols.push('task_boundaries_json');
+            vals.push(Array.isArray(data.taskBoundaries) && data.taskBoundaries.length ? toJson(data.taskBoundaries) : null);
+        }
+        if (hasTaskHeadlineColumn) {
+            cols.push('task_headline_json');
+            vals.push(data.taskHeadline ? toJson(data.taskHeadline) : null);
+        }
         const placeholders = cols.map(() => '?').join(', ');
         db.prepare(
             `INSERT INTO conversations (${cols.join(', ')}) VALUES (${placeholders})`,
@@ -294,6 +320,9 @@ export function registerConversationHandlers(): void {
         // ★ M5-BPC 本对话阈值覆盖：undefined 不动（不覆盖既有值）；显式传合法 number 才写、显式传非数字→落 NULL（清空覆盖）。
         bpcThresholdOverride?: number;
         compactThresholdOverride?: number;
+        // ★ task_boundary：undefined 不动（不覆盖既有边界）；显式传才写（空数组/null→落 NULL=清空，非空 toJson）。
+        taskBoundaries?: unknown;
+        taskHeadline?: unknown;
         // ★ M4-2-S1 systemTouch：true 时本次保存不刷 updated_at（系统性保存，不改用户感知排序时间）。
         //   若除 updated_at 外无任何字段要写，则空 set 直接 return，避免发出无意义/报错的空 UPDATE（风险4）。
         systemTouch?: boolean;
@@ -345,6 +374,16 @@ export function registerConversationHandlers(): void {
         if (hasCompactThresholdOverrideColumn && data.compactThresholdOverride !== undefined) {
             sets.push('compact_threshold_override = ?');
             vals.push(Number.isFinite(data.compactThresholdOverride) ? data.compactThresholdOverride : null);
+        }
+        // ★ task_boundary：缺列降级 + undefined 不动（沿用 goal 口径）；显式传才写。
+        //   复杂对象 toJson 序列化（非 .trim()）；空数组/null 落 NULL=清空边界，非空数组才 toJson。
+        if (hasTaskBoundariesColumn && data.taskBoundaries !== undefined) {
+            sets.push('task_boundaries_json = ?');
+            vals.push(Array.isArray(data.taskBoundaries) && data.taskBoundaries.length ? toJson(data.taskBoundaries) : null);
+        }
+        if (hasTaskHeadlineColumn && data.taskHeadline !== undefined) {
+            sets.push('task_headline_json = ?');
+            vals.push(data.taskHeadline ? toJson(data.taskHeadline) : null);
         }
         // ★ M4-2-S1：systemTouch 把 updated_at 移出 set 后，若没有任何实际字段要写，则 set 为空，
         //   直接 return（不发空 UPDATE）。非 systemTouch 路径 sets 至少含 updated_at，永不为空。

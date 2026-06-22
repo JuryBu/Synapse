@@ -1,5 +1,5 @@
 import { platform } from '@/platform';
-import type { AssistantRun, FileDiffSummary, FileSnapshot, Message } from '@/store/slices/conversation';
+import type { AssistantRun, FileDiffSummary, FileSnapshot, Message, TaskBoundary, TaskHeadline } from '@/store/slices/conversation';
 import {
   sanitizeMessagesForPersistence,
   releaseMessageAttachments,
@@ -87,6 +87,10 @@ export interface ConversationSnapshot {
   //   ★ 落库/回填严禁 `x||null` 吞 0：用 typeof==='number'&&isFinite 判定（虽阈值现实不为 0，留作正确口径）。
   bpcThresholdOverride?: number;
   compactThresholdOverride?: number;
+  // ★ task_boundary（Plan_5 §10）：对话级任务边界数组 + 大标题镜像，随对话落 DB JSON 列（缺列降级跳过）。
+  //   undefined 时 update 路径不覆盖既有值（沿用 goal/workspacePath 的「undefined 不动」语义）。
+  taskBoundaries?: TaskBoundary[];
+  taskHeadline?: TaskHeadline;
   // ★ M4-2-S1 systemTouch（控制位，不落库为数据列）：true 时本次保存不刷 updated_at。
   //   用于「切走对话的自动保存」——系统性保存不应改变用户感知的排序时间（治问题9）。
   systemTouch?: boolean;
@@ -213,6 +217,9 @@ export async function saveAutosaveSnapshot(snapshot: ConversationSnapshot): Prom
     // ★ M5-BPC：autosave 行也带本对话阈值覆盖，使刷新/重启从 autosave 恢复对话能拿回 BPC/压缩覆盖。
     bpcThresholdOverride: snapshot.bpcThresholdOverride,
     compactThresholdOverride: snapshot.compactThresholdOverride,
+    // ★ task_boundary：autosave 行也带任务边界 + 大标题，使刷新/重启从 autosave 恢复对话能拿回边界卡片与历史。
+    taskBoundaries: snapshot.taskBoundaries,
+    taskHeadline: snapshot.taskHeadline,
   };
 
   // M4-2-S1：autosave 也支持透传 systemTouch（默认 false——用户正在该对话活动，刷新排序时间合理）。
@@ -285,6 +292,9 @@ export async function saveConversationSnapshot(snapshot: ConversationSnapshot): 
     // ★ M5-BPC：本对话阈值覆盖随对话落库（DB REAL 列；undefined 时 update 不覆盖既有值）。
     bpcThresholdOverride: snapshot.bpcThresholdOverride,
     compactThresholdOverride: snapshot.compactThresholdOverride,
+    // ★ task_boundary：任务边界 + 大标题随对话落库（DB JSON 列；undefined 时 update 不覆盖既有值，空数组→落 NULL=清空）。
+    taskBoundaries: snapshot.taskBoundaries,
+    taskHeadline: snapshot.taskHeadline,
   };
 
   // M2-R6：正式保存同样落库去 base64。
@@ -333,6 +343,10 @@ export interface BranchResult {
    */
   // ★ M6 收尾 D1：richTokens 透传给调用方供 refillInputFromUserMessage → buildRichParts 无损还原 @ 块。
   pendingUserMessage: { content: string; attachments?: Message['attachments']; richTokens?: Message['richTokens'] } | null;
+  // ★ task_boundary：分支复制出的任务边界（已深拷贝、按分支点裁剪 + active 收口）+ 大标题镜像，
+  //   供调用方切到新分支后 setConversation 回填进 store（无则 undefined）。用户拍板：分支复制 task_boundary + 历史。
+  taskBoundaries?: TaskBoundary[];
+  taskHeadline?: TaskHeadline;
 }
 
 /**
@@ -390,7 +404,9 @@ export async function branchConversation(
   //   使新分支「切走再切回」恢复出的设置与分支那一刻一致（缺省则 create 落默认 planning/auto）。
   // M4-2-S4：meta.workspacePath 让新分支继承源对话工作区归属（S5 调用方传入源对话当前 workspacePath；
   //   缺省则 create 落 NULL=Global）。其余字段语义不变。
-  meta?: { title?: string; model?: string; mode?: string; reasoningEffort?: string; workspacePath?: string | null; recordSrcId?: string; recordSnapshot?: SynapseRecord | null },
+  // ★ task_boundary：meta 透传源对话的 taskBoundaries + taskHeadline（边界是对话顶层字段、不在 messages 里，
+  //   故必须经 meta 传入，不能从 messages 推）。调用方传源对话当前 store 的 taskBoundaries/taskHeadline。
+  meta?: { title?: string; model?: string; mode?: string; reasoningEffort?: string; workspacePath?: string | null; recordSrcId?: string; recordSnapshot?: SynapseRecord | null; taskBoundaries?: TaskBoundary[]; taskHeadline?: TaskHeadline },
 ): Promise<BranchResult | null> {
   if (!srcId || !fromMessageId || !Array.isArray(messages) || messages.length === 0) return null;
   const rawCutIdx = messages.findIndex(m => m.id === fromMessageId);
@@ -479,6 +495,29 @@ export async function branchConversation(
   const keptRounds = identifyRounds(subset.filter(m => m.role !== 'tool')).totalRounds;
 
   const newId = createConversationId();
+
+  // ★ task_boundary 分支复制（规范 §4 + §10.7「分支点之后砍、跨越收口」；用户拍板：分支复制 task_boundary + 历史）：
+  //   - 深拷贝 meta.taskBoundaries（steps/history 逐项展开），绝不与源 store 共享引用——分支是独立冻结快照。
+  //   - 按 keptRounds 裁剪：startRound > keptRounds 的边界整个丢弃（分支点之后才开始的边界）；
+  //     startRound 缺失（首版未填轮号）时退化为全部保留（保守，不丢数据）。
+  //   - 仍 active 的边界 → 收口为 'done'（endedAt=now）：分支是冻结快照，新对话不延续源对话的进行中边界。
+  //   - taskHeadline 镜像浅拷贝带过去（其值真相在各 boundary.history，镜像只是当前值）。
+  const tbNow = Date.now();
+  const branchedHeadline: TaskHeadline | undefined = meta?.taskHeadline ? { ...meta.taskHeadline } : undefined;
+  let branchedBoundaries: TaskBoundary[] | undefined;
+  if (Array.isArray(meta?.taskBoundaries) && meta!.taskBoundaries.length) {
+    branchedBoundaries = meta!.taskBoundaries
+      .filter(b => b.startRound === undefined || b.startRound <= keptRounds)
+      .map(b => ({
+        ...b,
+        steps: b.steps.map(s => ({ ...s })),          // 深拷贝隔离
+        history: b.history.map(h => ({ ...h })),       // 深拷贝隔离（历史时间线随分支复制）
+        status: b.status === 'active' ? ('done' as const) : b.status,
+        endedAt: b.status === 'active' ? tbNow : b.endedAt,
+      }));
+    if (branchedBoundaries.length === 0) branchedBoundaries = undefined;
+  }
+
   // ★ 验收修复：fork 标题用「⑂-N」编号区分同源多个分支（N=源对话现有分支数+1）；baseTitle 去掉已有 ⑂-X 前缀防叠（fork-of-fork）。
   const rawBase = meta?.title || getFallbackTitle(subset);
   const baseTitle = rawBase.replace(/^⑂[-\d]*\s+/, '');
@@ -502,6 +541,9 @@ export async function branchConversation(
     messages: subset,
     parentId: srcId,
     branchedFromMessageId: fromMessageId,
+    // ★ task_boundary：分支落库带上裁剪 + 深拷贝后的边界与大标题（随对话 JSON 列持久化）。
+    taskBoundaries: branchedBoundaries,
+    taskHeadline: branchedHeadline,
     timestamp: Date.now(),
   });
   if (!summary) return null;
@@ -557,6 +599,9 @@ export async function branchConversation(
     addRefFailedShas,
     // ★ Plan_5 M5-5：分支点是 user 时，把那条被排除的 user 回带，供调用方切到新对话后回填输入框待发。
     pendingUserMessage: pendingUserForRefill,
+    // ★ task_boundary：把裁剪 + 深拷贝后的边界与大标题回带给调用方，供切到新分支后 setConversation 回填进 store。
+    taskBoundaries: branchedBoundaries,
+    taskHeadline: branchedHeadline,
   };
 }
 
@@ -847,6 +892,15 @@ async function loadPlatformSnapshot(id: string): Promise<ConversationSnapshot | 
       compactThresholdOverride: toFiniteNumberOrUndefined(
         conversation.compactThresholdOverride ?? conversation.compact_threshold_override,
       ),
+      // ★ task_boundary：随快照回带（Electron mapConversation 已 fromJson 解析成对象返回 taskBoundaries 驼峰；
+      //   Web get 也返回对象）。task_*_json 下划线兜底分支几乎用不到（已转驼峰），保留只为防御。
+      //   旧对话/缺列为 null → 空数组也规整为 undefined（视为未设边界），恢复链路据此回填 store conversation.taskBoundaries。
+      taskBoundaries: normalizeTaskBoundaries(
+        conversation.taskBoundaries ?? conversation.task_boundaries_json,
+      ),
+      taskHeadline: normalizeTaskHeadline(
+        conversation.taskHeadline ?? conversation.task_headline_json,
+      ),
     };
   } catch {
     return null;
@@ -880,6 +934,10 @@ async function persistPlatformSnapshot(
     // ★ M5-BPC 本对话阈值覆盖（DB REAL 列；undefined 时 update 路径不覆盖旧值，缺列降级跳过）。
     bpcThresholdOverride?: number;
     compactThresholdOverride?: number;
+    // ★ task_boundary（DB JSON 列；undefined 时 update 路径不覆盖旧值，缺列降级跳过）。
+    //   metadata 经 `{ ...metadata }` 整体透传给 platform.conversation.create/update，字段自动流转。
+    taskBoundaries?: TaskBoundary[];
+    taskHeadline?: TaskHeadline;
   },
   messages: Message[],
   // ★ M4-2-S1 systemTouch：true 时本次落库不刷 updated_at（仅 update 既有行 + replaceMessages 路径生效；
@@ -949,6 +1007,33 @@ function toFiniteNumberOrUndefined(value: unknown): number | undefined {
   if (value === null || value === undefined || value === '') return undefined;
   const n = Number(value);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * ★ task_boundary：把 DB/平台读回的 taskBoundaries 规整成 TaskBoundary[] | undefined。
+ *   正常情况已是对象（Electron mapConversation fromJson / Web 存对象）；防御性兼容仍是 JSON 串的极端情况。
+ *   null/缺列/空数组/非数组/解析失败 → undefined（视为未设边界），非空数组才返回。绝不抛错拖垮整条恢复。
+ */
+function normalizeTaskBoundaries(value: unknown): TaskBoundary[] | undefined {
+  let v = value;
+  if (typeof v === 'string') {
+    if (!v) return undefined;
+    try { v = JSON.parse(v); } catch { return undefined; }
+  }
+  return Array.isArray(v) && v.length ? (v as TaskBoundary[]) : undefined;
+}
+
+/**
+ * ★ task_boundary：把 DB/平台读回的 taskHeadline 规整成 TaskHeadline | undefined。
+ *   正常已是对象；防御性兼容 JSON 串。null/缺列/非对象/解析失败 → undefined。
+ */
+function normalizeTaskHeadline(value: unknown): TaskHeadline | undefined {
+  let v = value;
+  if (typeof v === 'string') {
+    if (!v) return undefined;
+    try { v = JSON.parse(v); } catch { return undefined; }
+  }
+  return v && typeof v === 'object' ? (v as TaskHeadline) : undefined;
 }
 
 function normalizeTimestamp(value: unknown): number {

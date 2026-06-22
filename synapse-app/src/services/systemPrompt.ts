@@ -13,6 +13,8 @@ interface PromptContext {
   learningMode?: string;
   synopsis?: string;
   mode?: 'fast' | 'planning';
+  /** ★ task_boundary：本对话是否启用任务边界（false 则 planning guidelines 提示无需调用这些工具）。 */
+  taskBoundaryEnabled?: boolean;
   // ★ M4-6-S4 /goal：当前对话目标。非空时 build 输出 <current_goal> 段，agentLoop 每轮自动注入，
   //   让 AI 始终对齐用户设定的目标。空/undefined → 不注入该段（cache 友好：goal 低频变更）。
   goal?: string;
@@ -133,6 +135,7 @@ ${context.userRules}
 7. 使用 Markdown 格式化回复（标题、列表、代码块、LaTeX 公式）
 8. 长期记忆：开始新任务或需要回忆既往背景/方案/用户偏好时，先调用 memory_query 检索；遇到有长期价值的技术方案、踩坑经验、用户偏好时主动 memory_write 沉淀。这是 Synapse 内置记忆，与外置 MCP 工具无关。
 9. 历史摘要：对话历史摘要（record）里标注为「骨架」的批次只给了标题与要点，需要该批次完整细节时用 record_read(batchIndex) 按需展开全文（batchIndex 取自骨架标注里的「批次N」）。
+10. 任务边界（task_boundary，让用户直观看到你在干什么）：开始一个有多个步骤的任务时调 begin_task_boundary(headline, summary) 开一张任务卡；每进入一个新的子阶段/小标题就调 set_task_headline(headline, summary) 更新当前大标题与概述（系统会自动记入「标题变迁历史」）；每完成一个关键动作调 update_task_progress(step) 追加一条进度；整个任务做完时调 end_task_boundary() 收口。让 headline 始终反映你「此刻正在做什么」。${context.taskBoundaryEnabled === false ? '（本对话已关闭任务边界，无需调用这些工具。）' : ''}
 </guidelines>`);
     }
 

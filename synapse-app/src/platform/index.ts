@@ -336,6 +336,10 @@ function getWebMock(): SynapseAPI {
             compactThresholdOverride:
               typeof data.compactThresholdOverride === 'number' && Number.isFinite(data.compactThresholdOverride)
                 ? data.compactThresholdOverride : null,
+            // ★ task_boundary（Web 对等）：Web 无 JSON 列概念，summary 直接存对象（localStorage 序列化时整体 JSON 化）。
+            //   空数组/缺省 → null（未设边界）；非空数组才存。与 Electron 的「空数组落 NULL」口径对齐。
+            taskBoundaries: Array.isArray(data.taskBoundaries) && data.taskBoundaries.length ? data.taskBoundaries : null,
+            taskHeadline: data.taskHeadline ?? null,
           });
           writeWebConversationSummaries(summaries);
         }
@@ -387,6 +391,13 @@ function getWebMock(): SynapseAPI {
               ? ((summaries[idx] as any).compactThresholdOverride ?? null)
               : (typeof patch.compactThresholdOverride === 'number' && Number.isFinite(patch.compactThresholdOverride)
                 ? patch.compactThresholdOverride : null),
+            // ★ task_boundary（Web 对等）：undefined 不覆盖既有边界；显式传才改（空数组/null→null=清空，非空数组才存对象）。
+            taskBoundaries: patch.taskBoundaries === undefined
+              ? ((summaries[idx] as any).taskBoundaries ?? null)
+              : (Array.isArray(patch.taskBoundaries) && patch.taskBoundaries.length ? patch.taskBoundaries : null),
+            taskHeadline: patch.taskHeadline === undefined
+              ? ((summaries[idx] as any).taskHeadline ?? null)
+              : (patch.taskHeadline ?? null),
             // systemTouch 时保留旧 updatedAt（排序时间不变）；否则刷新为当前时间（用户主动保存正常置顶）。
             updatedAt: systemTouch ? (summaries[idx].updatedAt ?? Date.now()) : Date.now(),
           };

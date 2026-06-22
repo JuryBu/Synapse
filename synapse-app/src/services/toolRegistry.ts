@@ -1173,3 +1173,96 @@ toolRegistry.register({
   const footer = truncated ? `\n\n…（已达 ${maxChars} 字上限截断，共 ${msgs.length} 条消息。需要更多请提高 maxChars。）` : '';
   return `${header}\n\n${parts.join('\n\n')}${footer}`;
 }, 'custom', 'auto', 'read');
+
+// --- Task Boundary Tools（M7：反重力式任务边界流，Plan 模式 AI 自用，让用户在对话流看到「正在做什么」）---
+//   工具 handler 直接 dispatch conversation slice 的 reducer（边界挂对话顶层，不挂消息，无需 tracker 中转）。
+//   approvalLevel='auto'（无需审批）；不归 permissionCategory（不参与子代理过滤）。
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'begin_task_boundary',
+    description: '开始一个新任务边界——在对话流里显示一张任务卡（大标题+概述+进度）。开始一个有多个步骤的任务时调用。会自动收口上一个未结束的任务边界。',
+    parameters: {
+      type: 'object',
+      properties: {
+        headline: { type: 'string', description: '任务大标题（如「查看现有 rules 文件」）' },
+        summary: { type: 'string', description: '一句话概述（可选）' },
+      },
+      required: ['headline'],
+    },
+  },
+}, async (args) => {
+  const headline = typeof args.headline === 'string' ? args.headline.trim() : '';
+  if (!headline) return '⚠️ begin_task_boundary 需要 headline。';
+  const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+  const { store } = await import('@/store');
+  const conv = await import('@/store/slices/conversation');
+  store.dispatch(conv.beginTaskBoundary({ id: generateChangeId('tb'), headline, summary, at: Date.now() }));
+  return `✅ 已开始任务边界：${headline}`;
+}, 'custom', 'auto');
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'set_task_headline',
+    description: '更新当前任务边界的大标题与概述。每进入一个新的子阶段/小标题就调一次——系统会自动把变更记入该任务的「标题变迁历史」。',
+    parameters: {
+      type: 'object',
+      properties: {
+        headline: { type: 'string', description: '新的当前大标题' },
+        summary: { type: 'string', description: '新的概述（可选）' },
+      },
+      required: ['headline'],
+    },
+  },
+}, async (args) => {
+  const headline = typeof args.headline === 'string' ? args.headline.trim() : '';
+  if (!headline) return '⚠️ set_task_headline 需要 headline。';
+  const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+  const { store } = await import('@/store');
+  const conv = await import('@/store/slices/conversation');
+  store.dispatch(conv.setTaskHeadline({ headline, summary, at: Date.now() }));
+  return `✅ 已更新任务标题：${headline}`;
+}, 'custom', 'auto');
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'update_task_progress',
+    description: '给当前任务边界追加一条进度。每完成一个关键动作就调一次。',
+    parameters: {
+      type: 'object',
+      properties: {
+        step: { type: 'string', description: '本步进度描述（如「读取了 3 个配置文件」）' },
+      },
+      required: ['step'],
+    },
+  },
+}, async (args) => {
+  const text = typeof args.step === 'string' ? args.step.trim() : '';
+  if (!text) return '⚠️ update_task_progress 需要 step。';
+  const { store } = await import('@/store');
+  const conv = await import('@/store/slices/conversation');
+  store.dispatch(conv.appendTaskStep({ id: generateChangeId('tbs'), text, at: Date.now() }));
+  return `✅ 已追加进度：${text}`;
+}, 'custom', 'auto');
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'end_task_boundary',
+    description: '收口当前任务边界（整个任务完成时调用，标记为已完成）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        aborted: { type: 'boolean', description: '是否异常中止（可选，true=标记为中止/红色）' },
+      },
+      required: [],
+    },
+  },
+}, async (args) => {
+  const { store } = await import('@/store');
+  const conv = await import('@/store/slices/conversation');
+  store.dispatch(conv.endTaskBoundary({ aborted: args.aborted === true, at: Date.now() }));
+  return '✅ 已收口当前任务边界。';
+}, 'custom', 'auto');

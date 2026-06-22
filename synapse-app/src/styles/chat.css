@@ -813,3 +813,229 @@
   color: var(--syn-text-secondary);
 }
 .wf-view-missing-hint { font-size: 12px; color: var(--syn-text-muted); max-width: 420px; }
+
+/* ============================================
+   ★ task_boundary 任务边界卡片（Plan_5 §10）
+   状态色：active --syn-primary（脉冲）/ done #22c55e / aborted #ef4444
+   ============================================ */
+.task-boundary-card {
+  border: 1px solid var(--syn-border);
+  border-left: 3px solid var(--syn-primary);
+  border-radius: 8px;
+  background: var(--syn-bg-elevated);
+  padding: 10px 12px;
+  margin: 6px 0;
+}
+
+/* 顶部行：圆点 + 大标题 + 状态胶囊 + 历史按钮 */
+.tb-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+.tb-card-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tb-card-dot.pulsing { animation: wf-card-pulse 1.4s ease-in-out infinite; }
+.tb-card-headline {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--syn-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tb-card-status {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid currentColor;
+  line-height: 1.5;
+}
+.tb-card-history-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--syn-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--syn-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.tb-card-history-btn:hover:not(:disabled) {
+  color: var(--syn-text-primary);
+  border-color: var(--syn-primary);
+  background: var(--syn-bg-hover);
+}
+.tb-card-history-btn:focus-visible { outline: 1px solid var(--syn-accent); outline-offset: 1px; }
+.tb-card-history-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* 概括（次要色，一行省略） */
+.tb-card-summary {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--syn-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 进度步骤区（默认收叠，点展开） */
+.tb-card-steps { margin-top: 8px; }
+.tb-card-steps-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--syn-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.tb-card-steps-toggle:hover { color: var(--syn-text-primary); }
+.tb-card-steps-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tb-card-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--syn-overlay-scrim);
+  font-size: 12px;
+}
+.tb-card-step-num {
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--syn-overlay-weak);
+  color: var(--syn-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--syn-font-mono);
+}
+.tb-card-step-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--syn-text-primary);
+  line-height: 1.5;
+  word-break: break-word;
+}
+.tb-card-step-time {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--syn-text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+
+/* ★ 历史变迁浮层（createPortal 到 body，仿 ContextMenu glass-panel） */
+.task-boundary-history-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9990;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--syn-overlay-scrim, rgba(0, 0, 0, 0.35));
+}
+.task-boundary-history-overlay {
+  z-index: 9991;
+  width: min(420px, 90vw);
+  max-height: 70vh;
+  overflow-y: auto;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.tb-history-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--syn-border);
+  color: var(--syn-text-primary);
+}
+.tb-history-title { font-size: 13px; font-weight: 600; }
+.tb-history-count { margin-left: auto; font-size: 11px; color: var(--syn-text-muted); }
+.tb-history-empty { font-size: 12px; color: var(--syn-text-muted); padding: 8px 0; }
+.tb-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tb-history-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 6px 8px 4px;
+  position: relative;
+}
+.tb-history-entry:not(:last-child)::after {
+  /* 时间线竖线：从当前点延伸到下一条 */
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 16px;
+  bottom: -4px;
+  width: 1px;
+  background: var(--syn-border);
+}
+.tb-history-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 5px;
+  background: var(--syn-primary);
+  position: relative;
+  z-index: 1;
+}
+.tb-history-entry-main { flex: 1; min-width: 0; }
+.tb-history-entry-headline {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--syn-text-primary);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.tb-history-entry-summary {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--syn-text-secondary);
+  line-height: 1.45;
+  word-break: break-word;
+}
+.tb-history-entry-time {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--syn-text-muted);
+}
