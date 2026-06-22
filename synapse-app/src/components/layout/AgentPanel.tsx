@@ -747,7 +747,9 @@ export function AgentPanel() {
   //   - 跑期间用 setStreaming(true) 占位（复用既有「流式中」语义防止重复发送 / 禁用输入），完成后插一条 assistant 汇总消息。
   //   - 工作流自身的进度/错误已由 agentOrchestrator 内部 addNotification 反馈；这里只负责对话消息的 user/assistant 落位。
   //   TODO(M3-3)：assistant 汇总目前是结构化文本；M3-3 会替换/增强为工作流卡片（节点四色 + 子代理树 + 点进子对话）。
-  const runWorkflowFromInput = useCallback(async (rawText: string) => {
+  // ★ M6 收尾 D1 修补（review HIGH#1）：签名加 richTokens 参数，让 @MultiAI 工作流路径的 user 消息也带上
+  //   富文本 atomic token 锚点，编辑历史时能无损还原 @MultiAI: pill（之前漏传导致降级为纯文本，与 D1 承诺打脸）。
+  const runWorkflowFromInput = useCallback(async (rawText: string, richTokens?: ExtractedToken[]) => {
     // ★ M3-2b 修复（medium 串台）：捕获触发时刻的对话身份。runWorkflow 可能耗时数十分钟，
     //   期间用户可能切走对话（ConversationList 双击不设防）。await 解析后回填 assistant/error 消息前
     //   比对 conversationRef.current.id === scopedId，不一致则改走 notification、不污染当前（已切走的别的）对话 slice。
@@ -760,6 +762,8 @@ export function AgentPanel() {
       id: generateMessageId('user'),
       role: 'user',
       content: rawText,
+      // ★ D1 修补：与普通路径口径对齐——长度 0 时传 undefined 省 DB 空间。
+      richTokens: richTokens && richTokens.length > 0 ? richTokens : undefined,
       timestamp: Date.now(),
     }));
 
@@ -983,9 +987,13 @@ export function AgentPanel() {
     }
     const fileTokens = tokens.filter(t => t.type === 'file' || t.type === 'directory');
     if (fileTokens.length > 0) {
-      // M6 收尾 C2/联动②：t.value 现已收敛为【绝对路径】，注入清单里给 AI 直查的就是绝对路径，
-      // 避「无活动 worktree 时落 process.cwd 读到 Synapse 自身源码」的高优 bug。
-      const lines = fileTokens.map(t => `- ${t.value}`).join('\n');
+      // ★ M6 收尾 D1 修补（review HIGH#2 隐私泄漏）：注入文本给 AI 看的是【相对路径】（displayLabel），
+      //   而非绝对路径（t.value 是绝对路径，落到外部 LLM 日志会泄漏 Windows 用户名/家目录/盘符）。
+      //   AI 调 view_file/list_dir 时拿相对路径，fileSystem.resolveWorkspacePath 会按当前 worktree 解析；
+      //   绝对路径仅作【dataset.value】用于内部 token 锚点，从不出现在 LLM payload。
+      //   顺手做最小转义：剔除换行 / 控制字符（POSIX 文件名可能含 \n，防 prompt injection），并截断 4096 字。
+      const sanitizePath = (s: string) => s.replace(/[\r\n\t -]/g, ' ').slice(0, 4096);
+      const lines = fileTokens.map(t => `- ${sanitizePath(t.displayLabel ?? t.value)}`).join('\n');
       blocks.push(`# 用户引用的文件 / 目录（按需用 view_file / list_dir 查看）\n${lines}`);
     }
     // mcp / terminal：Phase 2 预留（buildMcpContext / buildTerminalContext）。
@@ -1037,7 +1045,8 @@ export function AgentPanel() {
       setPendingAttachments([]);
       setPreviewAttachment(null);
       closeMenu();
-      void runWorkflowFromInput(text);
+      // ★ HIGH#1 修：把 tokens 透传给工作流路径，让 @MultiAI 消息编辑时能无损还原 atomic 块。
+      void runWorkflowFromInput(text, tokens);
       return;
     }
 

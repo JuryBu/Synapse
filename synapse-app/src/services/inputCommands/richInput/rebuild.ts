@@ -16,21 +16,36 @@
  */
 
 import { TOKEN_INLINE } from './domUtils';
-import type { ExtractedToken, TokenSpec } from './types';
+import type { AtType, ExtractedToken, TokenSpec } from './types';
 
 export function buildRichParts(content: string, richTokens?: ExtractedToken[]): Array<string | TokenSpec> {
   if (!richTokens || richTokens.length === 0) return [content];
   const parts: Array<string | TokenSpec> = [];
   let cursor = 0;
   for (const tk of richTokens) {
-    const placeholder = TOKEN_INLINE[tk.type](tk.value);
+    // review MEDIUM：tk.type 来自 JSON 反序列化无类型守卫。未来 AtType 枚举改名或脏数据时 TOKEN_INLINE[unknown]
+    //   为 undefined → undefined(tk.value) TypeError 会挂掉整条消息编辑入口。这里做防御性兜底，与 idx<0 同款『跳过不破文本』。
+    const fn = TOKEN_INLINE[tk.type as AtType];
+    if (typeof fn !== 'function') {
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.warn('[buildRichParts] unknown token type, skipping', { type: tk.type, value: tk.value });
+      }
+      continue;
+    }
+    const placeholder = fn(tk.value);
     if (placeholder === '') {
       // settings 类型：占位空串，content 里不可见，直接插 token（光有 content 无法还原）。
+      // 注：当前 settings 走 useAtMention 跳转分支不进 richTokens，此分支为协议层防御。
       parts.push(tk);
       continue;
     }
     const idx = content.indexOf(placeholder, cursor);
-    if (idx < 0) continue; // 占位串找不到：跳过该 token，不破坏文本（容错路径）。
+    if (idx < 0) {
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.warn('[buildRichParts] placeholder not found, skipping token', { type: tk.type, value: tk.value, cursor });
+      }
+      continue; // 占位串找不到：跳过该 token，不破坏文本（容错路径）。
+    }
     if (idx > cursor) parts.push(content.slice(cursor, idx));
     parts.push(tk);
     cursor = idx + placeholder.length;

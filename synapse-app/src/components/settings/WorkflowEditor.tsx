@@ -128,11 +128,12 @@ export function WorkflowEditor({ mode, availableModels, onSave, onCancel, onDele
   const [description, setDescription] = useState(mode.description ?? '');
   const [nodes, setNodes] = useState<WorkflowNode[]>(() => cloneWorkflow(mode.workflow));
 
-  // M6 收尾 C2/LOW-2：示例用 mode.id（英文 slug，无空格），与富文本 atomic token 的 plainText 占位口径一致。
-  // 旧 `@MultiAI:${name}` 语法仍兼容（resolveWorkflowMode id→name 双路径），但默认引导用户走 id 避空格截断。
+  // M6 收尾 D1 修补（review HIGH#3）：示例展示【人类手打语法】用 mode.name（resolveWorkflowMode 走 name 兜底命中，
+  //   与 atomic token 内部用 mode.id 是两条独立路径，UX 引导走友好的 name）。富文本菜单 @ 点击插入时仍由 atProviders
+  //   设 dataset.value=mode.id 走 `^(\S+)` 严格扫描避空格截断——这是内部协议，不暴露给用户照抄。
   const triggerExample = useMemo(
-    () => `${MULTI_AI_TRIGGER_PREFIX}${mode.id || 'mode-id'} 你的任务描述`,
-    [mode.id],
+    () => `${MULTI_AI_TRIGGER_PREFIX}${name.trim() || '模式名'} 你的任务描述`,
+    [name],
   );
 
   // condition 作为首节点的轻提示（复用 runWorkflow 容错，UI 层只 warning）。
