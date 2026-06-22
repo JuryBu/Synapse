@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
+import { store } from '@/store';
 import type { ConversationSummary } from '@/store/slices/conversationHistory';
 import { removeConversation, setConversations, setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
 import { clearConversation, setConversation, setConversationWorkspace, setTitle } from '@/store/slices/conversation';
@@ -104,10 +105,9 @@ export function ConversationList() {
   }, [workspaceCurrentPath, recentPaths]);
   const conversations = useAppSelector((s) => s.conversationHistory.conversations);
   const selectedId = useAppSelector((s) => s.conversationHistory.selectedId);
-  const currentConversation = useAppSelector((s) => s.conversation);
-  // 持有最新 conversation 供异步懒迁移 onMigrated 回调安全校验，避免 useCallback 闭包旧值误导。
-  const currentConversationRef = useRef(currentConversation);
-  currentConversationRef.current = currentConversation;
+  // ★ 性能（诊断#1 热点1）：不再 useAppSelector 订阅整个 s.conversation——流式每 200ms 换引用会让本组件
+  //   每帧白重渲（渲染体只用 conversations 历史 + selectedId 高亮）。当前对话数据仅回调里需要，改为
+  //   调用时 store.getState().conversation 取最新值（比 render 快照更准），彻底断开整对象订阅。
   // ★ M4-2-S5 对话工作区归属：新对话默认归当前工作区（state.workspace.currentPath，null=Global）。
   //   用 ref 持有最新值——既不把它塞进 handleNewConversation 的依赖数组（避免切工作区时重建回调），
   //   也防 useCallback 闭包读到旧 path。复用 useConversationManager 暴露的 workspaceCurrentPath（同源）。
@@ -197,28 +197,29 @@ export function ConversationList() {
       //   引用同一 sha，但 refCount 仍=1（欠计）→ 删任一份后 release 即归零 GC，另一份图变缺失。
       //   修法（与 AgentPanel 新建路径口径对齐）：fork 成新 id 后 clearAutosaveSnapshot()
       //   （只删 autosave 镜像行、不 release），消除「autosave + 新对话」双持有，使持有数回落到 1（仅新对话行）—— refCount 守恒。
-      const wasAutosave = !currentConversation.id || currentConversation.id === AUTOSAVE_ID;
+      const cur = store.getState().conversation;
+      const wasAutosave = !cur.id || cur.id === AUTOSAVE_ID;
       const summary = await saveConversationSnapshot({
-        id: currentConversation.id,
-        title: currentConversation.title,
-        messages: currentConversation.messages,
-        model: currentConversation.model,
+        id: cur.id,
+        title: cur.title,
+        messages: cur.messages,
+        model: cur.model,
         // M2-6：把当前对话的 mode / reasoningEffort（全局 agentSettings 镜像）随对话落库，
         //   使切走再切回能恢复该对话各自的设置（A=fast / B=planning 不串）。
         mode: agentSettingsRef.current.mode,
         reasoningEffort: agentSettingsRef.current.reasoningEffort,
-        assistantRuns: currentConversation.assistantRuns,
-        fileSnapshots: currentConversation.fileSnapshots,
-        pendingDiffs: currentConversation.pendingDiffs,
+        assistantRuns: cur.assistantRuns,
+        fileSnapshots: cur.fileSnapshots,
+        pendingDiffs: cur.pendingDiffs,
         // ★ M4-2-S5 首次保存落归属：把当前对话在 store 持有的工作区归属随对话落库（新建时由
         //   handleNewConversation 已置入 state.conversation.workspacePath，恢复/分支时已回填）。这是
         //   autosave→fork 成正式 id 那一刻把归属固化进 DB 的关键一环——否则 fork 出的新行 workspace_path 为 NULL。
-        workspacePath: currentConversation.workspacePath,
+        workspacePath: cur.workspacePath,
         // ★ M4-6 审查修复（medium/regression 问题4）：autosave→fork 那一刻把对话目标固化进新对话行（与 AgentPanel
         //   等价保存路径 line ~594/~662 口径一致）。普通 update 路径靠「undefined 不动」尚能保住 DB 既有 goal，
         //   但当前对话是 autosave 草稿（wasAutosave=true）且刚用 /goal 设了目标时，fork 出的新对话走 create/insert
         //   路径若不传 goal 会落 NULL → goal 丢失。故显式随快照带上。
-        goal: currentConversation.goal,
+        goal: cur.goal,
         // ★ M4-2-S1（问题9 根治）：这是「切走对话的系统性自动保存」，不应改变其排序时间。
         //   改 systemTouch:true（落库不刷 updated_at）+ 去掉硬传 timestamp:Date.now()——
         //   否则切走对话被刷成当前时间，按时间降序时它跳第一、被点中的对话被挤到第二位。
@@ -236,7 +237,7 @@ export function ConversationList() {
       dispatch(addNotification({ type: 'warning', title: '自动保存失败', message: '当前对话保存失败，但仍会继续打开历史' }));
       return null;
     }
-  }, [currentConversation, dispatch]);
+  }, [dispatch]); // 性能：断 currentConversation 订阅后回调内 store.getState() 取最新，依赖仅 dispatch
 
   const handleNewConversation = useCallback(async () => {
     // ★ M2-6 切换竞态：同 handleSwitchConversation，置闸覆盖 saveCurrentToHistory(可能 fork+clearAutosave)
@@ -245,7 +246,7 @@ export function ConversationList() {
     // ★ M2-5 worktree 止血：对话身份变化（新建）即回主工作区——清掉【离开的对话】的活动 worktree 条目。
     //   即便治本已按 contextId 索引，新对话与 autosave 草稿共用 AUTOSAVE_ID 这个 contextId，
     //   不清则新对话会继承上一条 autosave 对话的 worktree 重定向（串台），故必须显式 exit。
-    const leavingContextId = (currentConversationRef.current.id as string | null) || AUTOSAVE_ID;
+    const leavingContextId = (store.getState().conversation.id as string | null) || AUTOSAVE_ID;
     dispatch(exitWorktree({ contextId: leavingContextId }));
     dispatch(exitWorktree({ contextId: AUTOSAVE_ID }));
     try {
@@ -276,7 +277,7 @@ export function ConversationList() {
     // ★ M2-5 worktree 止血：切到另一对话即回主工作区——清掉【离开的对话】+ AUTOSAVE_ID 的活动 worktree 条目。
     //   防 autosave 草稿（共用 AUTOSAVE_ID）的 worktree 重定向被切入对话误继承。切入对话若自身有条目，
     //   按 contextId 索引天然各自独立、不受影响。
-    const leavingContextId = (currentConversationRef.current.id as string | null) || AUTOSAVE_ID;
+    const leavingContextId = (store.getState().conversation.id as string | null) || AUTOSAVE_ID;
     dispatch(exitWorktree({ contextId: leavingContextId }));
     dispatch(exitWorktree({ contextId: AUTOSAVE_ID }));
     try {
@@ -311,7 +312,7 @@ export function ConversationList() {
       // 迁移确有变更时把引用态写回 store（杜绝残留 base64 反复落库）；回写前校验仍是同一对话且消息未变。
       const switchedLen = snapshot.messages.length;
       void migrateSnapshotAttachments(snapshot, (migratedId, migratedMessages) => {
-        const cur = currentConversationRef.current;
+        const cur = store.getState().conversation;
         if (!cur || cur.isStreaming) return;
         if ((cur.id as string | null) === migratedId && cur.messages.length === switchedLen) {
           dispatch(setConversation({
@@ -517,20 +518,21 @@ export function ConversationList() {
 
     await renameConversation(id, title);
     dispatch(updateConversation({ id, title }));
-    if (currentConversation.id === id) {
+    const cur = store.getState().conversation;
+    if (cur.id === id) {
       dispatch(setConversation({
         id,
         title,
-        messages: currentConversation.messages,
-        model: currentConversation.model,
-        assistantRuns: currentConversation.assistantRuns,
-        fileSnapshots: currentConversation.fileSnapshots,
-        pendingDiffs: currentConversation.pendingDiffs,
+        messages: cur.messages,
+        model: cur.model,
+        assistantRuns: cur.assistantRuns,
+        fileSnapshots: cur.fileSnapshots,
+        pendingDiffs: cur.pendingDiffs,
       }));
     }
     setEditingId(null);
     await refreshConversations();
-  }, [currentConversation, editingTitle, refreshConversations, dispatch]);
+  }, [editingTitle, refreshConversations, dispatch]);
 
   // ★ M7-F1：重新生成标题——对任意（尤其旧 fallback 标题的）对话手动重跑自动标题内核。
   //   loadConversationSnapshot 取首条 user 文本 → generateTitleFromText → renameConversation(systemTouch 不刷排序)
@@ -553,7 +555,7 @@ export function ConversationList() {
       }
       await renameConversation(id, title, { systemTouch: true });
       dispatch(updateConversation({ id, title }));
-      if (currentConversationRef.current.id === id) dispatch(setTitle(title));
+      if (store.getState().conversation.id === id) dispatch(setTitle(title));
       await refreshConversations();
       dispatch(addNotification({ type: 'info', title: '标题已更新', message: title }));
     } catch {
@@ -568,7 +570,7 @@ export function ConversationList() {
   const handleMoveConversation = useCallback(async (id: string, target: WorkspaceTarget) => {
     setMovingId(null);
     await moveToWorkspace(id, target);
-    if (currentConversationRef.current.id === id) {
+    if (store.getState().conversation.id === id) {
       dispatch(setConversationWorkspace(target ?? null));
     }
     await refreshConversations();
