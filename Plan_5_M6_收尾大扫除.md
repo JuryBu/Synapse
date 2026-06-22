@@ -4,6 +4,18 @@
 > 起因：M6 主体（A/B/C/D 类 + C6 编辑框统一 + C6 附件）已被主人全面验收通过。剩下 4 项小本本一次清空，让 M6 彻底收官。
 > 主文档：[Plan_5_M6_富文本输入框.md](Plan_5_M6_富文本输入框.md) —— 主体施工与验收记录在那里。
 > 调研产出：workflow `w4c4lhg85`（D1 蓝图）+ workflow `wotfcmtkz`（LOW-2 / 联动①② 调研与方案）。
+> 5-lens 审查：workflow `wf313l9rp`（正确性/安全/性能/可维护性/边角与回归 5 路并行 + 综合判定）。
+
+## ✅ 落地状态（4 commit 完结）
+
+| commit | 内容 |
+|---|---|
+| **a6c12df** C1 | 联动① detectAtTrigger 跨节点回看 + removeTokenSpan 补 normalize |
+| **f857f61** C2 | TokenSpec 协议 displayLabel/value 分离 + LOW-2 workflow空格 + 联动②文件路径绝对化 |
+| **66f14bb** C3 | D1 richTokens 持久化 + 编辑历史 @ 高亮块无损还原（8 文件 + 新建 rebuild.ts） |
+| **88d177f** C4 | 5-lens review 修补 — HIGH#1 工作流路径漏传 richTokens / HIGH#2 注入文本泄漏绝对路径 / HIGH#3 UX 引导回退 + buildRichParts type 守卫 + sanitize 注释订正 |
+
+主人真机验证待跑（清单见主文档「M7 治理小本本」+ 本文件第四章测试点）。
 
 ## 一、范围（4 项）
 
