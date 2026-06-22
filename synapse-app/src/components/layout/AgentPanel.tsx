@@ -287,6 +287,10 @@ export function AgentPanel() {
   // 按 sha256 懒加载还原成 dataUrl 供 MessageBubble 渲染。Map<sha256, dataUrl>。
   const [resolvedPreviews, setResolvedPreviews] = useState<Map<string, string>>(new Map());
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // ★ M6 验收 bug3：消息滚动容器 ref + 用户是否贴底的守卫——只有用户已在底部时才自动滚到底，
+  //   避免生成时用户上滚被强行拽回（滚动争抢）。初值 true（新对话/首次进入默认贴底）。
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
   // ★ M6：inputRef 移除（textarea→RichTextInput，命令式句柄用 richRef）。
   const agentLoopRef = useRef<AgentLoop | null>(null);
 
@@ -413,10 +417,18 @@ export function AgentPanel() {
     return () => { cancelled = true; loop.stop(); bpcScheduler.detachLoop(loop); };
   }, [aiClient, settings.safety]);
 
-  // Auto-scroll to bottom
+  // ★ M6 验收 bug3：滚动容器监听——记录用户是否贴底（距底 < 80px 视为贴底）。用户主动上滚 → isAtBottom=false。
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }, []);
+
+  // Auto-scroll to bottom：仅当用户已贴底才自动滚（不抢用户上滚）；生成期用 'auto' 瞬时滚（'smooth' 高频会争抢/卡顿）。
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (!isAtBottomRef.current) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: isStreaming ? 'auto' : 'smooth' });
+  }, [messages, isStreaming]);
 
   useEffect(() => {
     const focusInput = (event: Event) => {
@@ -1947,7 +1959,7 @@ export function AgentPanel() {
         document.body,
       )}
 
-      <div className="agent-messages">
+      <div className="agent-messages" ref={messagesContainerRef} onScroll={handleMessagesScroll}>
         {activeAgentTab === 'chat' && (
           <>
             {!hasMessages ? (

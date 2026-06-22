@@ -209,6 +209,12 @@ html, body, #root {
   position: absolute;
   inset: 0;
   background: rgba(var(--syn-bg-surface-rgb), 0.2);
+}
+
+/* ★ M6 验收 bug4 性能：仅开启壁纸时才挂全屏 backdrop-filter blur。
+   未开壁纸时这层 blur 模糊的只是纯色背景（无视觉收益），却是 GPU 重绘放大器——
+   下层流式 markdown 每帧重绘时强制重新采样全屏模糊，是「30 帧」卡顿的主因之一。门控掉立竿见影。 */
+body[data-wallpaper="enabled"] .app-background::after {
   backdrop-filter: blur(var(--glass-blur));
 }
 

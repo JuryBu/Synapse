@@ -5,7 +5,11 @@
 /* Messages Container */
 .agent-messages {
   flex: 1;
+  /* ★ M6 验收 bug2：flex 子项默认 min-height:auto 会被内容撑破、无法正常滚动/铺满（窗口最大化时尤其明显）。
+     补 min-height:0 让滚动容器在 flex 布局里正确收缩。 */
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 12px;
 }
 
