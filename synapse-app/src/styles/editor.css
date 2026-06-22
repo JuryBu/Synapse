@@ -134,8 +134,11 @@
   flex-direction: column;
   height: 100%;
   width: 100%;
-  /* ★ 主题修复：原写死 #0d1117，浅色模式下深底深字看不清。改用主题代码底 --syn-bg-code（深 #0d1117 / 浅 #f6f8fa）。 */
-  background: var(--syn-bg-code);
+  /* ★ 玻璃化：原不透明 --syn-bg-code（暗 #0d1117 死黑 / 亮 #f6f8fa 死白）→ 高不透明「代码玻璃」
+     --glass-bg-code（深浅同源、0.88~0.90 alpha）+ backdrop-filter，摆脱死色又保证代码清晰可读。 */
+  background: var(--glass-bg-code);
+  backdrop-filter: blur(var(--glass-blur-code));
+  -webkit-backdrop-filter: blur(var(--glass-blur-code));
 }
 
 .code-editor-toolbar {
@@ -669,7 +672,10 @@
   padding: 12px;
   border: 1px solid var(--syn-border);
   border-radius: 8px;
-  background: var(--syn-bg-code);
+  /* ★ 玻璃化：错误详情代码面，从死色 --syn-bg-code → 高不透明代码玻璃。 */
+  background: var(--glass-bg-code);
+  backdrop-filter: blur(var(--glass-blur-code));
+  -webkit-backdrop-filter: blur(var(--glass-blur-code));
   color: var(--syn-text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -765,10 +771,12 @@
   font-size: 0.9em;
 }
 
-/* ★ 主题修复：Markdown 代码块——原写死 rgba(0,0,0,0.3) 深底，浅色模式下深底深字。
-   改用主题代码底 --syn-bg-code（深 #0d1117 / 浅 #f6f8fa）+ 代码字色，并补边框分隔。 */
+/* ★ 玻璃化：Markdown 代码块——原不透明 --syn-bg-code（暗死黑/亮死白）→ 高不透明代码玻璃
+   --glass-bg-code + backdrop-filter，文字密集故用高 alpha 保代码清晰。 */
 .markdown-content pre {
-  background: var(--syn-bg-code);
+  background: var(--glass-bg-code);
+  backdrop-filter: blur(var(--glass-blur-code));
+  -webkit-backdrop-filter: blur(var(--glass-blur-code));
   color: var(--syn-text-code);
   border: 1px solid var(--syn-border);
   padding: 16px;
@@ -992,7 +1000,11 @@
   font-size: 13px;
   line-height: 1.6;
   color: var(--syn-text-primary);
-  background: var(--syn-bg-base, transparent);
+  /* ★ 玻璃化：附件 TEXT 框（编辑器 tab 里打开纯文本/artifact）——原死色 --syn-bg-base → 高不透明代码玻璃，
+     文字密集故用高 alpha 保清晰。 */
+  background: var(--glass-bg-code);
+  backdrop-filter: blur(var(--glass-blur-code));
+  -webkit-backdrop-filter: blur(var(--glass-blur-code));
 }
 
 .attachment-tab-download {
@@ -1387,8 +1399,10 @@
   border: 1px solid var(--syn-border);
   border-radius: 6px;
   overflow: auto;
-  /* ★ 主题修复：diff 预览是代码面，原写死深底。改用主题代码底（深 #0d1117 / 浅 #f6f8fa）。 */
-  background: var(--syn-bg-code);
+  /* ★ 玻璃化：diff 预览是代码面，从死色 --syn-bg-code → 高不透明代码玻璃 + 模糊。 */
+  background: var(--glass-bg-code);
+  backdrop-filter: blur(var(--glass-blur-code));
+  -webkit-backdrop-filter: blur(var(--glass-blur-code));
 }
 
 .review-diff-hunk + .review-diff-hunk {

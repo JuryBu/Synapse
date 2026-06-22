@@ -22,6 +22,7 @@ import { setActiveView } from '@/store/slices/sidebar';
 import { MessageBubble } from '@/components/chat/MessageBubble';
 import { ApprovalDialog, type ApprovalRequest } from '@/components/ui/ApprovalDialog';
 import { TaskBoundaryCard, type BoundaryFile } from '@/components/chat/TaskBoundaryCard';
+import { resolveEditorType } from '@/services/editorFileTypes';
 import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
@@ -83,6 +84,22 @@ function filterSystemToolCalls<T extends { name?: string }>(tcs: T[] | undefined
   if (!hide || !tcs || tcs.length === 0) return tcs;
   const visible = tcs.filter(tc => !SYSTEM_TOOL_NAMES.has(tc.name ?? ''));
   return visible.length > 0 ? visible : undefined;
+}
+
+// ★ 五轮：判断一条 assistant 消息是否「完全无内容」——流式已结束 + content 空 + 无 thinking 正文 + 无可见工具
+//   (系统工具隐藏后) + 无 diffs/artifacts/attachments。这种此前显示「无内容」占位(噪音)，应整条略过不渲染。
+//   注意：isStreaming 中保留(可能还在生成「思考中」)；有任何可见内容的都不略过。
+function isEmptyAssistantMessage(msg: any, hideSystemTools: boolean): boolean {
+  if (!msg || msg.role !== 'assistant') return false;
+  if (msg.isStreaming) return false;
+  if (msg.content && String(msg.content).trim()) return false;
+  if (msg.thinking?.content && String(msg.thinking.content).trim()) return false;
+  const tools = filterSystemToolCalls(msg.toolCalls, hideSystemTools);
+  if (tools && tools.length > 0) return false;
+  if (msg.diffs?.length) return false;
+  if (msg.artifacts?.length) return false;
+  if (msg.attachments?.length) return false;
+  return true;
 }
 
 const MAX_IMAGE_PAYLOAD_BYTES = 8 * 1024 * 1024;
@@ -1657,25 +1674,28 @@ export function AgentPanel() {
   }, [dispatch]);
 
   const openDiffTarget = useCallback((diff: { path: string }) => {
+    const fileName = diff.path.split(/[\\/]/).pop() || diff.path;
     dispatch(openTab({
       id: `tab-${Date.now()}`,
       filePath: diff.path,
-      fileName: diff.path.split(/[\\/]/).pop() || diff.path,
+      fileName,
       isDirty: false,
       isPreview: true,
-      type: 'code',
+      // ★ 五轮修复：按扩展名选 viewer（md→markdown 预览/源码/分屏, html→html 等），不再硬编码 'code' 丢失预览/对比模式。
+      type: resolveEditorType(fileName),
     }));
   }, [dispatch]);
 
-  // ★ show_artifact：点产物卡片 → 在中部编辑器打开该文件（与 openDiffTarget 同款，EditorArea 按扩展名自动选 viewer）。
+  // ★ show_artifact：点产物卡片 → 在中部编辑器打开该文件，按扩展名选 viewer（md/html 等带预览/对比/分屏）。
   const openArtifactTarget = useCallback((artifact: { path: string }) => {
+    const fileName = artifact.path.split(/[\\/]/).pop() || artifact.path;
     dispatch(openTab({
       id: `tab-${Date.now()}`,
       filePath: artifact.path,
-      fileName: artifact.path.split(/[\\/]/).pop() || artifact.path,
+      fileName,
       isDirty: false,
       isPreview: true,
-      type: 'code',
+      type: resolveEditorType(fileName),
     }));
   }, [dispatch]);
 
@@ -2230,16 +2250,17 @@ export function AgentPanel() {
                       onBranch={handleBranch}
                     />
                   );
+                  const hideSysTools = agentSettings.hideSystemToolCalls ?? true;
                   const out: any[] = [];
                   let i = 0;
                   while (i < messages.length) {
                     const r = startMap.get(i);
                     if (r) {
-                      // 边界区间 → 收进卡片（过滤 tool 后作 children 过程消息）。
+                      // 边界区间 → 收进卡片（过滤 tool + 完全无内容的空 assistant 消息后作 children 过程消息）。
                       const rangeMsgs: any[] = [];
                       for (let j = r.startIdx; j <= r.endIdx && j < messages.length; j++) {
                         const m: any = messages[j];
-                        if (m.role !== 'tool') rangeMsgs.push(m);
+                        if (m.role !== 'tool' && !isEmptyAssistantMessage(m, hideSysTools)) rangeMsgs.push(m);
                       }
                       const startDivider = batchDividerByIdx.get(r.startIdx);
                       out.push(
@@ -2258,7 +2279,7 @@ export function AgentPanel() {
                       i = r.endIdx + 1;
                     } else {
                       const msg: any = messages[i];
-                      if (msg.role !== 'tool') {
+                      if (msg.role !== 'tool' && !isEmptyAssistantMessage(msg, hideSysTools)) {
                         const divider = batchDividerByIdx.get(i);
                         out.push(
                           <Fragment key={msg.id}>

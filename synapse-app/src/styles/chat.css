@@ -344,8 +344,11 @@
   margin: 8px 0;
   border-radius: 8px;
   overflow: hidden;
-  /* ★ 主题修复：原写死 #0d1117，浅色模式下对话气泡里的代码块深底深字。改用主题代码底（深 #0d1117 / 浅 #f6f8fa）。 */
-  background: var(--syn-bg-code);
+  /* ★ 玻璃化：对话气泡里的代码块——原不透明 --syn-bg-code（暗死黑/亮死白）→ 高不透明代码玻璃
+     --glass-bg-code + backdrop-filter，代码密集故用高 alpha 保清晰，与顶栏/编辑区玻璃统一。 */
+  background: var(--glass-bg-code);
+  backdrop-filter: blur(var(--glass-blur-code));
+  -webkit-backdrop-filter: blur(var(--glass-blur-code));
   border: 1px solid var(--syn-border);
 }
 

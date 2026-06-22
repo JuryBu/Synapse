@@ -871,7 +871,11 @@ html[data-wallpaper="enabled"] .settings-panel {
 .suggestion-chip {
   padding: 10px 16px;
   border: 1px solid var(--syn-border);
-  background: var(--syn-bg-elevated);
+  /* ★ 玻璃化：欢迎页 3 个建议按钮（📖/🧮/💡）——原不透明 --syn-bg-elevated 死底 → 交互面玻璃 + 模糊。
+     文字少，沿用 --glass-bg-input（比代码块略透）即可，摆脱死黑死白。 */
+  background: var(--glass-bg-input);
+  backdrop-filter: blur(var(--glass-blur-code));
+  -webkit-backdrop-filter: blur(var(--glass-blur-code));
   color: var(--syn-text-primary);
   border-radius: 10px;
   font-size: 12px;
@@ -952,7 +956,11 @@ html[data-wallpaper="enabled"] .settings-panel {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  background: var(--syn-bg-elevated);
+  /* ★ 玻璃化：底部消息输入框——原不透明 --syn-bg-elevated（暗死黑/亮死白）→ 交互面玻璃 --glass-bg-input
+     + backdrop-filter，输入文字密集故用较高 alpha（0.78~0.82）保清晰，比代码块略透、和顶栏协调。 */
+  background: var(--glass-bg-input);
+  backdrop-filter: blur(var(--glass-blur-code));
+  -webkit-backdrop-filter: blur(var(--glass-blur-code));
   border: 1px solid var(--syn-border);
   border-radius: 12px;
   padding: 8px 12px;

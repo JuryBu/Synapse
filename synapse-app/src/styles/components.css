@@ -24,7 +24,8 @@
 .tool-call-body { padding: 0 12px 12px; }
 .tool-call-section { margin-bottom: 8px; }
 .tool-call-label { font-size: 10px; color: var(--syn-text-muted); text-transform: uppercase; margin-bottom: 4px; }
-.tool-call-code { font-family: 'JetBrains Mono',monospace; font-size: 11px; padding: 8px; border-radius: 4px; background: var(--syn-bg-code); color: var(--syn-text-code); overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+/* ★ 玻璃化：工具调用代码框——死色 --syn-bg-code → 高不透明代码玻璃 + 模糊，保代码清晰。 */
+.tool-call-code { font-family: 'JetBrains Mono',monospace; font-size: 11px; padding: 8px; border-radius: 4px; background: var(--glass-bg-code); backdrop-filter: blur(var(--glass-blur-code)); -webkit-backdrop-filter: blur(var(--glass-blur-code)); color: var(--syn-text-code); overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
 .tool-call-result { border-left: 2px solid #22c55e; }
 .tool-calls-container { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .tool-copy-btn { background: none; border: none; color: var(--syn-text-muted); cursor: pointer; padding: 2px; border-radius: 3px; }
@@ -52,7 +53,9 @@
 /* Terminal */
 /* ★ 主题修复：终端原写死 rgba(0,0,0,0.3) 黑底——浅色模式下 tab 标签(--syn-text-muted 变深)在深底上看不清。
    改用代码面主题底 --syn-bg-code（深 #0d1117 / 浅 #f6f8fa），与代码编辑器统一；正文/提示色见下方改为主题适配。 */
-.terminal-panel { display: flex; flex-direction: column; height: 100%; background: var(--syn-bg-code); font-family: 'JetBrains Mono','Cascadia Code',monospace; }
+/* ★ 玻璃化：终端区——原不透明 --syn-bg-code（暗死黑/亮死白）→ 高不透明代码玻璃 --glass-bg-code + 模糊，
+   终端输出文字密集故用高 alpha 保清晰，与编辑区/代码块统一。 */
+.terminal-panel { display: flex; flex-direction: column; height: 100%; background: var(--glass-bg-code); backdrop-filter: blur(var(--glass-blur-code)); -webkit-backdrop-filter: blur(var(--glass-blur-code)); font-family: 'JetBrains Mono','Cascadia Code',monospace; }
 .terminal-tabs { display: flex; align-items: center; gap: 0; border-bottom: 1px solid var(--syn-border); }
 .terminal-tab { display: flex; align-items: center; gap: 4px; padding: 6px 12px; font-size: 11px; color: var(--syn-text-muted); cursor: pointer; border-bottom: 2px solid transparent; }
 .terminal-tab.active { color: var(--syn-text); border-bottom-color: var(--syn-accent); }
@@ -128,7 +131,8 @@
 .approval-badge.danger { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
 .approval-tool { font-family: ui-monospace, monospace; font-size: 13px; color: var(--syn-primary-light); word-break: break-all; }
 .approval-message { font-size: 13px; line-height: 1.6; color: var(--syn-text-secondary); white-space: pre-wrap; }
-.approval-args { margin: 0; padding: 10px 12px; max-height: 240px; overflow: auto; background: var(--syn-bg-code); color: var(--syn-text-code); font-size: 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
+/* ★ 玻璃化：审批参数代码框——死色 --syn-bg-code → 高不透明代码玻璃 + 模糊，保参数文本清晰。 */
+.approval-args { margin: 0; padding: 10px 12px; max-height: 240px; overflow: auto; background: var(--glass-bg-code); backdrop-filter: blur(var(--glass-blur-code)); -webkit-backdrop-filter: blur(var(--glass-blur-code)); color: var(--syn-text-code); font-size: 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
 .approval-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 .approval-btn { padding: 7px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; border: 1px solid var(--syn-border); transition: background 0.12s ease; }
 .approval-btn.reject { background: transparent; color: var(--syn-text-secondary); }

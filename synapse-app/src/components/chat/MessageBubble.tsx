@@ -551,7 +551,7 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
               {deferredContent}
             </ReactMarkdown>
           ) : (
-            <span className="message-placeholder">{live && showGeneratingPlaceholder ? '思考中...' : live ? '' : '无内容'}</span>
+            <span className="message-placeholder">{live && showGeneratingPlaceholder ? '思考中...' : ''}</span>
           )}
           {isStreaming && showStreamCursor && <span className="cursor-blink">▊</span>}
         </div>
