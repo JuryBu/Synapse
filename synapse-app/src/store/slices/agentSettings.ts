@@ -86,6 +86,8 @@ interface AgentSettingsState {
   mode: AgentMode;
   /** ★ task_boundary：是否启用 Plan 模式任务边界卡片（开关，默认 true；关闭则 systemPrompt 不引导 AI 用这些工具）。 */
   taskBoundaryEnabled: boolean;
+  /** ★ 模型上下文窗口手动覆盖（modelId → 窗口 token）：能力面板推断不准时用户手动改，覆盖所有用 contextWindow 处。 */
+  contextWindowOverrides: Record<string, number>;
   currentModel: string;
   /**
    * ★ M4-5-S1：系统模型（后台任务专用），空字符串 = 跟随 currentModel。
@@ -132,6 +134,7 @@ export const DEFAULT_BPC_CONFIG: BpcConfig = {
 const initialState: AgentSettingsState = {
   mode: 'planning',
   taskBoundaryEnabled: true,
+  contextWindowOverrides: {},
   currentModel: '',
   systemModel: '', // M4-5-S1：空 = 跟随 currentModel
   availableModels: [],
@@ -249,6 +252,16 @@ export const agentSettingsSlice = createSlice({
     // ★ task_boundary：开关启用/停用 Plan 模式任务边界（关闭后 systemPrompt 不引导、不再生成新边界）。
     setTaskBoundaryEnabled(state, action: PayloadAction<boolean>) {
       state.taskBoundaryEnabled = action.payload;
+    },
+    // ★ 设/清模型上下文窗口手动覆盖。value 合法正数 → 设；null/非法 → 清（回退推断值）。
+    setContextWindowOverride(state, action: PayloadAction<{ modelId: string; value: number | null }>) {
+      if (!state.contextWindowOverrides) state.contextWindowOverrides = {};
+      const { modelId, value } = action.payload;
+      if (modelId && typeof value === 'number' && Number.isFinite(value) && value > 0) {
+        state.contextWindowOverrides[modelId] = Math.round(value);
+      } else if (modelId) {
+        delete state.contextWindowOverrides[modelId];
+      }
     },
     setCurrentModel(state, action: PayloadAction<string>) {
       state.currentModel = action.payload;
@@ -395,7 +408,7 @@ export const agentSettingsSlice = createSlice({
 });
 
 export const {
-  setMode, setTaskBoundaryEnabled, setCurrentModel, setSystemModel, setRecordLayering, setBpc, setMaxToolRounds,
+  setMode, setTaskBoundaryEnabled, setContextWindowOverride, setCurrentModel, setSystemModel, setRecordLayering, setBpc, setMaxToolRounds,
   setAvailableModels, setConnectionStatus,
   setEnableStreaming, setOutputStrategy, setPseudoStreamSpeed,
   setShowStreamCursor, setShowGeneratingPlaceholder, setStreamThinking,

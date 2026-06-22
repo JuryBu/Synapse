@@ -33,9 +33,11 @@ import {
   setSpeedTier,
   setRecordLayering,
   setBpc,
+  setContextWindowOverride,
   DEFAULT_BPC_CONFIG,
 } from '@/store/slices/agentSettings';
 import type { WallpaperImage } from '@/store/slices/agentSettings';
+import { getModelContextWindowForOption } from '@/store/selectors/modelSelectors';
 import {
   addMode,
   removeMode,
@@ -963,6 +965,21 @@ export function SettingsPanel() {
                   {selectedCapabilities?.source && (
                     <span className="setting-hint">来源: {selectedCapabilities.source === 'inferred' ? '推断' : '接口 + 推断'}</span>
                   )}
+                </div>
+                {/* ★ 模型参数可单独改（图4）：上下文窗口手动覆盖——推断不准时用户改，覆盖所有用 contextWindow 处。 */}
+                <div className="setting-item" style={{ marginTop: 8 }}>
+                  <label>上下文窗口（token）</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={agentSettings.contextWindowOverrides?.[selectedModelOption.id] ?? ''}
+                    placeholder={`推断 ${getModelContextWindowForOption(selectedModelOption)}（留空=用推断值）`}
+                    onChange={(e) => {
+                      const raw = e.target.value.trim();
+                      dispatch(setContextWindowOverride({ modelId: selectedModelOption.id, value: raw ? Number(raw) : null }));
+                    }}
+                  />
+                  <span className="setting-hint">推断不准时手动改。覆盖后状态栏上下文占用、压缩阈值等所有用到上下文窗口的地方都按此值。</span>
                 </div>
               </div>
             )}

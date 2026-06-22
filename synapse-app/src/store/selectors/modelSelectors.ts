@@ -14,7 +14,9 @@ import type { AIModelOption } from '@/types/aiModel';
 import { MAX_CONTEXT_TOKENS } from '@/services/systemPrompt';
 
 /** 纯函数版：由已持有的 AIModelOption 解出上下文窗口，供已拿到 option 的组件复用。 */
-export function getModelContextWindowForOption(option?: AIModelOption | null): number {
+export function getModelContextWindowForOption(option?: AIModelOption | null, override?: number): number {
+  // ★ 用户手动覆盖优先（模型能力面板可改上下文窗口，推断不准时用这个）；其次 capabilities → option → 默认。
+  if (typeof override === 'number' && Number.isFinite(override) && override > 0) return override;
   return option?.capabilities?.contextWindow ?? option?.contextWindow ?? MAX_CONTEXT_TOKENS;
 }
 
@@ -36,6 +38,11 @@ export const getCurrentModelOption = createSelector(
  * fallback 链：capabilities.contextWindow ?? option.contextWindow ?? MAX_CONTEXT_TOKENS，与 agentLoop 现状一致。
  */
 export const getModelContextWindow = createSelector(
-  [getCurrentModelOption],
-  (option): number => getModelContextWindowForOption(option),
+  [
+    getCurrentModelOption,
+    (state: RootState) => state.agentSettings.contextWindowOverrides,
+    (state: RootState) => state.agentSettings.currentModel,
+  ],
+  (option, overrides, currentModel): number =>
+    getModelContextWindowForOption(option, overrides?.[currentModel]),
 );

@@ -1611,7 +1611,7 @@ export function AgentPanel() {
   // 当前 token 是否精确：API 实测恒精确；否则取决于本地分词器（gpt 系精确 / 非 gpt 估算）。
   const tokenExact = apiTokenCount ? true : localToken.exact;
   // M4-1-S3：统一走 selector 纯函数版（fallback 链 capabilities.contextWindow ?? option.contextWindow ?? MAX_CONTEXT_TOKENS）
-  const effectiveContextWindow = getModelContextWindowForOption(currentModelOption);
+  const effectiveContextWindow = getModelContextWindowForOption(currentModelOption, agentSettings.contextWindowOverrides?.[model]);
   const tokenRatio = effectiveContextWindow > 0 ? tokenCount / effectiveContextWindow : 0;
   // ★ M5-BPC-6：token 显示统一收敛进 CompressionRing（footer/context/StatusBar），原 formatTokens 局部函数随之移除。
 
