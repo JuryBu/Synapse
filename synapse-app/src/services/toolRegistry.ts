@@ -263,33 +263,34 @@ toolRegistry.register({
     },
   },
 }, async (args, ctx) => {
-  const { fileSystem, getActiveRoots, resolveWorktreePath } = await import('./fileSystem');
-  // ★ medium#2 对称修复：本上下文有活动 worktree 时，list_dir 也重定向到该 worktree（与
-  //   view_file/write_to_file/run_command 口径一致），否则 AI 在 worktree 里 list_dir 会看到主工作区
-  //   目录树、再 view_file 同路径却读到 worktree 内容，列表与实际内容割裂、可能据错误清单决策。
-  //   无活动 worktree 时 rootOverride 为 undefined → getWorkspaceTree 走主工作区（行为同现状，零回归）。
-  let rootOverride: string | undefined;
-  const { activeWorktreePath } = await getActiveRoots(ctx?.contextId);
-  if (activeWorktreePath) {
-    // 把请求路径解析到 worktree 下作为取树根（args.path 为子目录时也能列 worktree 内对应子目录）。
-    rootOverride = await resolveWorktreePath(args.path, ctx?.contextId);
-  }
-  const tree = await fileSystem.getWorkspaceTree(rootOverride);
+  const { fileSystem, resolveWorkspacePath } = await import('./fileSystem');
+  // ★ P0-1：把请求目录解析到「权威根」下的绝对路径——有活动 worktree 重定向到 worktree，
+  //   无 worktree 时相对路径锚到已打开工作区根（与 view_file/write_to_file 口径一致）。
+  //   旧版「仅 worktree 时传 rootOverride、否则 undefined」会在无 worktree 时忽略 args.path、
+  //   永远铺主工作区整棵树（套娃根因之一）。
+  const targetDir = await resolveWorkspacePath(args.path, ctx?.contextId);
+  const tree = await fileSystem.getWorkspaceTree(targetDir || undefined);
   if (!tree) return `目录不存在: ${args.path}`;
 
-  const formatNode = (node: any, indent = ''): string => {
-    const type = node.type === 'directory' ? '📁' : '📄';
-    const size = node.size ? ` (${(node.size / 1024).toFixed(1)} KB)` : '';
-    let result = `${indent}${type} ${node.name}${size}\n`;
-    if (node.children) {
-      for (const child of node.children) {
-        result += formatNode(child, indent + '  ');
-      }
-    }
-    return result;
-  };
-
-  return `目录: ${args.path}\n\n${formatNode(tree)}`;
+  // ★ P0-1 治套娃：只列【该目录下一层】（不递归整棵 maxDepth=3 子树），符合 ls 语义；
+  //   深层结构让 AI 对子目录再 list_dir 下钻，避免一次性铺开导致刷屏 + 上下文浪费。
+  const children = Array.isArray(tree.children) ? tree.children : [];
+  const dirLabel = tree.path || args.path;
+  if (children.length === 0) {
+    return `目录: ${dirLabel}\n\n（空目录）`;
+  }
+  // 目录在前、文件在后，各自按名排序，稳定可读。
+  const sorted = [...children].sort((a: any, b: any) => {
+    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+    return String(a.name).localeCompare(String(b.name));
+  });
+  const lines = sorted.map((node: any) => {
+    const icon = node.type === 'directory' ? '📁' : '📄';
+    const slash = node.type === 'directory' ? '/' : '';
+    const size = node.type === 'file' && node.size ? ` (${(node.size / 1024).toFixed(1)} KB)` : '';
+    return `${icon} ${node.name}${slash}${size}`;
+  });
+  return `目录: ${dirLabel}（${sorted.length} 项）\n\n${lines.join('\n')}`;
 }, 'file', 'read', 'read');
 
 toolRegistry.register({
@@ -370,13 +371,23 @@ toolRegistry.register({
       required: ['query'],
     },
   },
-}, async (args) => {
-  const { fileSystem } = await import('./fileSystem');
-  const results = await fileSystem.searchFiles(args.query);
+}, async (args, ctx) => {
+  const { fileSystem, getWorkspaceRootResolved } = await import('./fileSystem');
+  // ★ P0-1：改用 searchInWorkspace——Electron 下走主进程 file:search（磁盘递归 grep + 文件名匹配），
+  //   旧版 searchFiles 只查内存 3 层树 + Web 上传文件，真机里深层目录/未加载到内存的文件根本搜不到。
+  //   root 用「权威根」（活动 worktree 优先，否则已打开工作区），保证搜在用户真实工作区。
+  const root = await getWorkspaceRootResolved(ctx?.contextId);
+  const results = await fileSystem.searchInWorkspace(args.query, root ?? undefined);
   if (!results || results.length === 0) {
-    return `未找到包含 "${args.query}" 的文件`;
+    return `未找到匹配 "${args.query}" 的文件或内容`;
   }
-  return `搜索 "${args.query}" 找到 ${results.length} 个结果:\n${results.map((r: any) => `- ${r.path}: ${r.match}`).join('\n')}`;
+  const MAX = 50;
+  const shown = results.slice(0, MAX);
+  const lines = shown.map((r: any) => r.kind === 'content'
+    ? `- ${r.path}:${r.line ?? '?'}  ${String(r.content ?? '').trim()}`
+    : `- ${r.path}（文件名匹配）`);
+  const more = results.length > MAX ? `\n…另有 ${results.length - MAX} 条未显示` : '';
+  return `搜索 "${args.query}" 找到 ${results.length} 个结果:\n${lines.join('\n')}${more}`;
 }, 'search', 'read', 'search');
 
 // --- Learning Tools ---

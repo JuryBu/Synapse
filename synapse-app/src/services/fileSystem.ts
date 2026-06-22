@@ -41,6 +41,13 @@ function stripTrailingSep(p: string): string {
 }
 
 /**
+ * ★ P0-1：demo/示例工作区占位假路径（与本文件默认 workspace、Sidebar demo 兜底一致）。磁盘上不存在。
+ * 解析「权威根」时把它当作「无有效根」处理——避免把 AI 的相对路径拼成 `/workspace/xxx`（不存在）写失败，
+ * 而是回退到主进程 process.cwd() 兜底（与未打开工作区时的现状一致，零回归）。
+ */
+const DEMO_WORKSPACE_PATH = '/workspace';
+
+/**
  * 取某执行上下文当前生效的「活动根」信息。
  * 用动态 import 读 store，避免 fileSystem 单例在模块加载期与 store 形成初始化顺序耦合
  * （与 toolRegistry 内动态 import store 的既有惯例一致）。
@@ -88,11 +95,8 @@ export async function getActiveRoots(contextId?: string): Promise<{
  *   不上而落到新工作区，出现「相对进旧 worktree、绝对进新工作区」的割裂。锚定 repoRoot 让前缀基准在整段
  *   worktree 生命周期内一致。repoRoot 缺失（旧条目/异常）时回退实时 currentPath，行为不劣于改前。
  */
-export async function resolveWorktreePath(rawPath: string, contextId?: string): Promise<string> {
-  if (typeof rawPath !== 'string' || !rawPath) return rawPath;
-  const { activeWorktreePath, repoRoot, currentPath } = await getActiveRoots(contextId);
-  if (!activeWorktreePath) return rawPath; // 无活动 worktree：照旧。
-
+/** worktree 重定向核心（roots 已取，纯逻辑；仅在 activeWorktreePath 非空时调用）。 */
+function redirectIntoWorktree(rawPath: string, activeWorktreePath: string, repoRoot: string | null, currentPath: string | null): string {
   // `~` 交主进程展开，不在渲染端改写。
   if (rawPath === '~' || rawPath.startsWith('~/') || rawPath.startsWith('~\\')) return rawPath;
 
@@ -118,6 +122,40 @@ export async function resolveWorktreePath(rawPath: string, contextId?: string): 
 
   // worktree 内绝对路径 / 工作区外绝对路径：尊重原样。
   return rawPath;
+}
+
+export async function resolveWorktreePath(rawPath: string, contextId?: string): Promise<string> {
+  if (typeof rawPath !== 'string' || !rawPath) return rawPath;
+  const { activeWorktreePath, repoRoot, currentPath } = await getActiveRoots(contextId);
+  if (!activeWorktreePath) return rawPath; // 无活动 worktree：照旧（契约不变，与现状逐字节一致）。
+  return redirectIntoWorktree(rawPath, activeWorktreePath, repoRoot, currentPath);
+}
+
+/**
+ * ★ P0-1：统一工作区路径解析（治「AI 用相对路径读写落到安装目录 synapse-app」「list_dir 套娃」）。
+ * - 有活动 worktree：等同 resolveWorktreePath（重定向到 worktree）。
+ * - 无活动 worktree：`~`/绝对路径原样；相对路径锚到【已打开主工作区根 currentPath】下；
+ *   currentPath 为 null（未打开工作区）时原样返回 → 主进程 resolveFilePath 仍用 process.cwd() 兜底，与现状一致。
+ *
+ * 与 resolveWorktreePath 的差别：后者无 worktree 时对相对路径短路原样（→主进程 cwd=安装目录，AI 写文件落错地方）；
+ * 本函数把无 worktree 的相对路径也锚到工作区根，与 run_command cwd 口径（medium#1）一致。
+ */
+export async function resolveWorkspacePath(rawPath: string, contextId?: string): Promise<string> {
+  if (typeof rawPath !== 'string' || !rawPath) return rawPath;
+  const { activeWorktreePath, repoRoot, currentPath } = await getActiveRoots(contextId);
+  if (activeWorktreePath) return redirectIntoWorktree(rawPath, activeWorktreePath, repoRoot, currentPath);
+  if (rawPath === '~' || rawPath.startsWith('~/') || rawPath.startsWith('~\\')) return rawPath;
+  if (isAbsolutePath(rawPath)) return rawPath;
+  // 未打开工作区 / 仅 demo 占位假路径：保持现状（原样 → 主进程 cwd 兜底），零回归。
+  if (!currentPath || currentPath === DEMO_WORKSPACE_PATH) return rawPath;
+  return `${stripTrailingSep(currentPath)}/${rawPath.replace(/^[\\/]+/, '')}`;
+}
+
+/** ★ P0-1：当前生效的「权威工作区根」绝对路径——活动 worktree 优先，否则已打开主工作区 currentPath；都无/仅 demo 假路径则 null。 */
+export async function getWorkspaceRootResolved(contextId?: string): Promise<string | null> {
+  const { activeWorktreePath, currentPath } = await getActiveRoots(contextId);
+  const root = activeWorktreePath ?? currentPath ?? null;
+  return (root && root !== DEMO_WORKSPACE_PATH) ? root : null;
 }
 
 export interface FileNode {
@@ -340,8 +378,9 @@ class FileSystemService {
 
   async readFile(filePath: string, contextId?: string): Promise<string> {
     if (isElectron && window.synapse) {
-      // M2-5：本上下文有活动 worktree 时重定向到该 worktree（无则原样透传，行为同现状）。
-      return await window.synapse.file.read(await resolveWorktreePath(filePath, contextId));
+      // ★ P0-1：统一走 resolveWorkspacePath——有 worktree 重定向到 worktree，无 worktree 时相对路径锚到
+      //   已打开工作区根（治「AI 用相对路径读到安装目录」）；未打开工作区则原样（主进程 cwd 兜底，零回归）。
+      return await window.synapse.file.read(await resolveWorkspacePath(filePath, contextId));
     }
     if (this.memoryFiles.has(filePath)) {
       return this.memoryFiles.get(filePath)!;
@@ -397,8 +436,9 @@ class FileSystemService {
 
   async writeFile(filePath: string, content: string, contextId?: string): Promise<void> {
     if (isElectron && window.synapse) {
-      // M2-5：本上下文有活动 worktree 时重定向到该 worktree（无则原样透传，行为同现状）。
-      const result = await window.synapse.file.write(await resolveWorktreePath(filePath, contextId), content);
+      // ★ P0-1：统一走 resolveWorkspacePath——无 worktree 时相对路径锚到已打开工作区根，
+      //   修「AI write_to_file 相对路径落到安装目录 synapse-app」。未打开工作区则原样（主进程兜底，零回归）。
+      const result = await window.synapse.file.write(await resolveWorkspacePath(filePath, contextId), content);
       if (result && typeof result === 'object' && 'error' in result && result.error) {
         throw new Error(result.message || '文件写入失败');
       }
@@ -526,6 +566,7 @@ class FileSystemService {
    */
   async searchInWorkspace(
     query: string,
+    rootOverride?: string,
   ): Promise<Array<{ path: string; name: string; kind: 'file' | 'content'; line?: number; content?: string }>> {
     const trimmed = query.trim();
     if (!trimmed) return [];
@@ -548,7 +589,8 @@ class FileSystemService {
     // ② 内容匹配。
     if (isElectron && window.synapse?.file?.search) {
       try {
-        const root = this.getCurrentWorkspacePath();
+        // ★ P0-1：优先用调用方解析好的「权威根」（worktree/已打开工作区）；缺省回退内部当前工作区路径。
+        const root = rootOverride || this.getCurrentWorkspacePath();
         const matches = await window.synapse.file.search(root, trimmed);
         for (const m of matches as Array<{ path: string; line: number; content: string }>) {
           if (!m?.path) continue;
@@ -574,6 +616,10 @@ class FileSystemService {
     return results;
   }
 
+  /**
+   * @deprecated ★ P0-1 起改用 {@link searchInWorkspace}——本方法只查内存文件树（仅 maxDepth=3）+ Web 上传文件，
+   *   真机 Electron 下深层目录/未加载文件搜不到。已无调用点，保留仅防外部引用，勿在新代码中使用。
+   */
   async searchFiles(query: string): Promise<Array<{ path: string; match: string }>> {
     const results: Array<{ path: string; match: string }> = [];
     const lowerQuery = query.toLowerCase();
