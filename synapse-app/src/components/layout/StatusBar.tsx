@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import { isElectron } from '@platform/index';
 import { useAppSelector } from '@/store/hooks';
 import { Wifi, Zap } from 'lucide-react';
@@ -24,9 +24,16 @@ export function StatusBar() {
 
   // ★ M6 验收 bug7：本地 token 计数——gpt 系模型用 gpt-tokenizer o200k_base 精确 encode，非 gpt 字符估算（exact 标志）。
   //   useMemo 缓存（仅 messages/model 变时重算），避免流式每帧 encode 整对话。
+  // ★ M7 性能 B：流式期不重算本地 token——messages 引用每帧变会触发对整段对话全量 gpt-tokenizer encode
+  //   （单次几十毫秒主线程同步阻塞，是流式卡顿主因之一）。isStreaming 时返回上次缓存值（流式 token 暂停跳动，
+  //   可接受；有 API 实测 tokenUsage 时本就优先用实测、不受影响），停流后重算一次精确值。
+  const lastLocalTokenRef = useRef<{ count: number; exact: boolean }>({ count: 0, exact: false });
   const localToken = useMemo(() => {
-    return countConversationTokensExact(messages.map(m => ({ role: m.role, content: m.content })), model);
-  }, [messages, model]);
+    if (isStreaming) return lastLocalTokenRef.current;
+    const v = countConversationTokensExact(messages.map(m => ({ role: m.role, content: m.content })), model);
+    lastLocalTokenRef.current = v;
+    return v;
+  }, [messages, model, isStreaming]);
   // M4-1-S3（openQuestions 4 决议）：「已用 token」与「上下文窗口」分母同口径（纯输入侧）。
   //   有 API 实测时优先 tokenUsage.promptTokens（纯输入，恒精确）；无实测时回退本地 localToken（gpt 系精确 / 其它估算）。
   const hasApiUsage = !!tokenUsage;

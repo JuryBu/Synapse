@@ -1521,11 +1521,17 @@ export function AgentPanel() {
   const hasMessages = messages.length > 0;
 
   // Token counter
-  // ★ M6 验收 bug7：本地计数 gpt 系用分词器精确、其它字符估算（exact 标志）；useMemo 缓存避免流式每帧 encode。
+  // ★ M6 验收 bug7：本地计数 gpt 系用分词器精确、其它字符估算（exact 标志）。
+  // ★ M7 性能 B：流式期不重算——messages 引用每帧变会对整段对话全量 encode（与 StatusBar 各一遍，单次几十毫秒阻塞）。
+  //   isStreaming 时返回上次缓存值（有 API 实测 apiTokenCount 时本就优先用实测），停流后重算一次。
+  const lastLocalTokenRef = useRef<{ count: number; exact: boolean }>({ count: 0, exact: true });
   const localToken = useMemo(() => {
-    if (!messages.length) return { count: 0, exact: true };
-    return countConversationTokensExact(messages.map((m: any) => ({ role: m.role, content: m.content })), model);
-  }, [messages, model]);
+    if (isStreaming) return lastLocalTokenRef.current;
+    if (!messages.length) { lastLocalTokenRef.current = { count: 0, exact: true }; return lastLocalTokenRef.current; }
+    const v = countConversationTokensExact(messages.map((m: any) => ({ role: m.role, content: m.content })), model);
+    lastLocalTokenRef.current = v;
+    return v;
+  }, [messages, model, isStreaming]);
   const tokenCount = apiTokenCount || localToken.count;
   // 当前 token 是否精确：API 实测恒精确；否则取决于本地分词器（gpt 系精确 / 非 gpt 估算）。
   const tokenExact = apiTokenCount ? true : localToken.exact;

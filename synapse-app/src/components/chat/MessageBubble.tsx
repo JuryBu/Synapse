@@ -4,7 +4,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, ListChecks, Undo2, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
-import { memo, useState, useCallback, useEffect, useRef } from 'react';
+import { memo, useDeferredValue, useState, useCallback, useEffect, useRef } from 'react';
 import { ToolCallCard } from './ToolCallCard';
 import { WorkflowCard } from './WorkflowCard';
 import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
@@ -209,6 +209,9 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
   const [now, setNow] = useState(() => Date.now());
   // ★ C6：editRef(textarea) 移除，改 editRichRef(RichTextInput)。
   const live = isStreaming || streamState === 'pending' || streamState === 'streaming';
+  // ★ M7 性能 D1：markdown 渲染用 deferredContent（滞后一拍的低优先级值）——把长尾 markdown 解析标记为
+  //   可中断渲染，让输入/点按钮等紧急交互能插队优先，缓解流式期界面卡顿（React 19）。
+  const deferredContent = useDeferredValue(content);
   const elapsedMs = durationMs ?? (timestamp ? now - timestamp : 0);
   const streamLabel = streamMode === 'pseudo'
     ? 'Pseudo'
@@ -583,7 +586,7 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
                 },
               }}
             >
-              {content}
+              {deferredContent}
             </ReactMarkdown>
           ) : (
             <span className="message-placeholder">{live && showGeneratingPlaceholder ? '思考中...' : live ? '' : '无内容'}</span>
