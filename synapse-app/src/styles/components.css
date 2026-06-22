@@ -92,9 +92,24 @@
 .synopsis-status-error { color: #ef4444; }
 .synopsis-status-pending { color: var(--syn-text-muted); opacity: 0.5; }
 
-/* Mermaid */
-.mermaid-container { margin: 8px 0; padding: 12px; border-radius: 8px; background: var(--syn-overlay-scrim); overflow-x: auto; }
-.mermaid-container svg { max-width: 100%; }
+/* Mermaid 图表查看器（缩放 / 平移 / 全屏） */
+.mermaid-diagram { margin: 8px 0; border-radius: 8px; background: var(--syn-bg-surface); border: 1px solid var(--syn-border); overflow: hidden; }
+.mermaid-toolbar { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--syn-border); background: var(--syn-overlay-soft); }
+.mermaid-toolbar button { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--syn-text-secondary); cursor: pointer; }
+.mermaid-toolbar button:hover { background: var(--syn-overlay-medium); color: var(--syn-text); }
+.mermaid-scale { font-size: 11px; color: var(--syn-text-muted); min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
+.mermaid-hint { margin-left: auto; font-size: 10px; color: var(--syn-text-muted); user-select: none; }
+.mermaid-viewport { position: relative; height: 380px; overflow: hidden; cursor: grab; background: var(--syn-overlay-scrim); }
+.mermaid-viewport.dragging { cursor: grabbing; user-select: none; }
+.mermaid-stage { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+/* will-change 仅交互期启用——常驻会把大 svg 永久提升为合成层、按当前 scale 预栅格化吃显存。 */
+.mermaid-viewport.dragging .mermaid-stage { will-change: transform; }
+/* width:auto 覆盖 mermaid 输出的 width="100%"，让 svg 按 viewBox 像素自然尺寸渲染，fit 计算才准。 */
+.mermaid-stage svg { display: block; max-width: none !important; width: auto; height: auto; }
+/* 全屏查看：portal 到 body 的遮罩层，内含放大的查看器。z-index 高于普通浮层(toast/fileTree=1000)、低于全局阻断 modal。 */
+.mermaid-fullscreen-overlay { position: fixed; inset: 0; z-index: 9000; background: rgba(0, 0, 0, 0.55); display: flex; padding: 24px; }
+.mermaid-fullscreen-overlay .mermaid-diagram { flex: 1; display: flex; flex-direction: column; margin: 0; background: var(--syn-bg-base); }
+.mermaid-fullscreen-overlay .mermaid-viewport { flex: 1; height: auto; }
 .mermaid-loading { padding: 20px; text-align: center; color: var(--syn-text-muted); font-size: 12px; }
 .mermaid-error { padding: 12px; border-radius: 8px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); }
 .mermaid-error span { color: #f59e0b; font-size: 12px; }

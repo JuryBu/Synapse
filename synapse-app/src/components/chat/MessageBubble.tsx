@@ -8,7 +8,7 @@ import { memo, useDeferredValue, useState, useCallback, useEffect, useRef } from
 import { ToolCallCard } from './ToolCallCard';
 import { WorkflowCard } from './WorkflowCard';
 import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
-import { useResolvedTheme } from '@/hooks/useResolvedTheme';
+import { MermaidDiagram } from '@/components/chat/MermaidDiagram';
 import { RichTextInput } from '@/components/chat/RichTextInput';
 import { useAtMention } from '@/components/chat/useAtMention';
 import { useAttachments } from '@/hooks/useAttachments';
@@ -109,77 +109,7 @@ function isMermaidFenceClosed(content: string, blockCode: string): boolean {
   return false;
 }
 
-// Mermaid renderer component
-// ★ M7 P0-3：pending = 该 mermaid 块是「正在流式书写的未闭合块」（半截代码）。只对它显加载占位、不喂 mermaid；
-//   已闭合的块即使整条消息还在流式也立即渲染（该渲染就渲染，由上游 isFenceClosed 判定后传 pending=false）。
-function MermaidBlock({ code, pending }: { code: string; pending?: boolean }) {
-  const [svg, setSvg] = useState<string>('');
-  const [error, setError] = useState<string>('');
-  // ★ 浅色适配：mermaid 图表主题跟随 app 主题（之前写死 dark，浅色模式下图表深色突兀）。
-  const resolvedTheme = useResolvedTheme();
-
-  useEffect(() => {
-    if (pending) return; // 未闭合块不渲染（半截代码喂 mermaid 会 throw）；闭合后 pending=false，effect 重跑渲染。
-    let cancelled = false;
-    (async () => {
-      try {
-        const mermaid = (await import('mermaid')).default;
-        const DOMPurify = (await import('dompurify')).default;
-        const isLight = resolvedTheme === 'light';
-        mermaid.initialize({
-          startOnLoad: false,
-          theme: isLight ? 'default' : 'dark',
-          securityLevel: 'strict', // P1-2: 防止 SVG 注入
-          // ★ M6 验收：节点文字用 SVG <text> 而非默认 foreignObject(HTML)——后者会被下面 DOMPurify 的纯 svg
-          //   profile 清掉，导致「只剩框、没文字」。htmlLabels:false 让 DOMPurify svg profile 能完整保留文字。
-          htmlLabels: false,
-          flowchart: { htmlLabels: false },
-          themeVariables: isLight
-            ? { primaryColor: '#7c3aed', primaryTextColor: '#111827', lineColor: '#64748b', secondaryColor: '#eef1f7', tertiaryColor: '#f6f7fb' }
-            : { primaryColor: '#8b5cf6', primaryTextColor: '#e2e8f0', lineColor: '#64748b', secondaryColor: '#1e293b', tertiaryColor: '#0f172a' },
-        });
-        // ★ P0-3 加固：先 parse 预校验（suppressErrors 不抛）——半截/无效代码 parse 返回 false 时静默等下一帧、
-        //   保留旧 svg，避免「渲染失败红框」闪烁（即便 isFenceClosed 判定偶有误判也不炸）。
-        const valid = await mermaid.parse(code, { suppressErrors: true });
-        if (!valid) { if (!cancelled) setError(''); return; }
-        // 校验通过才清 error + 渲染（成功路径清残留 error，否则成功后仍卡红框，error 判定优先于 svg）。
-        if (!cancelled) setError('');
-        const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        const { svg: rendered } = await mermaid.render(id, code);
-        // ★ 兜底：仍允许 foreignObject（某些图类型即便 htmlLabels:false 也可能用），html profile 保留其内文字。
-        if (!cancelled) setSvg(DOMPurify.sanitize(rendered, { USE_PROFILES: { svg: true, html: true }, ADD_TAGS: ['foreignObject'] }));
-      } catch (e: any) {
-        if (!cancelled) setError(e.message || 'Mermaid 渲染失败');
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [code, resolvedTheme, pending]);
-
-  // 未闭合块（正在书写）显示源码占位，不喂半截代码给 mermaid。
-  if (pending) {
-    return <pre className="mermaid-loading">{code}</pre>;
-  }
-
-  if (error) {
-    return (
-      <div className="mermaid-error">
-        <span>⚠️ 图表渲染失败</span>
-        <pre>{code}</pre>
-      </div>
-    );
-  }
-
-  if (!svg) {
-    return <div className="mermaid-loading">加载图表...</div>;
-  }
-
-  return (
-    <div
-      className="mermaid-container"
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
-  );
-}
+// Mermaid 渲染 + 交互式查看（缩放/平移/全屏）已抽到独立组件 MermaidDiagram.tsx。
 
 function changeIcon(type: FileDiffInfo['changeType']) {
   if (type === 'created') return FilePlus;
@@ -581,7 +511,7 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
                   //   即使整条消息还在流式；只有正在书写的最后那个未闭合块 pending=显加载占位。
                   if (lang === 'mermaid') {
                     const closed = !isStreaming || isMermaidFenceClosed(deferredContent, childStr);
-                    return <MermaidBlock code={childStr} pending={!closed} />;
+                    return <MermaidDiagram code={childStr} pending={!closed} />;
                   }
 
                   const isBlock = match || (typeof children === 'string' && children.includes('\n'));
