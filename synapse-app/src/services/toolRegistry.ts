@@ -249,11 +249,13 @@ toolRegistry.register({
       const resolved = await resolveWorkspacePath(args.path, ctx?.contextId);
       const text = await extractDocumentText(resolved);
       if (!text) return `文件 ${args.path} 未提取到文本内容（可能是空文档 / 纯图片型 PDF）。`;
-      const lines = text.split('\n');
-      const start = (args.startLine || 1) - 1;
-      const end = args.endLine || lines.length;
-      const slice = lines.slice(start, end);
-      return `文档: ${args.path} (已解析文本，行 ${start + 1}-${end}/${lines.length})\n\n${slice.join('\n')}`;
+      // ★ review M2：office/pdf 提取文本无「自然行」（PDF 每页常是空格 join 的单行），startLine/endLine 行切片
+      //   语义失效（传 1-50 行可能拿到整篇或只几页分隔符）。故文档型不按行切、整体返回（已 clamp 50k 上限），
+      //   传了行号则提示改用 read_course_material 的 page 参数按页读。
+      const docHint = (args.startLine || args.endLine)
+        ? '（注：文档型按整体/页读，不支持行号；要分页请用 read_course_material 的 page 参数）'
+        : '';
+      return `文档: ${args.path} (已解析文本)${docHint}\n\n${text}`;
     } catch (err: any) {
       return `读取文档失败 ${args.path}: ${err?.message || String(err)}`;
     }

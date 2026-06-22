@@ -35,10 +35,23 @@ export function isExtractableDocument(path: string): boolean {
 /** 超长截断 + 提示。len 为截断前的总长度。 */
 function clamp(text: string): string {
   if (text.length <= MAX_CHARS) return text;
+  // ★ review M1：不报「原文约 N 字符」——多页 PDF/多 sheet 在解析超限时就提前 break，text.length 只是【已解析部分】
+  //   长度（严重低估真实总长），会误导 AI「文档很短、已读完」而不再翻页。改为只说后续未显示 + 指引翻页。
   return (
     text.slice(0, MAX_CHARS) +
-    `\n\n…[内容已截断：原文约 ${text.length} 字符，已显示前 ${MAX_CHARS} 字符。如需后续内容，请指定页码/范围或分段读取]`
+    `\n\n…[内容超长，已显示前 ${MAX_CHARS} 字符；文档后续内容未显示。如需更多，请用 read_course_material 指定 page 页码、或分段读取]`
   );
+}
+
+/** 解码 XML 常见实体（PPTX <a:t> 里 & < > " ' 被转义为 &amp; &lt; 等，不解码会读出 &amp;amp; 乱码——review M3）。 */
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_m, n: string) => { try { return String.fromCodePoint(Number(n)); } catch { return _m; } })
+    .replace(/&amp;/g, '&'); // &amp; 必须最后解（否则 &amp;lt; 会被二次解码成 <）
 }
 
 /**
@@ -109,7 +122,7 @@ async function extractPptx(data: ArrayBuffer): Promise<string> {
   const zip = await JSZip.loadAsync(data);
 
   const slideFiles = Object.keys(zip.files)
-    .filter(f => /ppt\/slides\/slide\d+\.xml$/.test(f))
+    .filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f))
     .sort((a, b) => {
       const numA = parseInt(a.match(/slide(\d+)/)?.[1] || '0', 10);
       const numB = parseInt(b.match(/slide(\d+)/)?.[1] || '0', 10);
@@ -120,7 +133,7 @@ async function extractPptx(data: ArrayBuffer): Promise<string> {
   for (let i = 0; i < slideFiles.length; i++) {
     const xml = await zip.files[slideFiles[i]].async('text');
     const texts = xml.match(/<a:t[^>]*>([^<]*)<\/a:t>/g)?.map(
-      (t: string) => t.replace(/<[^>]+>/g, ''),
+      (t: string) => decodeXmlEntities(t.replace(/<[^>]+>/g, '')),
     ) || [];
     text += `\n--- Slide ${i + 1} ---\n${texts.join(' ')}`;
     if (text.length > MAX_CHARS) break;
