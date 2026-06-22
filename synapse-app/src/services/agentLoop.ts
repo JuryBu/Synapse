@@ -579,6 +579,11 @@ export class AgentLoop {
     contentParts?: MessageContentPart[];
     attachments?: AttachmentRef[];
     /**
+     * ★ M6 收尾 D1：发送时 RichTextInput.extract() 产出的有序 atomic token，仅用于编辑历史消息时无损还原
+     *   @ 高亮块，不进 LLM 上下文。挂在 userMsg.richTokens 上落库。
+     */
+    richTokens?: import('@/services/inputCommands/richInput/types').ExtractedToken[];
+    /**
      * ★ M4-6-S4 @对话引用：本轮一次性注入的附加上下文（被引用历史对话的 record 摘要 / 最近 N 条原文，
      *   由 AgentPanel handleSend 组装）。经 promptBuilder.build 的 context.referencedContext 渲染成
      *   <referenced_conversation> 系统段——不进可见对话流、不重复落库。仅本轮生效（下轮无引用则自然消失）。
@@ -624,6 +629,7 @@ export class AgentLoop {
         content: userMessage,
         contentParts: opts?.contentParts,
         attachments: opts?.attachments,
+        richTokens: opts?.richTokens, // ★ D1：随消息持久化，编辑回填时无损还原 atomic 块
         timestamp: Date.now(),
         model: currentModel,
       };

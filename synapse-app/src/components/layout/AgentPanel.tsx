@@ -65,6 +65,7 @@ import { computeRoundTruncation, clampRecordToRoundTruncation, type RoundTruncat
 import { RichTextInput } from '@/components/chat/RichTextInput';
 import { useAtMention } from '@/components/chat/useAtMention';
 import type { RichTextInputHandle, ExtractedToken } from '@/services/inputCommands/richInput/types';
+import { buildRichParts } from '@/services/inputCommands/richInput/rebuild';
 import { parseAndDispatch } from '@/services/inputCommands/commandExecutor';
 // ★ M4-6-S4：/loop 最小循环驱动器（串行重发 N 次，可 handleStop 中断）。
 import { loopRunner } from '@/services/inputCommands/loopRunner';
@@ -1047,19 +1048,21 @@ export function AgentPanel() {
 
     const contentParts = buildUserContentParts(text, readyAttachments);
     const attachmentsForRun = readyAttachments.map(att => ({ ...att, status: 'sent' as const }));
+    // ★ M6 D1：tokens 长度 > 0 时随消息持久化，作为编辑历史无损还原的锚点（不进 LLM 上下文、不计 token）。
+    const richTokensForRun = tokens.length > 0 ? tokens : undefined;
     // ★ M6：有 token → 先 buildContextFromTokens 组装注入（conversation 复用 buildInjectedContext，其余按需）。
     if (tokens.length > 0) {
       void (async () => {
         const injectedContext = await buildContextFromTokens(tokens).catch(() => '');
         try {
-          await agentLoopRef.current!.run(text, { contentParts, attachments: attachmentsForRun, injectedContext: injectedContext || undefined });
+          await agentLoopRef.current!.run(text, { contentParts, attachments: attachmentsForRun, richTokens: richTokensForRun, injectedContext: injectedContext || undefined });
         } catch (err: any) {
           dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err?.message || '未知错误' }));
         }
       })();
       return;
     }
-    agentLoopRef.current.run(text, { contentParts, attachments: attachmentsForRun }).catch((err: any) => {
+    agentLoopRef.current.run(text, { contentParts, attachments: attachmentsForRun, richTokens: richTokensForRun }).catch((err: any) => {
       dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err.message || '未知错误' }));
     });
   }, [pendingAttachments, isStreaming, hasApiKey, hasModel, buildUserContentParts, buildContextFromTokens, runWorkflowFromInput, buildSlashHelpers, closeMenu, dispatch]);
@@ -1115,10 +1118,10 @@ export function AgentPanel() {
   //     之后用户发送时 pending 转成新消息引用（守恒），或点 × removePendingAttachment 时 release（守恒）。
   //   - 图片预览：pending tray 用 previewUrl 显示缩略图，历史消息附件落库后无 previewUrl → 异步按 sha256
   //     还原 dataUrl 回填（与 resolveAttachmentsForRender 同源 resolveAttachmentDataUrl）。
-  const refillInputFromUserMessage = useCallback((userMsg: { content?: string; attachments?: AttachmentRef[] } | null | undefined) => {
+  const refillInputFromUserMessage = useCallback((userMsg: { content?: string; attachments?: AttachmentRef[]; richTokens?: ExtractedToken[] } | null | undefined) => {
     const text = userMsg?.content ?? '';
-    // ★ M6：纯文本回填（含 token 的无损还原需 D1 richTokens 持久化，作为 Phase 1.5 跟进；当前 token 显示为 @对话:xxx 文本）。
-    richRef.current?.setContent([text]);
+    // ★ M6 D1：有 richTokens 则用 buildRichParts 重组 + setContent 无损还原 atomic 块；旧消息无 richTokens 自动降级纯文本。
+    richRef.current?.setContent(buildRichParts(text, userMsg?.richTokens));
     setCanSend(!richRef.current?.isEmpty());
     dispatch(setPendingMessage(text));
     const atts = userMsg?.attachments ?? [];
@@ -1148,7 +1151,8 @@ export function AgentPanel() {
   }, [dispatch]);
 
   // Edit user message → truncate after it → re-send（★ C6：带附件编辑——保留/新增图、删图，refCount 精确守恒）
-  const handleEdit = useCallback((msgId: string, newContent: string, attachments?: AttachmentRef[]) => {
+  // ★ D1：onEdit 签名扩 richTokens?——MessageBubble.handleSubmitEdit 透传编辑后【新 extract】的 tokens，落库覆盖旧值。
+  const handleEdit = useCallback((msgId: string, newContent: string, attachments?: AttachmentRef[], richTokens?: ExtractedToken[]) => {
     const editIdx = messages.findIndex((m: any) => m.id === msgId);
     if (editIdx < 0) return;
     const oldMsg = messages[editIdx];
@@ -1168,7 +1172,8 @@ export function AgentPanel() {
     // 图片进 contentParts（agentLoop 发 API 按 sha256 还原 base64）+ 全量进 attachments（store 持久 + 渲染）。
     const contentParts = buildUserContentParts(newContent, newAtts);
     const attachmentsForRun = newAtts.map(att => ({ ...att, status: 'sent' as const }));
-    dispatch(editMessage({ id: msgId, content: newContent, contentParts, attachments: attachmentsForRun }));
+    // ★ D1：richTokens 是编辑后输入框 extract 的最新集合（用户可能增删了 token），落库覆盖旧值。
+    dispatch(editMessage({ id: msgId, content: newContent, contentParts, attachments: attachmentsForRun, richTokens }));
 
     // skipUserMessage 重发：agentLoop 从 store 编辑后消息的 contentParts/attachments 还原图发 API（M2-R6 R6-2c）。
     if (agentLoopRef.current) {
@@ -1987,6 +1992,7 @@ export function AgentPanel() {
                     endToEndMs={(msg as any).endToEndMs}
                     thinking={(msg as any).thinking}
                     attachments={resolveAttachmentsForRender((msg as any).attachments)}
+                    richTokens={(msg as any).richTokens}
                     toolCalls={(msg as any).toolCalls}
                     diffs={(msg as any).diffs}
                     workflowRunId={(msg as any).workflowRunId}

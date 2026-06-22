@@ -331,7 +331,8 @@ export interface BranchResult {
    *   （与回溯对齐）。此处回带那条 user 的内容/附件供 AgentPanel.refillInputFromUserMessage 使用；
    *   分支点非 user（落在 model 段）或退化为空子集时为 null（不回填，行为同普通分支）。
    */
-  pendingUserMessage: { content: string; attachments?: Message['attachments'] } | null;
+  // ★ M6 收尾 D1：richTokens 透传给调用方供 refillInputFromUserMessage → buildRichParts 无损还原 @ 块。
+  pendingUserMessage: { content: string; attachments?: Message['attachments']; richTokens?: Message['richTokens'] } | null;
 }
 
 /**
@@ -408,7 +409,8 @@ export async function branchConversation(
     cutIdx = cut.lastKeptIndex;
     if (cut.pendingUserMessage) {
       const pu = cut.pendingUserMessage as unknown as Message;
-      pendingUserForRefill = { content: pu.content ?? '', attachments: pu.attachments };
+      // ★ D1：richTokens 一并透传（分支点是 user 时，新对话输入框回填要无损还原 @ 块）。
+      pendingUserForRefill = { content: pu.content ?? '', attachments: pu.attachments, richTokens: pu.richTokens };
     }
   } else if (cut.ok && cut.lastKeptIndex < 0 && cut.pendingUserMessage) {
     // 退化：分支点是第 1 轮 user，排除后子集空 → 回退含该 user 的最小子集（rawCutIdx，inclusive），不回填。

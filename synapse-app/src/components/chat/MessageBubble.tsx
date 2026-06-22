@@ -12,7 +12,8 @@ import { useResolvedTheme } from '@/hooks/useResolvedTheme';
 import { RichTextInput } from '@/components/chat/RichTextInput';
 import { useAtMention } from '@/components/chat/useAtMention';
 import { useAttachments } from '@/hooks/useAttachments';
-import type { RichTextInputHandle } from '@/services/inputCommands/richInput/types';
+import type { RichTextInputHandle, ExtractedToken } from '@/services/inputCommands/richInput/types';
+import { buildRichParts } from '@/services/inputCommands/richInput/rebuild';
 import type { AttachmentRef } from '@/store/slices/conversation';
 
 interface ToolCallInfo {
@@ -75,6 +76,8 @@ interface MessageProps {
   endToEndMs?: number;
   thinking?: ThinkingInfo;
   attachments?: AttachmentInfo[];
+  /** ★ M6 收尾 D1：富文本 atomic token 持久化锚点，编辑回填时供 buildRichParts 重组无损还原 @ 高亮块。 */
+  richTokens?: ExtractedToken[];
   toolCalls?: ToolCallInfo[];
   diffs?: FileDiffInfo[];
   // ★ M3-3a：@MultiAI 工作流汇总消息关联的运行实例 id；有则在消息体渲染实时四色 <WorkflowCard/>，
@@ -85,7 +88,7 @@ interface MessageProps {
   // ★ M4-3-S3：点击已发附件——图片走预览模态、文档走编辑器 attachment tab（由 AgentPanel 实装）。
   onOpenAttachment?: (att: AttachmentInfo) => void;
   onUndoToMessage?: (id: string) => void;
-  onEdit?: (id: string, newContent: string, attachments?: AttachmentRef[]) => void;
+  onEdit?: (id: string, newContent: string, attachments?: AttachmentRef[], richTokens?: ExtractedToken[]) => void;
   onRetry?: (id: string) => void;
   onDelete?: (id: string) => void;
   // M2-3 对话分支：从该消息处「从此分支」，把该消息及之前另存为新对话（源对话不变）。
@@ -177,7 +180,7 @@ function formatBytes(bytes?: number): string {
   return `${bytes} B`;
 }
 
-export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, reconnect, endToEndMs, thinking, attachments, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onOpenAttachment, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
+export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, reconnect, endToEndMs, thinking, attachments, richTokens, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onOpenAttachment, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
   const [copied, setCopied] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -220,11 +223,14 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
   const editImageInputRef = useRef<HTMLInputElement>(null);
 
   const handleSubmitEdit = useCallback(() => {
-    const text = (editRichRef.current?.extract().plainText ?? '').trim();
+    // ★ D1：同时取最新 tokens——用户编辑时可能增删了 atomic 块，必须用 extract 后的最新集合（不能复用进编辑前的旧 richTokens）。
+    const extracted = editRichRef.current?.extract();
+    const text = (extracted?.plainText ?? '').trim();
+    const newTokens = extracted?.tokens ?? [];
     const readyAtts = editAtt.ready();
-    // 纯空（无文本无附件）→ 取消 + release 新上传草稿；否则带文本+附件提交。
+    // 纯空（无文本无附件）→ 取消 + release 新上传草稿；否则带文本+附件+richTokens 提交。
     if (!text && readyAtts.length === 0) { setIsEditing(false); editAtt.releaseDrafts(); return; }
-    onEdit?.(id, text, readyAtts);
+    onEdit?.(id, text, readyAtts, newTokens.length > 0 ? newTokens : undefined);
     setIsEditing(false);
     editAtt.markCommitted(); // 新上传草稿引用已随消息转移走，清记录不 release（refCount 守恒路径 E）。
   }, [id, content, onEdit, editAtt]);
@@ -241,13 +247,14 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
     submitOnPlainEnter: true,
   });
 
-  // 进入编辑：RichTextInput 挂载后纯文本回填 + 聚焦 + 还原原消息附件成可编辑草稿（含 token 无损还原需 D1，当前 token 显示为 @对话:xxx 文本）。
+  // 进入编辑：RichTextInput 挂载后回填 + 聚焦 + 还原原消息附件成可编辑草稿。
+  // ★ D1：用 buildRichParts(content, richTokens) 重组——有 richTokens 时无损还原 atomic 块，旧消息无 richTokens 自动降级纯文本。
   useEffect(() => {
     if (!isEditing) return;
-    editRichRef.current?.setContent([content]);
+    editRichRef.current?.setContent(buildRichParts(content, richTokens));
     editRichRef.current?.focus();
     editAtt.restoreFrom(attachments as AttachmentRef[] | undefined);
-    // attachments/editAtt 故意不入依赖：进编辑那一刻快照即可，避免外部刷新覆盖用户增删。
+    // richTokens/attachments/editAtt 故意不入依赖：进编辑那一刻快照即可，避免外部刷新覆盖用户编辑（与附件同口径）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEditing, content]);
 

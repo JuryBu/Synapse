@@ -189,6 +189,9 @@ export function initDatabase(): Database.Database {
     ensureColumn(db, 'messages', 'model', 'TEXT');
     ensureColumn(db, 'messages', 'content_parts', 'TEXT');
     ensureColumn(db, 'messages', 'attachments', 'TEXT');
+    // ★ M6 收尾 D1：富文本 @ 高亮块的持久化锚点。JSON.stringify(ExtractedToken[])，旧库自动补列、旧行 NULL。
+    //   仅供编辑历史消息时无损还原 atomic 块（buildRichParts 重组算法）；不进 LLM 上下文、不计 token、不影响 record。
+    ensureColumn(db, 'messages', 'rich_tokens', 'TEXT');
     ensureColumn(db, 'messages', 'thinking', 'TEXT');
     ensureColumn(db, 'messages', 'stream_state', 'TEXT');
     ensureColumn(db, 'messages', 'duration_ms', 'INTEGER');

@@ -1,4 +1,5 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
+import type { ExtractedToken } from '@/services/inputCommands/richInput/types';
 
 // M2-R6 附件引用层：image_url / file part 内联 base64 不再落库/发送，统一以 sha256 内容寻址引用。
 //   - sha256：put 返回的内容地址，落库/发送的唯一权威；url/data 是【内存态即时预览】(blobURL/dataUrl)，落库前必清。
@@ -123,6 +124,12 @@ export interface Message {
   content: string;
   contentParts?: MessageContentPart[];
   attachments?: AttachmentRef[];
+  /**
+   * ★ M6 收尾 D1：发送时 RichTextInput.extract() 产出的有序 atomic token（{type, id, value, displayLabel?}），
+   *   仅用于「编辑历史消息时无损还原 @ 高亮块」，不进 LLM 上下文（不计入 token、不影响 record 摘要）。
+   *   旧消息无此字段（DB rich_tokens=NULL）→ 编辑回填降级为纯文本（与 D1 之前完全一致，非回归）。
+   */
+  richTokens?: ExtractedToken[];
   thinking?: ThinkingBlock;
   timestamp: number;
   model?: string;
@@ -648,7 +655,7 @@ export const conversationSlice = createSlice({
       state.title = action.payload;
     },
     // 编辑用户消息 → 修改内容 + 截断该消息之后的所有消息
-    editMessage(state, action: PayloadAction<{ id: string; content: string; contentParts?: MessageContentPart[]; attachments?: AttachmentRef[] }>) {
+    editMessage(state, action: PayloadAction<{ id: string; content: string; contentParts?: MessageContentPart[]; attachments?: AttachmentRef[]; richTokens?: ExtractedToken[] }>) {
       const idx = state.messages.findIndex(m => m.id === action.payload.id);
       if (idx >= 0) {
         state.messages[idx].content = action.payload.content;
@@ -657,6 +664,10 @@ export const conversationSlice = createSlice({
         state.messages[idx].contentParts = action.payload.contentParts ?? textToContentParts(action.payload.content);
         state.messages[idx].attachments = action.payload.attachments && action.payload.attachments.length > 0
           ? action.payload.attachments
+          : undefined;
+        // ★ D1：带 richTokens 则写入（编辑后用户增删的最新 token 集合）；不带（旧调用）则置 undefined。
+        state.messages[idx].richTokens = action.payload.richTokens && action.payload.richTokens.length > 0
+          ? action.payload.richTokens
           : undefined;
         // 截断后续消息
         state.messages = state.messages.slice(0, idx + 1);

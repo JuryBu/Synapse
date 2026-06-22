@@ -119,6 +119,8 @@ function mapMessage(row: any) {
         toolCalls: fromJson(row.tool_calls),
         contentParts: fromJson(row.content_parts),
         attachments: fromJson(row.attachments),
+        // ★ M6 收尾 D1：rich_tokens 列旧库 NULL → fromJson 返回 undefined，buildRichParts 自动降级纯文本，不崩。
+        richTokens: fromJson(row.rich_tokens),
         thinking: fromJson(row.thinking),
         streamState: row.stream_state,
         durationMs: row.duration_ms,
@@ -395,15 +397,17 @@ export function registerConversationHandlers(): void {
     ipcMain.handle('message:add', (_e, msg: {
         id: string; conversationId: string; role: string; content: string; timestamp: number;
         model?: string; toolCalls?: unknown[]; contentParts?: unknown[]; attachments?: unknown[];
+        richTokens?: unknown[]; // ★ D1：富文本 atomic token 持久化锚点
         thinking?: unknown; streamState?: string; durationMs?: number; runId?: string;
         runEvents?: unknown[]; diffs?: unknown[]; rollbackSnapshotId?: string; error?: string;
     }) => {
+        // ★ D1：列/占位符/值三者数量严格对齐（18 列 18 ?）。rich_tokens 紧跟 attachments，与 database.ts ensureColumn 顺序一致。
         db.prepare(
             `INSERT OR REPLACE INTO messages (
               id, conversation_id, role, content, timestamp, tool_calls, model,
-              content_parts, attachments, thinking, stream_state, duration_ms,
+              content_parts, attachments, rich_tokens, thinking, stream_state, duration_ms,
               run_id, run_events, diffs, rollback_snapshot_id, error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
             msg.id,
             msg.conversationId,
@@ -414,6 +418,7 @@ export function registerConversationHandlers(): void {
             msg.model || null,
             toJson(msg.contentParts),
             toJson(msg.attachments),
+            toJson(msg.richTokens),
             toJson(msg.thinking),
             msg.streamState || null,
             msg.durationMs ?? null,
@@ -440,6 +445,7 @@ export function registerConversationHandlers(): void {
     ipcMain.handle('message:replaceConversation', (_e, conversationId: string, messages: Array<{
         id: string; role: string; content: string; timestamp: number;
         model?: string; toolCalls?: unknown[]; contentParts?: unknown[]; attachments?: unknown[];
+        richTokens?: unknown[]; // ★ D1：富文本 atomic token 持久化锚点
         thinking?: unknown; streamState?: string; durationMs?: number; runId?: string;
         runEvents?: unknown[]; diffs?: unknown[]; rollbackSnapshotId?: string; error?: string;
     }>, opts?: { systemTouch?: boolean }) => {
@@ -449,12 +455,13 @@ export function registerConversationHandlers(): void {
             // ★ M4-2-S2 终极兜底：纯 INSERT 撞 messages.id UNIQUE 会整事务回滚（弹「自动保存失败」toast）。
             //   改 INSERT OR REPLACE，即便运行态 id 仍碰撞（已由 services/ids.ts 收敛到 randomUUID 极大降概率），
             //   也只覆盖同 id 行而非整批失败，与 message:add（早已是 OR REPLACE）口径统一。
+            // ★ D1：18 列 18 ? 严格对齐，rich_tokens 紧跟 attachments。
             const insert = db.prepare(
                 `INSERT OR REPLACE INTO messages (
                   id, conversation_id, role, content, timestamp, tool_calls, model,
-                  content_parts, attachments, thinking, stream_state, duration_ms,
+                  content_parts, attachments, rich_tokens, thinking, stream_state, duration_ms,
                   run_id, run_events, diffs, rollback_snapshot_id, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             );
             for (const msg of messages) {
                 insert.run(
@@ -467,6 +474,7 @@ export function registerConversationHandlers(): void {
                     msg.model || null,
                     toJson(msg.contentParts),
                     toJson(msg.attachments),
+                    toJson(msg.richTokens),
                     toJson(msg.thinking),
                     msg.streamState || null,
                     msg.durationMs ?? null,
