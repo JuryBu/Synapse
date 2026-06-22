@@ -19,6 +19,7 @@
 .tool-status-icon.spinning { animation: spin 1s linear infinite; }
 .tool-status-icon.success { color: #22c55e; }
 .tool-status-icon.error { color: #ef4444; }
+.tool-status-icon.cancelled { color: var(--syn-text-muted); }
 @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
 .tool-call-body { padding: 0 12px 12px; }
 .tool-call-section { margin-bottom: 8px; }

@@ -1,11 +1,11 @@
 import { useState, useCallback } from 'react';
-import { ChevronRight, ChevronDown, Wrench, Check, X, Loader2, Copy, Clock } from 'lucide-react';
+import { ChevronRight, ChevronDown, Wrench, Check, X, Loader2, Copy, Clock, Ban } from 'lucide-react';
 
 interface ToolCall {
   id: string;
   name: string;
   arguments: string;
-  status: 'pending' | 'running' | 'success' | 'error';
+  status: 'pending' | 'running' | 'success' | 'error' | 'cancelled';
   result?: string;
   executionTime?: number; // ms
 }
@@ -46,6 +46,8 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
     running: <Loader2 size={14} className="tool-status-icon spinning" />,
     success: <Check size={14} className="tool-status-icon success" />,
     error: <X size={14} className="tool-status-icon error" />,
+    // ★ cancelled：静止灰色禁止图标（区别于转圈），用于「生成中断 / 上次会话未完成」的工具调用。
+    cancelled: <Ban size={14} className="tool-status-icon cancelled" />,
   }[effectiveStatus];
 
   const statusColor = {
@@ -53,6 +55,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
     running: 'var(--syn-accent)',
     success: '#22c55e',
     error: '#ef4444',
+    cancelled: 'var(--syn-text-muted)',
   }[effectiveStatus];
 
   const resultText = toolCall.result || '';

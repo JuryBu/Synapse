@@ -172,7 +172,8 @@ export interface ToolCall {
   name: string;
   arguments: string;
   result?: string;
-  status: 'pending' | 'running' | 'success' | 'error';
+  // cancelled：生成被中断 / 上次会话未执行完，恢复时收尾为此态（区别于转圈的 pending/running）。
+  status: 'pending' | 'running' | 'success' | 'error' | 'cancelled';
   executionTime?: number; // ms，执行耗时（success/error 时回填，供 ToolCallCard 显示）
 }
 
@@ -222,11 +223,27 @@ function textToContentParts(content: string): MessageContentPart[] {
   return content ? [{ type: 'text', text: content }] : [];
 }
 
-function normalizeMessage(message: Message): Message {
+function normalizeMessage(message: Message, restoring = false): Message {
   const content = message.content ?? '';
   const contentParts = Array.isArray(message.contentParts)
     ? message.contentParts
     : textToContentParts(content);
+  // ★ 命令转圈修复（恢复路径专属）：从持久化/切换对话恢复消息时，收尾上次会话残留的「未完成态」，
+  //   避免重开后工具卡片永久转圈、消息卡在 streaming。仅 restoring=true 时生效——addMessage 新加
+  //   正要流式的消息走 restoring=false，绝不能被强制收尾（否则打断刚发起的流式）。
+  if (restoring) {
+    const toolCalls = message.toolCalls?.map(tc =>
+      (tc.status === 'pending' || tc.status === 'running')
+        ? (tc.result
+            ? { ...tc, status: 'success' as const }              // 有结果说明实际已完成（沿用 FIX-13 语义）
+            : { ...tc, status: 'cancelled' as const, result: '⚠️ 上次会话中断，工具未执行完成' })
+        : tc
+    );
+    const restoredStream = (message.streamState === 'streaming' || message.streamState === 'pending')
+      ? 'aborted' as const
+      : message.streamState;
+    return { ...message, content, contentParts, toolCalls, isStreaming: false, streamState: restoredStream };
+  }
   return {
     ...message,
     content,
@@ -366,7 +383,7 @@ export const conversationSlice = createSlice({
       state.schemaVersion = CONVERSATION_SCHEMA_VERSION;
       state.id = action.payload.id;
       state.title = action.payload.title;
-      state.messages = action.payload.messages.map(normalizeMessage);
+      state.messages = action.payload.messages.map((m) => normalizeMessage(m, true)); // restoring：恢复对话时收尾残留未完成态（防工具卡片永久转圈）
       state.assistantRuns = action.payload.assistantRuns ?? {};
       state.fileSnapshots = action.payload.fileSnapshots ?? {};
       state.pendingDiffs = (action.payload.pendingDiffs ?? []).map(normalizeDiff);

@@ -1357,7 +1357,19 @@ export class AgentLoop {
       if (pendingToolCalls.length > 0 && this.toolExecutor) {
         // execContextId 已在 run 入口快照（见 while 前），整轮 run 复用，不再每轮重读 store（防流式中切对话身份漂移）。
         for (const tc of pendingToolCalls) {
-          if (!this.running) break;
+          if (!this.running) {
+            // ★ 命令转圈修复：用户中断 → 把本轮【剩余未执行】的 pending/running 工具调用收尾为 cancelled，
+            //   避免它们永久卡 spinner（已执行的上面已回写 success/error）。恢复路径另由 normalizeMessage 兜底。
+            if (assistantMessageId) {
+              const abortMsg = (store.getState() as RootState).conversation.messages.find((m: any) => m.id === assistantMessageId);
+              abortMsg?.toolCalls?.forEach((t: any) => {
+                if (t.status === 'pending' || t.status === 'running') {
+                  store.dispatch(updateToolCallStatus({ messageId: assistantMessageId, toolCallId: t.id, status: 'cancelled', result: '已取消（生成中断）' }));
+                }
+              });
+            }
+            break;
+          }
           const toolStartedAt = Date.now();
           try {
             const args = JSON.parse(tc.function.arguments);
