@@ -67,6 +67,7 @@ function RichTextInputInner(
   useImperativeHandle(ref, (): RichTextInputHandle => ({
     insertTokenAt(trigger, t) {
       const el = editorRef.current; if (!el) return;
+      el.focus(); // ★ bug1 止血：插入前把选区拉回编辑器，避免 portal 菜单点击后 focusNode 漂到外部 DOM（与 insertToken 对称）
       insertTokenAtTrigger(el, trigger, t);
       syncEmpty(); requestAnimationFrame(autoResize); // P18：插 token 后 rAF 再量高
     },

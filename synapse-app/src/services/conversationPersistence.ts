@@ -608,8 +608,10 @@ export async function loadConversationSnapshot(id: string): Promise<Conversation
   return await loadPlatformSnapshot(id) ?? loadLegacyConversationSnapshot(id);
 }
 
-export async function renameConversation(id: string, title: string): Promise<void> {
-  await platform.conversation.update(id, { title }).catch(() => false);
+export async function renameConversation(id: string, title: string, opts?: { systemTouch?: boolean }): Promise<void> {
+  // ★ M6 验收 bug9：自动标题回写走 systemTouch=true 落库——只改标题列、不刷 updated_at，
+  //   避免自动标题把对话错误顶到列表最前（用户手动重命名仍走默认刷时间置顶）。
+  await platform.conversation.update(id, { title, ...(opts?.systemTouch ? { systemTouch: true } : {}) }).catch(() => false);
   updateLegacyConversationMetadata(id, { title });
 }
 

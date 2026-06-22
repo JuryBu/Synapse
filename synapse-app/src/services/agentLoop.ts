@@ -19,7 +19,8 @@ import { getRecord, appendBatch, getRecordSkeleton, extractSkeletonTitle, foldOl
 import { identifyRounds, floorStepToRoundStart } from './roundBoundary';
 import { generateBatch } from './recordGenerator';
 import { runSystemModelOnce } from './systemModelClient';
-import { AUTOSAVE_ID, saveAutosaveSnapshot } from './conversationPersistence';
+import { AUTOSAVE_ID, saveAutosaveSnapshot, renameConversation } from './conversationPersistence';
+import { updateConversation } from '../store/slices/conversationHistory';
 import { generateId } from './ids';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
 import { restoreApiMessagesAttachments, chatContentToTextWithPlaceholder } from './attachmentRefs';
@@ -921,6 +922,13 @@ export class AgentLoop {
       const placeholderTitle = userMessage.slice(0, TITLE_PLACEHOLDER_CHARS)
         + (userMessage.length > TITLE_PLACEHOLDER_CHARS ? '...' : '');
       store.dispatch(setTitle(placeholderTitle));
+      // ★ M6 验收 bug9：标题不仅改 conversation slice（顶部 header），还要同步对话列表数据源
+      //   （conversationHistory），否则左侧列表 / @ 对话候选一直显示创建时的 fallback（首条消息内容）。
+      //   占位先 best-effort 同步列表（列表项若尚未创建则 no-op，autosave 首存会带正确 title）。
+      {
+        const idForTitle = (store.getState() as RootState).conversation.id;
+        if (idForTitle) store.dispatch(updateConversation({ id: idForTitle, title: placeholderTitle }));
+      }
 
       // 仅当首条有可概括文本时才异步生成（纯图片/附件无文本 → 保留占位降级）。
       const titleSource = userMessage.trim();
@@ -945,6 +953,12 @@ export class AgentLoop {
           if (live.id !== conversationIdSnapshot) return;
           if (live.title !== placeholderTitle) return;
           store.dispatch(setTitle(generated));
+          // ★ M6 验收 bug9：生成标题同步对话列表 slice（即时刷新左侧列表 / @ 对话候选）+ 落库
+          //   （systemTouch=true：只写标题列不刷 updated_at，避免自动标题把对话顶到列表最前）。
+          if (conversationIdSnapshot) {
+            store.dispatch(updateConversation({ id: conversationIdSnapshot, title: generated }));
+            void renameConversation(conversationIdSnapshot, generated, { systemTouch: true });
+          }
         })();
       }
     }

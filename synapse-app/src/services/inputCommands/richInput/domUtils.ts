@@ -74,12 +74,21 @@ function collapseCaretToEnd(node: Text): void {
 
 /** 删掉 @query 段、在原位插入 atomic token（前后零宽占位），光标收拢到 token 之后。 */
 export function insertTokenAtTrigger(root: HTMLElement, trigger: AtTrigger, t: TokenSpec): void {
+  // M6 验收 bug1 主修：trigger.startNode 一定在 root 内（来自 detectAtTrigger），但 startNode 若已被
+  //   normalize 摘除则防御性退出。
+  if (!root.contains(trigger.startNode)) return;
   const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0 || !sel.focusNode) return;
   const range = document.createRange();
   try {
     range.setStart(trigger.startNode, trigger.startOffset);
-    range.setEnd(sel.focusNode, sel.focusOffset);
+    // ★ bug1 根治：终点不再无条件信任 window.getSelection().focusNode——异步文件树菜单的空窗期，点击候选时
+    //   选区可能已漂到编辑器【外部】（如左侧『最近工作区』列表），跨容器拼 Range 会把 token 插进欢迎页 DOM。
+    //   仅当 focusNode 仍在 root 内才用它删 @query 段；否则 collapse 到 @ 锚点原位插入（绝不跨容器）。
+    if (sel && sel.rangeCount > 0 && sel.focusNode && root.contains(sel.focusNode)) {
+      range.setEnd(sel.focusNode, sel.focusOffset);
+    } else {
+      range.setEnd(trigger.startNode, trigger.startOffset); // collapsed 到 @ 处
+    }
   } catch {
     return;
   }
