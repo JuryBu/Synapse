@@ -7,7 +7,7 @@ import type { MouseEvent } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import type { ConversationSummary } from '@/store/slices/conversationHistory';
 import { removeConversation, setConversations, setSelectedId, updateConversation } from '@/store/slices/conversationHistory';
-import { clearConversation, setConversation, setConversationWorkspace } from '@/store/slices/conversation';
+import { clearConversation, setConversation, setConversationWorkspace, setTitle } from '@/store/slices/conversation';
 import { setMode, setReasoningEffort } from '@/store/slices/agentSettings';
 import { exitWorktree } from '@/store/slices/worktreeSession';
 import { addNotification } from '@/store/slices/notifications';
@@ -46,11 +46,13 @@ import {
   MessageSquare,
   Plus,
   Search,
+  Sparkles,
   Square,
   Tags,
   Trash2,
   X,
 } from 'lucide-react';
+import { generateTitleFromText } from '@/services/agentLoop';
 
 type ArchiveFilter = 'active' | 'archived' | 'all';
 
@@ -126,6 +128,8 @@ export function ConversationList() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
+  // ★ M7-F1：正在「重新生成标题」的对话 id（按钮 loading 态 + 防重复点）。
+  const [regenId, setRegenId] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState('');
   // ★ M4-2-S6「移动到…」：当前展开归属菜单的对话 id（null = 未展开）。点条目 FolderInput 按钮切换。
   const [movingId, setMovingId] = useState<string | null>(null);
@@ -528,6 +532,37 @@ export function ConversationList() {
     await refreshConversations();
   }, [currentConversation, editingTitle, refreshConversations, dispatch]);
 
+  // ★ M7-F1：重新生成标题——对任意（尤其旧 fallback 标题的）对话手动重跑自动标题内核。
+  //   loadConversationSnapshot 取首条 user 文本 → generateTitleFromText → renameConversation(systemTouch 不刷排序)
+  //   + updateConversation 刷列表 + 当前对话则 setTitle 同步顶栏。各失败态 notification 反馈。
+  const handleRegenerateTitle = useCallback(async (id: string, event: MouseEvent) => {
+    stop(event);
+    setRegenId(id);
+    try {
+      const snap = await loadConversationSnapshot(id);
+      const firstUser = snap?.messages.find(m => m.role === 'user')?.content;
+      const source = typeof firstUser === 'string' ? firstUser : '';
+      if (!source.trim()) {
+        dispatch(addNotification({ type: 'warning', title: '无法生成标题', message: '该对话首条没有可概括的文本' }));
+        return;
+      }
+      const title = await generateTitleFromText(source);
+      if (!title) {
+        dispatch(addNotification({ type: 'error', title: '生成失败', message: '系统模型未返回标题，请检查模型配置' }));
+        return;
+      }
+      await renameConversation(id, title, { systemTouch: true });
+      dispatch(updateConversation({ id, title }));
+      if (currentConversationRef.current.id === id) dispatch(setTitle(title));
+      await refreshConversations();
+      dispatch(addNotification({ type: 'info', title: '标题已更新', message: title }));
+    } catch {
+      dispatch(addNotification({ type: 'error', title: '生成失败', message: '重新生成标题时出错' }));
+    } finally {
+      setRegenId(null);
+    }
+  }, [dispatch, refreshConversations]);
+
   // ★ M4-2-S6 改归属：经共享 hook 落库 + 回写 slice；若改的是当前打开对话，同步 store conversation.workspacePath
   //   使其内后续保存延续正确归属；随后 refresh 让当前范围视图即时剔除/纳入该条。
   const handleMoveConversation = useCallback(async (id: string, target: WorkspaceTarget) => {
@@ -738,6 +773,15 @@ export function ConversationList() {
                   title={editingId === conv.id ? '保存标题' : '编辑标题'}
                 >
                   {editingId === conv.id ? <Check size={12} /> : <Edit3 size={12} />}
+                </button>
+                {/* ★ M7-F1 重新生成标题：对旧 fallback 标题的对话用 AI 重拟语义标题（系统模型）。 */}
+                <button
+                  className="conv-item-action"
+                  disabled={regenId === conv.id}
+                  onClick={(event) => void handleRegenerateTitle(conv.id, event)}
+                  title="重新生成标题（AI）"
+                >
+                  <Sparkles size={12} className={regenId === conv.id ? 'spin' : ''} />
                 </button>
                 {/* ★ M4-2-S6「移动到…」：改对话工作区归属。点开内联菜单选 全局 / 当前工作区 / 历史工作区。 */}
                 <button

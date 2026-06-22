@@ -118,6 +118,24 @@ function sanitizeTitle(raw: string | null): string | null {
   return t || null;
 }
 
+/**
+ * ★ M7-F1：从一段文本生成语义标题（≤15 字）。抽自自动标题 IIFE，让【自动标题（首条消息）】与
+ *   【手动重新生成标题（ConversationList 按钮）】共用同一生成内核，行为一致。
+ *   失败（系统模型未返回 / 全部重试失败）返回 null，调用方据此降级/提示。不做任何 dispatch（纯生成）。
+ */
+export async function generateTitleFromText(source: string): Promise<string | null> {
+  const titleSource = (source ?? '').trim();
+  if (!titleSource) return null;
+  const prompt = `请为下面这轮用户提问拟一个不超过 15 个汉字的中文标题，只输出标题：\n\n${titleSource.slice(0, 2000)}`;
+  let generated: string | null = null;
+  for (let attempt = 0; attempt <= TITLE_RETRY; attempt++) {
+    generated = sanitizeTitle(await runSystemModelOnce(prompt, { system: TITLE_SYSTEM_PROMPT }));
+    if (generated) break;
+    if (attempt < TITLE_RETRY) await new Promise(r => setTimeout(r, TITLE_RETRY_INTERVAL_MS));
+  }
+  return generated;
+}
+
 // ★ M4-2-S2：运行态 id 生成收敛到共享 services/ids.ts（crypto.randomUUID + 回退，保留 prefix），
 //   治问题 2b(1) 弱熵同毫秒碰撞。原本地 generateId 已删，调用点签名不变（仍 generateId('run'/'evt'/...)）。
 
@@ -937,13 +955,8 @@ export class AgentLoop {
         const conversationIdSnapshot = (store.getState() as RootState).conversation.id;
         // ★ fire-and-forget：包在自执行 async IIFE，void 丢弃 promise，绝不被主流式 await。
         void (async () => {
-          const prompt = `请为下面这轮用户提问拟一个不超过 15 个汉字的中文标题，只输出标题：\n\n${titleSource.slice(0, 2000)}`;
-          let generated: string | null = null;
-          for (let attempt = 0; attempt <= TITLE_RETRY; attempt++) {
-            generated = sanitizeTitle(await runSystemModelOnce(prompt, { system: TITLE_SYSTEM_PROMPT }));
-            if (generated) break;
-            if (attempt < TITLE_RETRY) await new Promise(r => setTimeout(r, TITLE_RETRY_INTERVAL_MS));
-          }
+          // ★ M7-F1：复用抽出的 generateTitleFromText（与手动「重新生成标题」同内核）。
+          const generated = await generateTitleFromText(titleSource);
           if (!generated) return; // 全失败 → 保留已设的截断占位（不再 dispatch）
 
           // 竞态守卫：回写前再读 live conversation——
