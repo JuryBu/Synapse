@@ -30,11 +30,23 @@
 | **1a2efba** C3b | #5 工具结果收进 ToolCallCard 折叠（过滤 role=tool 保留真实 idx） |
 | **121d355** C3c | #7 token：gpt 系 gpt-tokenizer o200k 精确、非 gpt 标注 ≈估算 |
 
-### 剩余（M7 / 待定）
+### 第三批（2026-06-22 续：主人验证 C2c 性能后又报几项）
 
-- [ ] **#8 空格 @ 输入框态（可选增强）**：主人提的「@ 后进专门输入框、随便输入带空格、点完成」交互。反重力也无此能力，优先级低。当前空格直接退出 @ 匹配（可接受）。
-- [ ] **C2c 流式深优化（待主人验证后定）**：rAF dispatch 批处理（纯优化，有丢尾段风险）+ markdown 延迟解析（流式期纯文本、生成完渲染，有视觉降级）。主人决定「先刷新验证 memo+blur 够不够，够了就不做」。
-- [ ] **AgentPanel.tsx null 字节隐患**：文件 offset ~61755 处有个 `\0` 字符，导致 grep/ripgrep 把它当二进制文件跳过（CC Grep/Bash grep 对该文件失效，只能用 PowerShell Select-String / Read）。编译/运行不受影响（应在某字符串/注释里）。待定位清理。
+| commit | 修了什么 |
+|---|---|
+| **0e6f584** C2c | 流式 rAF 批处理 + markdown 延迟解析（流式期纯文本、完成转格式）+ 滚动条改 scrollTop。收尾强制 flushStreamBuffer 防丢尾段 |
+| **d79b458** C2c 调整 | 主人反馈「卡=频率过高，要降频不要不渲染」→ flush 从 rAF 改 setTimeout(200ms 节流)、MessageBubble 流式恢复 markdown（降频靠节流）；工作区文案「暂无文件」→「暂无打开的文件」 |
+| **b657299** | mermaid「只剩框没文字」：htmlLabels:false（用 SVG text）+ DOMPurify 保留 foreignObject |
+| **70a62bc** | AgentPanel sanitizePath NUL 字节 + 字面控制字符隐患清理（grep 恢复正常） |
+
+主人第三轮验证：**流式有格式 + 不卡 + 频率舒服 ✅、流程图正常 ✅、滚动条能拖 ✅**。性能目标达成。
+
+### 剩余 / 新发现（→ M7 新功能方向，主人定「全做」）
+
+- [ ] **① 标题彻底修**：自动标题同步只对【新对话】生效；旧对话标题是创建时的「首条消息截断」fallback（DB 已落库、追不回），列表/候选满屏「@对话:xxx 这个对话是关于...」。方案：旧对话加「重新生成标题」按钮 + 手动重命名入口。⚠️ 先让主人新建对话验证 C1(bbe70d5) 对新对话是否真生效，再定旧对话补救范围。
+- [ ] **② 「读历史对话原文」工具（功能缺口）**：`@对话` 只注入摘要，Synapse 无「一字不差读自己历史对话原文」的工具。AI 误用 `mcp__memory-store__conversation_read_original`（那是跨宿主记忆库，与 Synapse SQLite 对话是两套系统、conv-xxx ID 不互通，所以读不到）。需给 Synapse 加一个查自己 SQLite 的读原文工具（按 conversationId 取完整轮次原文）。
+- [ ] **③ 图表渲染不总成功**：mermaid 偶发「渲染失败」（疑流式中途渲染半截代码 render 抛错，完成后 useEffect 依赖 [code] 应重试——需确认完成后是否最终成功；若否，查具体 mermaid 报错 + 流式期可跳过渲染只在完成后渲）。
+- [ ] **#8 空格 @ 输入框态（可选）**：低优先级，反重力亦无此能力。当前空格直接退出 @ 匹配（可接受）。
 
 ## 一、范围（4 项）
 
