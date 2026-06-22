@@ -1253,6 +1253,9 @@ export function AgentPanel() {
     // ★ M4-6-S5 /loop 中途 Stop：循环驱动器请求中断——置 aborted 后循环在下个检查点退出，
     //   正在跑的那一轮由上面 agentLoopRef.current.stop() 中止。无运行循环时 stop() 内部 no-op，安全。
     loopRunner.stop();
+    // ★ 六轮 #154：中止后把焦点拉回输入框——Stop 按钮点击后会变回 Send 按钮(焦点随之丢失)，
+    //   用户直接打字无反应、误以为"输入框无法输入"。rAF 等按钮切换+isStreaming 复位后再聚焦。
+    requestAnimationFrame(() => richRef.current?.focus());
   }, []);
 
   // Plan_4 M2-1：编辑/重试/回溯会截断后续消息。把 record 水位线 clamp 到保留范围（替代此前的整条删）：

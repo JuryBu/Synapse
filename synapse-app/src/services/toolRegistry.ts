@@ -239,7 +239,26 @@ toolRegistry.register({
     },
   },
 }, async (args, ctx) => {
-  const { fileSystem } = await import('./fileSystem');
+  const { fileSystem, resolveWorkspacePath } = await import('./fileSystem');
+  const { isExtractableDocument, extractDocumentText } = await import('./documentExtract');
+
+  // office/pdf 等二进制文档：用 readFile（fs utf-8）读出来是乱码 → 改走文本提取（pdf.js/mammoth/jszip/xlsx）。
+  //   提取需要可读的真实路径，故先按工具统一口径 resolveWorkspacePath 解析（与 list_dir/search 一致）。
+  if (isExtractableDocument(args.path)) {
+    try {
+      const resolved = await resolveWorkspacePath(args.path, ctx?.contextId);
+      const text = await extractDocumentText(resolved);
+      if (!text) return `文件 ${args.path} 未提取到文本内容（可能是空文档 / 纯图片型 PDF）。`;
+      const lines = text.split('\n');
+      const start = (args.startLine || 1) - 1;
+      const end = args.endLine || lines.length;
+      const slice = lines.slice(start, end);
+      return `文档: ${args.path} (已解析文本，行 ${start + 1}-${end}/${lines.length})\n\n${slice.join('\n')}`;
+    } catch (err: any) {
+      return `读取文档失败 ${args.path}: ${err?.message || String(err)}`;
+    }
+  }
+
   const content = await fileSystem.readFile(args.path, ctx?.contextId);
   if (!content) return `文件不存在: ${args.path}`;
 
@@ -465,10 +484,36 @@ toolRegistry.register({
       required: ['file'],
     },
   },
-}, async (args) => {
+}, async (args, ctx) => {
   const fileName = args.file;
-  const page = args.page || 1;
-  return `📚 课件: ${fileName} (第 ${page} 页)\n\n[此功能需要 Electron 环境支持文件解析]\n提示: 在 Electron 模式下，此工具将使用 pdf.js / mammoth / pptx-parser 解析课件内容。`;
+  if (!fileName || typeof fileName !== 'string') return '⚠️ read_course_material 需要 file（课件文件名/路径）。';
+
+  const { resolveWorkspacePath } = await import('./fileSystem');
+  const { isExtractableDocument, extractDocumentText } = await import('./documentExtract');
+
+  if (!isExtractableDocument(fileName)) {
+    return `⚠️ ${fileName} 不是受支持的课件类型（支持 .pdf/.docx/.pptx/.xlsx/.xls/.csv）。若是纯文本/代码文件请用 view_file。`;
+  }
+
+  try {
+    const resolved = await resolveWorkspacePath(fileName, ctx?.contextId);
+    const text = await extractDocumentText(resolved);
+    if (!text) return `📚 课件 ${fileName}：未提取到文本内容（可能是空文档 / 纯图片型 PDF）。`;
+
+    // 指定了页码时：尝试从带 `--- Page N ---` / `--- Slide N ---` 分隔的文本里抠出该页；抠不到则回全文。
+    const page = typeof args.page === 'number' ? args.page : undefined;
+    if (page && page > 0) {
+      const re = new RegExp(`--- (?:Page|Slide) ${page} ---\\n([\\s\\S]*?)(?=\\n--- (?:Page|Slide) \\d+ ---|$)`);
+      const m = text.match(re);
+      if (m) return `📚 课件: ${fileName}（第 ${page} 页）\n\n${m[1].trim()}`;
+      // PDF/PPTX 无该页，或 docx/表格类无分页概念 → 返回全文并提示。
+      return `📚 课件: ${fileName}（未找到第 ${page} 页，返回全文；docx/表格类无分页）\n\n${text}`;
+    }
+
+    return `📚 课件: ${fileName}\n\n${text}`;
+  } catch (err: any) {
+    return `📚 课件 ${fileName} 解析失败: ${err?.message || String(err)}`;
+  }
 }, 'learning', 'read', 'read');
 
 toolRegistry.register({
