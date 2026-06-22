@@ -329,9 +329,11 @@ export function AgentPanel() {
       apiKey,
       baseUrl,
       model,
-      temperature: agentSettings.temperature ?? 0.7,
-      topP: agentSettings.topP ?? 1,
-      maxTokens: agentSettings.maxTokens ?? 4096,
+      // ★ 模型参数门控（诊断#3）：模型不支持的参数传 undefined（而非旧值），与 buildBody「undefined 不写 body」配合，
+      //   真正不发送不支持的参数；UI 滑块本就 disable，这里同步切断发送链，不再打脸面板提示。
+      temperature: supportsTemperature ? (agentSettings.temperature ?? 0.7) : undefined,
+      topP: supportsTopP ? (agentSettings.topP ?? 1) : undefined,
+      maxTokens: supportsMaxTokens ? (agentSettings.maxTokens ?? 4096) : undefined,
       stream: currentCapabilities?.streaming ?? true,
       outputStrategy: agentSettings.outputStrategy ?? ((agentSettings.enableStreaming ?? true) ? 'auto' : 'off'),
       pseudoStreamSpeed: agentSettings.pseudoStreamSpeed ?? 'medium',
@@ -357,6 +359,9 @@ export function AgentPanel() {
     agentSettings.reasoningEffort,
     agentSettings.speedTier,
     currentCapabilities,
+    supportsTemperature,
+    supportsTopP,
+    supportsMaxTokens,
   ]);
 
   // Build AgentLoop + P1-3: 接入工具审批

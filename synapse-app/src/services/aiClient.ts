@@ -244,10 +244,12 @@ export class AIClient {
     const body: any = {
       model: this.config.model,
       messages,
-      temperature: this.config.temperature ?? 0.7,
-      max_tokens: this.config.maxTokens ?? 4096,
       stream: useStream,
     };
+    // ★ 模型参数门控（诊断#3）：仅当上游显式提供时才写入请求体——不支持该参数的模型由 AgentPanel 传 undefined → 不发。
+    //   去掉旧的 `?? 0.7`/`?? 4096` 无条件兜底，兑现面板「不支持的参数不会写入请求」承诺，避免严格端点 400。
+    if (this.config.temperature !== undefined) body.temperature = this.config.temperature;
+    if (this.config.maxTokens !== undefined) body.max_tokens = this.config.maxTokens;
     if (useStream) body.stream_options = { include_usage: true };
     if (this.config.topP !== undefined) body.top_p = this.config.topP;
     if (this.config.reasoningEffort && this.config.reasoningEffort !== 'auto') {
