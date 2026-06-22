@@ -20,6 +20,7 @@ import { toggleAgentPanel, setSidebarVisible } from '@/store/slices/layout';
 // ★ M4-6-S2：@设置选中后跳转——切到设置分区（sidebar）+ 展开侧栏（layout）。
 import { setActiveView } from '@/store/slices/sidebar';
 import { MessageBubble } from '@/components/chat/MessageBubble';
+import { ApprovalDialog, type ApprovalRequest } from '@/components/ui/ApprovalDialog';
 import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
@@ -296,6 +297,19 @@ export function AgentPanel() {
   const isAtBottomRef = useRef(true);
   // ★ M6：inputRef 移除（textarea→RichTextInput，命令式句柄用 richRef）。
   const agentLoopRef = useRef<AgentLoop | null>(null);
+  // ★ 权限弹窗前端化（诊断#4）：审批浮层状态 + pending Promise resolve（替代原生 window.confirm）。
+  const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null);
+  const approvalResolveRef = useRef<((v: boolean) => void) | null>(null);
+  const handleApprovalApprove = useCallback(() => {
+    approvalResolveRef.current?.(true);
+    approvalResolveRef.current = null;
+    setApprovalReq(null);
+  }, []);
+  const handleApprovalReject = useCallback(() => {
+    approvalResolveRef.current?.(false);
+    approvalResolveRef.current = null;
+    setApprovalReq(null);
+  }, []);
 
   // ★ M6：autoResize useLayoutEffect 移除——RichTextInput 内部自管高度（onInput/rAF + CSS max-height）。
   const hasApiKey = !!settings.apiKeys?.openai;
@@ -396,19 +410,24 @@ export function AgentPanel() {
     // P1-3: 设置审批回调（弹出确认对话框）
     // ★ M3-1a medium#4：meta 携带子代理来源标识——后台子代理调用 write/command 级工具弹审批时，
     //   文案前缀「子代理「角色」请求…」，让用户分清是主代理还是哪个子代理发起（旧文案只说「AI 请求」无法区分）。
-    toolRegistry.setApprovalCallback(async (toolName, args, level, meta) => {
+    toolRegistry.setApprovalCallback((toolName, args, level, meta) => {
       const origin = meta?.isSubagent
         ? `子代理「${meta.subagentRole || '未命名'}」`
         : 'AI';
-      // ★ medium#5：worktree 创建是真实 git 写盘 + 建新分支，通用「执行工具」文案会让用户误以为是无害模式切换。
-      //   给 enter_worktree 定制说明，明确「会在磁盘建工作树目录 + git 里新建/复用分支」，降低误批风险。
+      // ★ 权限弹窗前端化（诊断#4）：用 ApprovalDialog 玻璃浮层替代原生 window.confirm（样式一致 + 动画 + Esc/Enter）。
+      //   enter_worktree 保留定制说明（真实 git 写盘 + 建分支，降低误批）；参数不再截断 200 字（浮层可滚动看全）。
+      let message: string | undefined;
       if (toolName === 'enter_worktree') {
         const branch = typeof args?.branch === 'string' && args.branch.trim() ? args.branch.trim() : '（自动生成时间戳分支）';
-        const msg = `${origin}请求进入 git worktree（隔离工作树）\n\n这会在磁盘 userData/worktrees 下创建一个工作树目录，并在当前仓库新建（或复用已有）分支：\n  分支：${branch}\n\n进入后 AI 的文件读写/命令将作用于该工作树（与主工作区隔离），而非直接改主工作区。是否同意？`;
-        return window.confirm(msg);
+        message = `进入 git worktree（隔离工作树）。\n\n这会在磁盘 userData/worktrees 下创建一个工作树目录，并在当前仓库新建（或复用已有）分支：\n  分支：${branch}\n\n进入后 AI 的文件读写/命令将作用于该工作树（与主工作区隔离），而非直接改主工作区。`;
       }
-      const msg = `${origin}请求执行工具 "${toolName}"（权限: ${level}）\n参数: ${JSON.stringify(args, null, 2).slice(0, 200)}`;
-      return window.confirm(msg);
+      const argsText = JSON.stringify(args, null, 2);
+      return new Promise<boolean>((resolve) => {
+        // 工具串行执行，同一时刻只一个审批；保险：若仍有未决审批，先拒绝旧的再接管。
+        if (approvalResolveRef.current) approvalResolveRef.current(false);
+        approvalResolveRef.current = resolve;
+        setApprovalReq({ toolName, level, argsText, originLabel: origin, message });
+      });
     });
     // P1-3: 同步安全设置
     const safety = settings.safety;
@@ -422,7 +441,14 @@ export function AgentPanel() {
     }
     agentLoopRef.current = loop;
     // ★ M5-BPC-4：cleanup 时解绑（detachLoop 仅当传入的是当前持有 loop 才解绑 + 丢在途 BPC，防并发重建误伤新 loop）。
-    return () => { cancelled = true; loop.stop(); bpcScheduler.detachLoop(loop); };
+    return () => {
+      cancelled = true;
+      loop.stop();
+      bpcScheduler.detachLoop(loop);
+      // 权限弹窗：loop/组件重建时若有未决审批，拒绝并关闭，防 Promise 悬挂。
+      if (approvalResolveRef.current) { approvalResolveRef.current(false); approvalResolveRef.current = null; }
+      setApprovalReq(null);
+    };
   }, [aiClient, settings.safety]);
 
   // ★ M6 验收 bug3：滚动容器监听——记录用户是否贴底（距底 < 60px 视为贴底）。用户主动上滚 → isAtBottom=false。
@@ -1837,6 +1863,7 @@ export function AgentPanel() {
 
   return (
     <div className="agent-panel glass-panel">
+      <ApprovalDialog request={approvalReq} onApprove={handleApprovalApprove} onReject={handleApprovalReject} />
       <div className="agent-header">
         <div className="agent-tabs">
           <button className={`agent-tab ${activeAgentTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveAgentTab('chat')}>💬 Chat</button>
