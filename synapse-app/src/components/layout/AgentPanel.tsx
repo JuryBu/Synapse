@@ -2137,12 +2137,17 @@ export function AgentPanel() {
                     onDelete={handleDelete}
                     onBranch={handleBranch}
                   />
+                  {/* ★ task_boundary：锚定本消息(begin 时的 assistant)的任务边界卡片【内联渲染在此消息后】（反重力式穿插）。 */}
+                  {conversation.taskBoundaries?.filter((b: any) => b.anchorMessageId === msg.id).map((b: any) => (
+                    <TaskBoundaryCard key={b.id} boundary={b} />
+                  ))}
                   </Fragment>
                 ))}
               </>
             )}
-            {/* ★ task_boundary：对话级任务边界卡片（反重力式，含历史标题概括变迁），渲染在消息流末尾。 */}
-            {conversation.taskBoundaries && conversation.taskBoundaries.length > 0 && conversation.taskBoundaries.map((b: any) => (
+            {/* ★ task_boundary 兜底：anchor 消息已不在可见列表（回溯截断 / 缺 anchor）的边界渲染在末尾，不丢卡片；
+                正常情况边界都已按 anchorMessageId 内联在对应消息后。 */}
+            {conversation.taskBoundaries?.filter((b: any) => !b.anchorMessageId || !messages.some((m: any) => m.id === b.anchorMessageId)).map((b: any) => (
               <TaskBoundaryCard key={b.id} boundary={b} />
             ))}
             <div ref={messagesEndRef} />

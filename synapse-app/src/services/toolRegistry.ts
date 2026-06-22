@@ -1197,7 +1197,13 @@ toolRegistry.register({
   const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
   const { store } = await import('@/store');
   const conv = await import('@/store/slices/conversation');
-  store.dispatch(conv.beginTaskBoundary({ id: generateChangeId('tb'), headline, summary, at: Date.now() }));
+  // ★ 锚定当前轮的 assistant 消息——卡片据此【内联渲染在该消息后】（反重力式穿插），而非堆在消息流末尾。
+  const msgs = (store.getState() as any).conversation?.messages ?? [];
+  let anchorMessageId: string | undefined;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i]?.role === 'assistant') { anchorMessageId = msgs[i].id; break; }
+  }
+  store.dispatch(conv.beginTaskBoundary({ id: generateChangeId('tb'), headline, summary, anchorMessageId, at: Date.now() }));
   return `✅ 已开始任务边界：${headline}`;
 }, 'custom', 'auto');
 
