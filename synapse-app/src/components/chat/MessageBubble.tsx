@@ -95,23 +95,34 @@ interface MessageProps {
   onBranch?: (id: string) => void;
 }
 
+// ★ M7 P0-3：判断某个 mermaid 代码块在 content 里是否【已闭合】（后面有结束的 fence），用于「该渲染就渲染」。
+//   用正则提取所有已闭合 ```mermaid...``` 的代码体集合做成员判定（trim 比对，规避代码体含 ``` 字面量干扰，
+//   不用纯数 fence 偶数法）。流式末尾正在写的未闭合块不会被匹配到 → 返回 false → 显加载占位。
+function isMermaidFenceClosed(content: string, blockCode: string): boolean {
+  const target = (blockCode ?? '').trim();
+  if (!target) return false;
+  const re = /```[ \t]*mermaid[^\n]*\n([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    if ((m[1] ?? '').trim() === target) return true;
+  }
+  return false;
+}
+
 // Mermaid renderer component
-function MermaidBlock({ code, isStreaming }: { code: string; isStreaming?: boolean }) {
+// ★ M7 P0-3：pending = 该 mermaid 块是「正在流式书写的未闭合块」（半截代码）。只对它显加载占位、不喂 mermaid；
+//   已闭合的块即使整条消息还在流式也立即渲染（该渲染就渲染，由上游 isFenceClosed 判定后传 pending=false）。
+function MermaidBlock({ code, pending }: { code: string; pending?: boolean }) {
   const [svg, setSvg] = useState<string>('');
   const [error, setError] = useState<string>('');
   // ★ 浅色适配：mermaid 图表主题跟随 app 主题（之前写死 dark，浅色模式下图表深色突兀）。
   const resolvedTheme = useResolvedTheme();
 
   useEffect(() => {
-    // ★ M7 F3：流式期不渲染——ReactMarkdown 会把未闭合的半截 ```mermaid 源码逐帧喂进来，mermaid.render
-    //   对不完整语法 throw → 卡「图表渲染失败」。生成完成（isStreaming=false）后 effect 重跑用完整 code 正常渲染。
-    if (isStreaming) return;
+    if (pending) return; // 未闭合块不渲染（半截代码喂 mermaid 会 throw）；闭合后 pending=false，effect 重跑渲染。
     let cancelled = false;
     (async () => {
       try {
-        // ★ F3：每次重渲先清 error——code 从半截变完整 / 主题切换时，清掉上一帧的失败态；
-        //   否则成功渲染后仍永久卡「渲染失败」（下方 error 判定优先于 svg）。只清 error 不清 svg，保留旧图避免空窗。
-        setError('');
         const mermaid = (await import('mermaid')).default;
         const DOMPurify = (await import('dompurify')).default;
         const isLight = resolvedTheme === 'light';
@@ -127,6 +138,12 @@ function MermaidBlock({ code, isStreaming }: { code: string; isStreaming?: boole
             ? { primaryColor: '#7c3aed', primaryTextColor: '#111827', lineColor: '#64748b', secondaryColor: '#eef1f7', tertiaryColor: '#f6f7fb' }
             : { primaryColor: '#8b5cf6', primaryTextColor: '#e2e8f0', lineColor: '#64748b', secondaryColor: '#1e293b', tertiaryColor: '#0f172a' },
         });
+        // ★ P0-3 加固：先 parse 预校验（suppressErrors 不抛）——半截/无效代码 parse 返回 false 时静默等下一帧、
+        //   保留旧 svg，避免「渲染失败红框」闪烁（即便 isFenceClosed 判定偶有误判也不炸）。
+        const valid = await mermaid.parse(code, { suppressErrors: true });
+        if (!valid) { if (!cancelled) setError(''); return; }
+        // 校验通过才清 error + 渲染（成功路径清残留 error，否则成功后仍卡红框，error 判定优先于 svg）。
+        if (!cancelled) setError('');
         const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const { svg: rendered } = await mermaid.render(id, code);
         // ★ 兜底：仍允许 foreignObject（某些图类型即便 htmlLabels:false 也可能用），html profile 保留其内文字。
@@ -136,10 +153,10 @@ function MermaidBlock({ code, isStreaming }: { code: string; isStreaming?: boole
       }
     })();
     return () => { cancelled = true; };
-  }, [code, resolvedTheme, isStreaming]);
+  }, [code, resolvedTheme, pending]);
 
-  // ★ F3：流式期显示源码占位（不喂半截代码给 mermaid）；生成完成后 effect 重跑渲染真图。
-  if (isStreaming) {
+  // 未闭合块（正在书写）显示源码占位，不喂半截代码给 mermaid。
+  if (pending) {
     return <pre className="mermaid-loading">{code}</pre>;
   }
 
@@ -560,9 +577,11 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
                   const lang = match?.[1];
                   const childStr = String(children).replace(/\n$/, '');
 
-                  // Mermaid diagrams
+                  // Mermaid diagrams ——★ M7 P0-3「该渲染就渲染」：块已闭合(content 里有结束 fence)即渲染，
+                  //   即使整条消息还在流式；只有正在书写的最后那个未闭合块 pending=显加载占位。
                   if (lang === 'mermaid') {
-                    return <MermaidBlock code={childStr} isStreaming={isStreaming} />;
+                    const closed = !isStreaming || isMermaidFenceClosed(deferredContent, childStr);
+                    return <MermaidBlock code={childStr} pending={!closed} />;
                   }
 
                   const isBlock = match || (typeof children === 'string' && children.includes('\n'));
