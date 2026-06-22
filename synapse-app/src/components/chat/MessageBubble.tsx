@@ -4,7 +4,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, ListChecks, Undo2, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { memo, useState, useCallback, useEffect, useRef } from 'react';
 import { ToolCallCard } from './ToolCallCard';
 import { WorkflowCard } from './WorkflowCard';
 import { ContextMenu, type MenuItem } from '@/components/ui/ContextMenu';
@@ -180,7 +180,7 @@ function formatBytes(bytes?: number): string {
   return `${bytes} B`;
 }
 
-export function MessageBubble({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, reconnect, endToEndMs, thinking, attachments, richTokens, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onOpenAttachment, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
+function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, reconnect, endToEndMs, thinking, attachments, richTokens, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onOpenAttachment, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
   const [copied, setCopied] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -640,3 +640,8 @@ export function MessageBubble({ id, role, content, timestamp, model, isStreaming
     </div>
   );
 }
+
+// ★ M6 验收 bug4 性能：React.memo 包裹——流式时整个消息列表会重渲，但绝大多数历史气泡 props 引用稳定
+//   （content/thinking/toolCalls 等从 Redux 取、回调 useCallback、attachments 由 AgentPanel useMemo 缓存），
+//   memo 浅比较命中 → 只重渲「正在生成的那一条」，历史 N 条不再陪跑。这是消掉「30 帧」感受的最大单点。
+export const MessageBubble = memo(MessageBubbleImpl);

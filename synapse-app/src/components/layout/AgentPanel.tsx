@@ -1703,6 +1703,18 @@ export function AgentPanel() {
     return touched ? next : atts;
   }, [resolvedPreviews]);
 
+  // ★ M6 验收 bug4 性能：按 msg.attachments 引用缓存还原结果。流式时历史消息的 attachments 引用不变 →
+  //   复用缓存（返回稳定引用），让 MessageBubble 的 React.memo 对【有图】历史消息也命中、不陪流式重渲。
+  //   resolvedPreviews 变（新图还原完成）时整张 WeakMap 失效重建一次。无图消息 resolveAttachmentsForRender 本就返回原引用。
+  const renderAttCache = useMemo(() => new WeakMap<object, AttachmentRef[] | undefined>(), [resolvedPreviews]);
+  const getRenderAttachments = useCallback((atts: AttachmentRef[] | undefined): AttachmentRef[] | undefined => {
+    if (!atts) return atts;
+    if (renderAttCache.has(atts)) return renderAttCache.get(atts);
+    const resolved = resolveAttachmentsForRender(atts);
+    renderAttCache.set(atts, resolved);
+    return resolved;
+  }, [renderAttCache, resolveAttachmentsForRender]);
+
   // ★ M4-3-S3：已发附件 → 编辑器 attachment tab 的 objectUrl 生命周期管理。
   //   tabId → objectUrl。tab 关闭后该 objectUrl 不再被任何 tab 引用，需 revoke 防内存泄漏。
   const attachmentObjectUrls = useRef<Map<string, string>>(new Map());
@@ -2012,7 +2024,7 @@ export function AgentPanel() {
                     reconnect={(msg as any).reconnect}
                     endToEndMs={(msg as any).endToEndMs}
                     thinking={(msg as any).thinking}
-                    attachments={resolveAttachmentsForRender((msg as any).attachments)}
+                    attachments={getRenderAttachments((msg as any).attachments)}
                     richTokens={(msg as any).richTokens}
                     toolCalls={(msg as any).toolCalls}
                     diffs={(msg as any).diffs}
