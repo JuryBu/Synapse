@@ -96,7 +96,7 @@ ${context.goal.trim()}
     if ((injection.injectContext ?? true) && context.workspaceName) {
       sections.push(`<workspace>
 当前工作区: ${context.workspaceName}
-${context.files?.length ? `已索引文件:\n${context.files.map(f => `- ${f}`).join('\n')}` : '暂无文件'}
+${context.files?.length ? `当前打开的文件:\n${context.files.map(f => `- ${f}`).join('\n')}` : '暂无打开的文件（工作区目录内容仍可用 list_dir / view_file 访问）'}
 </workspace>`);
     }
 

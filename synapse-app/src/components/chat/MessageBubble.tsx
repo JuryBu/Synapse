@@ -530,12 +530,8 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
               )}
             </div>
           ) : content ? (
-            isStreaming ? (
-              // ★ M6 验收 C2c：流式期用纯文本渲染（white-space:pre-wrap 保留换行），避免每帧重新解析整段
-              //   markdown + KaTeX + 高亮把主线程打满（生成时卡死/锁界面的单点最贵操作）。生成完成（isStreaming=false）
-              //   后才走下面 else 的 ReactMarkdown 一次性解析。视觉：流式期纯文本、完成瞬间转富格式（CC/Codex 同款）。
-              <div className="message-text" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{content}</div>
-            ) : (
+            // ★ M6 验收 C2c 调整：流式期照常渲染 markdown（不再降级纯文本），降频靠 agentLoop flush 节流(~200ms)
+            //   控制——主人要的是「降低渲染频率」而非「不渲染」。流式期文字带格式、每 ~200ms 刷一批。
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[rehypeKatex]}
@@ -573,7 +569,6 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
             >
               {content}
             </ReactMarkdown>
-            )
           ) : (
             <span className="message-placeholder">{live && showGeneratingPlaceholder ? '思考中...' : live ? '' : '无内容'}</span>
           )}

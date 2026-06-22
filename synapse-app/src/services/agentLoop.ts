@@ -1100,11 +1100,14 @@ export class AgentLoop {
           content: pendingDelta,
         }));
       };
+      // ★ M6 验收 C2c 调整：flush 用【时间节流】而非 rAF（每帧 ~60 次/秒）。主人反馈「卡=渲染频率过高」，
+      //   要的是降频渲染而非不渲染——节流到 ~200ms 一次（≈5 次/秒），让流式期照常渲染 markdown 但解析频率降 ~12 倍。
+      //   STREAM_FLUSH_MS 可调：太顿→调小(120)、长回复仍卡→调大(300)。
+      const STREAM_FLUSH_MS = 200;
       const scheduleStreamFlush = () => {
         if (streamFlushScheduled) return;
         streamFlushScheduled = true;
-        // 注：窗口最小化/后台时 rAF 被浏览器暂停 → buffer 累积，切回前台时一次性 flush（比每 token dispatch 更省）。
-        requestAnimationFrame(flushStreamBuffer);
+        setTimeout(flushStreamBuffer, STREAM_FLUSH_MS);
       };
 
       try {
