@@ -41,7 +41,17 @@
 
 主人第三轮验证：**流式有格式 + 不卡 + 频率舒服 ✅、流程图正常 ✅、滚动条能拖 ✅**。性能目标达成。
 
-### 剩余 / 新发现（→ M7 新功能方向，主人定「全做」）
+### M7 三功能 ✅ 已实施（2026-06-22，调研 workflow wskcxh3rq）
+
+| commit | 功能 |
+|---|---|
+| **a1ac4f4** F3 | mermaid 渲染稳定：流式期不喂半截代码（MermaidBlock 接 isStreaming、显源码占位）+ error 态可恢复（useEffect try 开头 setError('')） |
+| **e843973** F2 | 新增 list_conversations + read_conversation 工具——读 Synapse 自己 SQLite 历史对话原文（复用 platform.conversation，maxChars 防爆，description 硬性强调独立于外置 memory-store） |
+| **cd74b8f** F1 | 标题彻底修：agentLoop 抽 generateTitleFromText 导出函数 + ConversationList「重新生成标题」Sparkles 按钮（手动重命名 startRename/commitRename 本就有）；旧 fallback 标题可一键重生成 |
+
+待主人真机验证（重生标题点 Sparkles、AI 调 read_conversation 读历史、贴段 mermaid 看流式占位→完成出图）。
+
+### 原始方向描述（已全部实施 ↑）
 
 - [ ] **① 标题彻底修**：自动标题同步只对【新对话】生效；旧对话标题是创建时的「首条消息截断」fallback（DB 已落库、追不回），列表/候选满屏「@对话:xxx 这个对话是关于...」。方案：旧对话加「重新生成标题」按钮 + 手动重命名入口。⚠️ 先让主人新建对话验证 C1(bbe70d5) 对新对话是否真生效，再定旧对话补救范围。
 - [ ] **② 「读历史对话原文」工具（功能缺口）**：`@对话` 只注入摘要，Synapse 无「一字不差读自己历史对话原文」的工具。AI 误用 `mcp__memory-store__conversation_read_original`（那是跨宿主记忆库，与 Synapse SQLite 对话是两套系统、conv-xxx ID 不互通，所以读不到）。需给 Synapse 加一个查自己 SQLite 的读原文工具（按 conversationId 取完整轮次原文）。
