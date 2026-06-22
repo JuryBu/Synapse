@@ -23,6 +23,9 @@ const LAYOUT_KEY = 'synapse_layout';
 const BACKGROUND_SETTINGS_KEY = 'synapse:background';
 const SYNOPSIS_SETTINGS_KEY = 'synapse:synopsis';
 const MULTI_AI_SETTINGS_KEY = 'synapse:multi-ai';
+// ★ 工作区持久化（治「重启后打开的工作区丢失、回退 demo」）：只存 currentPath/name/recentPaths（配置类），
+//   synopsisReady/indexingProgress 是运行态不存。
+const WORKSPACE_KEY = 'synapse_workspace';
 
 const DEFAULT_BACKGROUND_SETTINGS = {
   enabled: false,
@@ -157,6 +160,7 @@ function loadPersistedState() {
     const backgroundRaw = localStorage.getItem(BACKGROUND_SETTINGS_KEY);
     const synopsisRaw = localStorage.getItem(SYNOPSIS_SETTINGS_KEY);
     const multiAIRaw = localStorage.getItem(MULTI_AI_SETTINGS_KEY) ?? localStorage.getItem(MULTI_AI_KEY);
+    const workspaceRaw = localStorage.getItem(WORKSPACE_KEY);
     const parsedAgentSettings = agentSettingsRaw ? JSON.parse(agentSettingsRaw) : undefined;
     const backgroundSettings = backgroundRaw ? JSON.parse(backgroundRaw) : undefined;
     const synopsisSettings = synopsisRaw ? JSON.parse(synopsisRaw) : undefined;
@@ -170,6 +174,7 @@ function loadPersistedState() {
       theme: themeRaw ? JSON.parse(themeRaw) : undefined,
       agentSettings: sanitizePersistedAgentSettings(agentSettingsSeed),
       multiAI: sanitizePersistedMultiAI(multiAIRaw ? JSON.parse(multiAIRaw) : undefined),
+      workspace: workspaceRaw ? JSON.parse(workspaceRaw) : undefined,
     };
   } catch {
     return {};
@@ -225,6 +230,13 @@ const persistMiddleware: Middleware = (storeApi) => (next) => (action) => {
         localStorage.setItem(LAYOUT_KEY, JSON.stringify(state.layout));
       } catch { /* localStorage 不可用 */ }
     }
+    if (type.startsWith('workspace/')) {
+      try {
+        // 只持久化配置类字段（运行态 synopsisReady/indexingProgress 不存，重启回默认）。
+        const { currentPath, name, recentPaths } = state.workspace;
+        localStorage.setItem(WORKSPACE_KEY, JSON.stringify({ currentPath, name, recentPaths }));
+      } catch { /* localStorage 不可用 */ }
+    }
   }
   return result;
 };
@@ -268,6 +280,8 @@ export const store = configureStore({
     ...(persisted.theme ? { theme: persisted.theme } : {}),
     ...(persisted.agentSettings ? { agentSettings: persisted.agentSettings } : {}),
     ...(persisted.multiAI ? { multiAI: persisted.multiAI } : {}),
+    // ★ 工作区持久化恢复：补全运行态默认 + 持久化的 currentPath/name/recentPaths（重启后工作区不丢、工具根延续）。
+    ...(persisted.workspace ? { workspace: { currentPath: null, name: '', recentPaths: [], synopsisReady: false, indexingProgress: 0, ...persisted.workspace } } : {}),
   },
   middleware: (getDefault) => getDefault().concat(persistMiddleware),
   devTools: import.meta.env.DEV,

@@ -92,16 +92,29 @@ export function Sidebar({ activeView }: SidebarProps) {
     }));
   }, [dispatch, tabs]);
 
-  // Load demo workspace on mount
+  // Load workspace on mount（★ 持久化恢复 / demo 兜底）
   useEffect(() => {
-    if (activeView === 'explorer' && !workspace.currentPath && !demoWorkspaceLoadedRef.current) {
+    if (activeView !== 'explorer' || demoWorkspaceLoadedRef.current) return;
+    // ★ 工作区重启持久化恢复：重启后 Redux currentPath 已从 localStorage 恢复（非 null 且非 demo 假路径），
+    //   但 fileSystem 内部根/文件树尚未同步——把真实工作区重新加载进 fileSystem，让左侧文件树 + 工具内部根对齐恢复值，
+    //   而非空树或退回 demo。
+    if (workspace.currentPath && workspace.currentPath !== '/workspace') {
+      demoWorkspaceLoadedRef.current = true;
+      if (isElectron) {
+        fileSystem.openExternalWorkspace({ id: workspace.currentPath, name: workspace.name || '工作区', path: workspace.currentPath, lastOpened: Date.now() });
+      }
+      fileSystem.getWorkspaceTree().then(setFileTree);
+      return;
+    }
+    // demo 兜底（从未打开过任何真实工作区）。
+    if (!workspace.currentPath) {
       demoWorkspaceLoadedRef.current = true;
       fileSystem.getWorkspaceTree().then(tree => {
         setFileTree(tree);
         dispatch(openWorkspace({ path: '/workspace', name: '示例工作区' }));
       });
     }
-  }, [activeView, workspace.currentPath, dispatch]);
+  }, [activeView, workspace.currentPath, workspace.name, dispatch]);
 
   // Also load tree when workspace changes
   useEffect(() => {
