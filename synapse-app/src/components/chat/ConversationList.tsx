@@ -220,6 +220,10 @@ export function ConversationList() {
         //   但当前对话是 autosave 草稿（wasAutosave=true）且刚用 /goal 设了目标时，fork 出的新对话走 create/insert
         //   路径若不传 goal 会落 NULL → goal 丢失。故显式随快照带上。
         goal: cur.goal,
+        // ★ task_boundary：把当前对话的任务边界 + 大标题随对话落库（与 goal 同源 store.getState().conversation），
+        //   切回时能恢复边界卡片与历史；autosave→fork 那一刻一并固化进新对话行（同 goal 防 fork 丢失）。
+        taskBoundaries: cur.taskBoundaries,
+        taskHeadline: cur.taskHeadline,
         // ★ M4-2-S1（问题9 根治）：这是「切走对话的系统性自动保存」，不应改变其排序时间。
         //   改 systemTouch:true（落库不刷 updated_at）+ 去掉硬传 timestamp:Date.now()——
         //   否则切走对话被刷成当前时间，按时间降序时它跳第一、被点中的对话被挤到第二位。
@@ -302,6 +306,10 @@ export function ConversationList() {
         //   口径一致）。slice 用「'goal' in payload 才覆盖」语义，省略 goal 会让上一对话的 state.goal 残留并继续
         //   注入进新对话每轮 <current_goal>（跨对话泄漏），且新对话自身持久化的 goal 也加载不回来。必须显式传。
         goal: snapshot.goal || undefined,
+        // ★ task_boundary：切对话时随对话身份回填任务边界 + 大标题（与 goal 同源 snapshot，从 DB JSON 列读回；未设则 undefined）。
+        //   同 goal：省略会让上一对话的边界残留并跨对话泄漏，且新对话持久化的边界加载不回来。必须显式传。
+        taskBoundaries: snapshot.taskBoundaries,
+        taskHeadline: snapshot.taskHeadline,
       }));
       // M2-6：把该对话各自的 mode / reasoningEffort 同步进全局 agentSettings（agentLoop 仍读 agentSettings，
       //   口径不变）。已在 saveCurrentToHistory 把切换前对话的设置落库，故此处切走旧设置不丢。

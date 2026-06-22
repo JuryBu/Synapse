@@ -514,6 +514,9 @@ export function AgentPanel() {
         workspacePath: conversation.workspacePath,
         // ★ M4-6-S4：autosave 行带对话目标，使刷新/重启从 autosave 恢复对话能拿回 goal 继续注入。
         goal: conversation.goal,
+        // ★ task_boundary：autosave 行带任务边界 + 大标题（与 goal 同源 store conversation），刷新/重启恢复能拿回边界卡片与历史。
+        taskBoundaries: conversation.taskBoundaries,
+        taskHeadline: conversation.taskHeadline,
         timestamp: Date.now(),
       }).catch(() => {
         try {
@@ -543,6 +546,9 @@ export function AgentPanel() {
     conversation.workspacePath,
     // ★ M4-6-S4：goal 变化（/goal 设/清）也要重落 autosave 行，使其 goal 跟手持久化。
     conversation.goal,
+    // ★ task_boundary：边界/大标题变化也要重落 autosave 行，使其任务边界跟手持久化（与 goal 同源 store conversation）。
+    conversation.taskBoundaries,
+    conversation.taskHeadline,
   ]);
 
   // Restore from autosave on mount
@@ -569,6 +575,9 @@ export function AgentPanel() {
             // ★ M4-6-S4 恢复回填目标：从 autosave 快照回带 goal（旧 autosave 无此字段则 undefined=未设），
             //   使重启后延续目标注入。
             goal: data?.goal || undefined,
+            // ★ task_boundary 恢复回填：从 autosave 快照回带任务边界 + 大标题（与 goal 同源 data；旧 autosave 无此字段则 undefined）。
+            taskBoundaries: data?.taskBoundaries,
+            taskHeadline: data?.taskHeadline,
           }));
           // M2-6：恢复对话时同步其 mode / reasoningEffort 到全局 agentSettings（旧 autosave 无此字段则回退默认）。
           dispatch(setMode(data?.mode === 'fast' ? 'fast' : 'planning'));
@@ -646,6 +655,9 @@ export function AgentPanel() {
             workspacePath: cur.workspacePath,
             // ★ M4-6-S4：新建对话时把【切走对话】的目标随对话落库，切回时能恢复 goal 继续注入。
             goal: cur.goal,
+            // ★ task_boundary：新建对话时把【切走对话】的任务边界 + 大标题随对话落库（与 goal 同源 cur），切回时能恢复。
+            taskBoundaries: cur.taskBoundaries,
+            taskHeadline: cur.taskHeadline,
             // ★ M4-2-S1（问题9 根治）：新建对话时对【切走对话】的系统性保存，不刷其 updated_at。
             //   改 systemTouch:true + 去掉硬传 timestamp:Date.now()，与 ConversationList.saveCurrentToHistory 口径一致，
             //   避免切走对话被刷成当前时间跳到列表第一。
@@ -714,6 +726,9 @@ export function AgentPanel() {
             workspacePath: cur.workspacePath,
             // ★ M4-6-S4：切走对话时把其目标随对话落库，切回时能恢复 goal 继续注入。
             goal: cur.goal,
+            // ★ task_boundary：切走对话时把其任务边界 + 大标题随对话落库（与 goal 同源 cur），切回时能恢复。
+            taskBoundaries: cur.taskBoundaries,
+            taskHeadline: cur.taskHeadline,
             systemTouch: true,
           });
           if (summary) {
@@ -740,6 +755,9 @@ export function AgentPanel() {
         branchedFromMessageId: snapshot.branchedFromMessageId ?? null,
         // ★ M4-6-S4：切到目标对话时回填其 goal（snapshot 从 DB goal 列读回；未设则 undefined）。
         goal: snapshot.goal || undefined,
+        // ★ task_boundary：切到目标对话时回填其任务边界 + 大标题（与 goal 同源 snapshot，从 DB JSON 列读回；未设则 undefined）。
+        taskBoundaries: snapshot.taskBoundaries,
+        taskHeadline: snapshot.taskHeadline,
         workspacePath: snapshot.workspacePath ?? null,
       }));
       dispatch(setMode(snapshot.mode === 'fast' ? 'fast' : 'planning'));
@@ -1384,6 +1402,11 @@ export function AgentPanel() {
         // ★ M4-2-S5 分支继承归属：抓一份稳定的源对话工作区归属（null=Global），供 promotion 落库 / 新分支
         //   create / 两处 setConversation 回填复用——新分支与源对话同归属（path 作键）。
         const srcWorkspacePath = conversationRef.current.workspacePath ?? null;
+        // ★ task_boundary 分支继承：抓一份稳定的源对话任务边界 + 大标题（与 srcWorkspacePath 同源 conversationRef.current），
+        //   边界是对话顶层字段、不在 messages 里，故必须经 branchConversation 的 meta 透传（不能从子集 messages 推）。
+        //   branchConversation 内部会按分支点裁剪 + active 收口 + 深拷贝，回带 result.taskBoundaries/taskHeadline 供切入回填。
+        const srcTaskBoundaries = conversationRef.current.taskBoundaries;
+        const srcTaskHeadline = conversationRef.current.taskHeadline;
 
         // 1. 确定稳定的源 id：autosave 源先 fork 成真实 id（与「新对话」fork 同款，clearAutosave 不 release，refCount 守恒）。
         //    recordSrcId 记住 record 当前实际所在的 id（promotion 前的 id）——fork 不迁移 record，故 copyRecord 须从这里读。
@@ -1465,6 +1488,10 @@ export function AgentPanel() {
           reasoningEffort: agentMetaRef.current.reasoningEffort,
           // ★ M4-2-S5：新分支 DB 行一开始即继承源对话工作区归属（path 作键，缺省 null=Global）。
           workspacePath: srcWorkspacePath,
+          // ★ task_boundary：把源对话边界 + 大标题经 meta 透传（与 workspacePath 同源 srcXxx），
+          //   branchConversation 内据此裁剪 + 收口 + 深拷贝后落新分支 DB 行并回带。
+          taskBoundaries: srcTaskBoundaries,
+          taskHeadline: srcTaskHeadline,
           recordSrcId,
           ...(wasAutosave ? { recordSnapshot } : {}),
         });
@@ -1485,6 +1512,10 @@ export function AgentPanel() {
           branchedFromMessageId: result.branchedFromMessageId,
           // ★ M4-2-S5：切到新分支时回填工作区归属（继承源对话，DB 已由 branchConversation 写入 workspace_path）。
           workspacePath: srcWorkspacePath,
+          // ★ task_boundary：切到新分支时回填任务边界 + 大标题（用 branchConversation 回带的裁剪 + 收口后值，
+          //   与 parentId 从 result 回填同口径，DB 已由 branchConversation 一并写入 JSON 列）。
+          taskBoundaries: result.taskBoundaries,
+          taskHeadline: result.taskHeadline,
         }));
         // M2-6：分支继承源对话当前的 mode / reasoningEffort（全局 agentSettings 此刻即源设置，无需改动）。
         //   新分支落库时 branchConversation 未带 mode/reasoningEffort → DB 取默认；下次该分支被保存
