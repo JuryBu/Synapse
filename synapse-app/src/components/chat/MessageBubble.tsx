@@ -96,16 +96,22 @@ interface MessageProps {
 }
 
 // Mermaid renderer component
-function MermaidBlock({ code }: { code: string }) {
+function MermaidBlock({ code, isStreaming }: { code: string; isStreaming?: boolean }) {
   const [svg, setSvg] = useState<string>('');
   const [error, setError] = useState<string>('');
   // ★ 浅色适配：mermaid 图表主题跟随 app 主题（之前写死 dark，浅色模式下图表深色突兀）。
   const resolvedTheme = useResolvedTheme();
 
   useEffect(() => {
+    // ★ M7 F3：流式期不渲染——ReactMarkdown 会把未闭合的半截 ```mermaid 源码逐帧喂进来，mermaid.render
+    //   对不完整语法 throw → 卡「图表渲染失败」。生成完成（isStreaming=false）后 effect 重跑用完整 code 正常渲染。
+    if (isStreaming) return;
     let cancelled = false;
     (async () => {
       try {
+        // ★ F3：每次重渲先清 error——code 从半截变完整 / 主题切换时，清掉上一帧的失败态；
+        //   否则成功渲染后仍永久卡「渲染失败」（下方 error 判定优先于 svg）。只清 error 不清 svg，保留旧图避免空窗。
+        setError('');
         const mermaid = (await import('mermaid')).default;
         const DOMPurify = (await import('dompurify')).default;
         const isLight = resolvedTheme === 'light';
@@ -130,7 +136,12 @@ function MermaidBlock({ code }: { code: string }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [code, resolvedTheme]);
+  }, [code, resolvedTheme, isStreaming]);
+
+  // ★ F3：流式期显示源码占位（不喂半截代码给 mermaid）；生成完成后 effect 重跑渲染真图。
+  if (isStreaming) {
+    return <pre className="mermaid-loading">{code}</pre>;
+  }
 
   if (error) {
     return (
@@ -548,7 +559,7 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
 
                   // Mermaid diagrams
                   if (lang === 'mermaid') {
-                    return <MermaidBlock code={childStr} />;
+                    return <MermaidBlock code={childStr} isStreaming={isStreaming} />;
                   }
 
                   const isBlock = match || (typeof children === 'string' && children.includes('\n'));
