@@ -55,6 +55,45 @@ export interface MessageArtifact {
   editorType?: EditorFileType;
 }
 
+/**
+ * ★ task_boundary（Plan_5 §10）：Plan 模式任务边界。对话级、随对话持久化（JSON 列）。
+ *   不进请求体、不参与 record 摘要、不影响压缩/轮次/token——纯 UI 层结构。steps 内联在 boundary。
+ */
+export interface TaskBoundaryStep {
+  id: string;
+  text: string;
+  timestamp: number;          // ms（Date.now()）
+  toolCallIds?: string[];     // 可选：本 step 关联的 toolCall id（预留）
+}
+
+/** headline/summary 的一次历史变更（★ 比 Antigravity 多做的「历史标题概括变迁」时间线）。 */
+export interface TaskHeadlineHistoryEntry {
+  headline: string;
+  summary: string;
+  timestamp: number;          // ms
+}
+
+export interface TaskBoundary {
+  id: string;
+  headline: string;
+  summary: string;
+  status: 'active' | 'done' | 'aborted';
+  startedAt: number;          // ms
+  endedAt?: number;           // done/aborted 时回填
+  anchorMessageId?: string;   // 边界开始时锚定的 assistant 消息 id（定位/回溯用，可选）
+  startRound?: number;        // 对齐 M5-2 轮次地基（可选，首版可不填）
+  endRound?: number;
+  steps: TaskBoundaryStep[];
+  history: TaskHeadlineHistoryEntry[];  // ★ 该边界 headline/summary 变更时间线（含初始项）
+}
+
+/** 对话级「当前大标题 + 概述」镜像（顶部/卡片直接读；变更同步进 active boundary.history）。 */
+export interface TaskHeadline {
+  headline: string;
+  summary: string;
+  updatedAt: number;          // ms
+}
+
 export interface FileDiffSummary {
   id: string;
   path: string;
@@ -232,6 +271,10 @@ interface ConversationState {
   //   设目标后每轮 agentLoop.run 读取并经 promptBuilder.build 注入 <current_goal> 段（每轮自动注入）。
   //   空串/undefined 视为未设目标（build 不注入该段）。clearConversation 清空、setConversation 换身份时回填。
   goal?: string;
+  // ★ task_boundary（Plan_5 §10）：对话级任务边界数组 + 当前大标题镜像。随对话持久化（JSON 列）。
+  //   仅 Plan 模式 + taskBoundaryEnabled 时由 AI 工具写入；clearConversation 清空、setConversation 回填。
+  taskBoundaries?: TaskBoundary[];
+  taskHeadline?: TaskHeadline;
   // ★ M5-BPC：本对话【后台预压缩触发水位】覆盖（留空=用全局 agentSettings.bpc.bpcThreshold）。
   //   scheduler.evaluateWater 读 effectiveBpcThreshold = conversation.bpcThresholdOverride ?? agentSettings.bpc.bpcThreshold。
   //   ★ 是 number：undefined=未覆盖；持久化/回填严禁 `x||undefined`（0 falsy 陷阱），统一 typeof==='number' 判定。
@@ -370,6 +413,8 @@ const initialState: ConversationState = {
   branchedFromMessageId: null,
   workspacePath: null,
   goal: undefined,
+  taskBoundaries: undefined,
+  taskHeadline: undefined,
   // ★ M5-BPC：本对话阈值覆盖默认未设（用全局默认）。
   bpcThresholdOverride: undefined,
   compactThresholdOverride: undefined,
@@ -402,6 +447,8 @@ export const conversationSlice = createSlice({
       //   不带则不动（懒迁移回写等不带这两字段的 setConversation 不抹掉已设覆盖）。number 口径。
       bpcThresholdOverride?: number;
       compactThresholdOverride?: number;
+      taskBoundaries?: TaskBoundary[];
+      taskHeadline?: TaskHeadline;
     }>) {
       state.schemaVersion = CONVERSATION_SCHEMA_VERSION;
       state.id = action.payload.id;
@@ -418,6 +465,9 @@ export const conversationSlice = createSlice({
       if ('workspacePath' in action.payload) state.workspacePath = action.payload.workspacePath ?? null;
       // ★ M4-6-S4：换对话身份时回填 goal（'goal' in payload 才覆盖，含显式 undefined→清空；不带则不动）。
       if ('goal' in action.payload) state.goal = action.payload.goal || undefined;
+      // ★ task_boundary：换对话身份时回填（'key' in payload 才覆盖，含显式 undefined→清空；不带则不动）。
+      if ('taskBoundaries' in action.payload) state.taskBoundaries = action.payload.taskBoundaries ?? undefined;
+      if ('taskHeadline' in action.payload) state.taskHeadline = action.payload.taskHeadline ?? undefined;
       // ★ M5-BPC：换对话身份时回填阈值覆盖（'key' in payload 才覆盖；number 用 typeof 判定，绝不用 `||` 吞 0）。
       if ('bpcThresholdOverride' in action.payload) {
         const v = action.payload.bpcThresholdOverride;
@@ -437,6 +487,63 @@ export const conversationSlice = createSlice({
     setGoal(state, action: PayloadAction<string | undefined>) {
       const next = (action.payload ?? '').trim();
       state.goal = next || undefined;
+    },
+    // ★ task_boundary（Plan_5 §10）：开新任务边界，前一个 active 自动收为 done。新边界初始 history 含一条初始项。
+    beginTaskBoundary(state, action: PayloadAction<{ id: string; headline: string; summary?: string; anchorMessageId?: string; startRound?: number; at?: number }>) {
+      const now = action.payload.at ?? Date.now();
+      if (!state.taskBoundaries) state.taskBoundaries = [];
+      for (const b of state.taskBoundaries) {
+        if (b.status === 'active') { b.status = 'done'; b.endedAt = now; }
+      }
+      const headline = action.payload.headline;
+      const summary = action.payload.summary ?? '';
+      state.taskBoundaries.push({
+        id: action.payload.id,
+        headline, summary,
+        status: 'active',
+        startedAt: now,
+        anchorMessageId: action.payload.anchorMessageId,
+        startRound: action.payload.startRound,
+        steps: [],
+        history: [{ headline, summary, timestamp: now }],
+      });
+      state.taskHeadline = { headline, summary, updatedAt: now };
+    },
+    // ★ 设/更新顶部大标题+概述：刷镜像 + 给当前 active boundary.history push 一条（AI 每个小标题调一次）。
+    //   无 active 时只刷镜像、不 push（history 无处挂，合理降级）。
+    setTaskHeadline(state, action: PayloadAction<{ headline: string; summary?: string; at?: number }>) {
+      const now = action.payload.at ?? Date.now();
+      const headline = action.payload.headline;
+      const summary = action.payload.summary ?? state.taskHeadline?.summary ?? '';
+      state.taskHeadline = { headline, summary, updatedAt: now };
+      const active = state.taskBoundaries?.find(b => b.status === 'active');
+      if (active) {
+        active.headline = headline;
+        active.summary = summary;
+        active.history.push({ headline, summary, timestamp: now });
+      }
+    },
+    // ★ 给当前 active 边界追加一条进度 step。无 active 则 no-op（AI 该先 begin）。
+    appendTaskStep(state, action: PayloadAction<{ id: string; text: string; toolCallIds?: string[]; at?: number }>) {
+      const active = state.taskBoundaries?.find(b => b.status === 'active');
+      if (!active) return;
+      active.steps.push({
+        id: action.payload.id,
+        text: action.payload.text,
+        timestamp: action.payload.at ?? Date.now(),
+        toolCallIds: action.payload.toolCallIds,
+      });
+    },
+    // ★ 显式收口当前/指定边界（用户拍板：AI 显式调结束工具收口，不自动推断）。aborted=true 收为 'aborted'（红）。
+    endTaskBoundary(state, action: PayloadAction<{ id?: string; aborted?: boolean; at?: number } | undefined>) {
+      const p = action.payload ?? {};
+      const now = p.at ?? Date.now();
+      const target = p.id
+        ? state.taskBoundaries?.find(b => b.id === p.id)
+        : state.taskBoundaries?.find(b => b.status === 'active');
+      if (!target) return;
+      target.status = p.aborted ? 'aborted' : 'done';
+      target.endedAt = now;
     },
     // ★ M5-BPC：设定 / 清空本对话【预压触发水位】覆盖（SettingsPanel 本对话覆盖入口 / 命令用）。
     //   合法有限 number → 设；undefined/NaN/非数字 → 清空（视为未覆盖，回退全局默认）。
@@ -700,6 +807,9 @@ export const conversationSlice = createSlice({
       // ★ M5-BPC：新对话无阈值覆盖——清空，避免新对话误继承上条对话的 BPC/压缩阈值覆盖。
       state.bpcThresholdOverride = undefined;
       state.compactThresholdOverride = undefined;
+      // ★ task_boundary：新对话/清空——清掉任务边界与大标题，避免新对话误继承上条对话的边界。
+      state.taskBoundaries = undefined;
+      state.taskHeadline = undefined;
     },
     setTitle(state, action: PayloadAction<string>) {
       state.title = action.payload;
@@ -754,6 +864,7 @@ export const conversationSlice = createSlice({
 
 export const {
   setConversation, setConversationWorkspace, setGoal,
+  beginTaskBoundary, setTaskHeadline, appendTaskStep, endTaskBoundary,
   setBpcThresholdOverride, setCompactThresholdOverride, addMessage, updateMessage,
   updateMessageMeta, appendMessageContent, setMessageAttachments,
   appendMessageThinking, setMessageStreamState, setMessageReconnect,
