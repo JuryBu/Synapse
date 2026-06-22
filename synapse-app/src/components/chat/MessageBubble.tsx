@@ -113,13 +113,18 @@ function MermaidBlock({ code }: { code: string }) {
           startOnLoad: false,
           theme: isLight ? 'default' : 'dark',
           securityLevel: 'strict', // P1-2: 防止 SVG 注入
+          // ★ M6 验收：节点文字用 SVG <text> 而非默认 foreignObject(HTML)——后者会被下面 DOMPurify 的纯 svg
+          //   profile 清掉，导致「只剩框、没文字」。htmlLabels:false 让 DOMPurify svg profile 能完整保留文字。
+          htmlLabels: false,
+          flowchart: { htmlLabels: false },
           themeVariables: isLight
             ? { primaryColor: '#7c3aed', primaryTextColor: '#111827', lineColor: '#64748b', secondaryColor: '#eef1f7', tertiaryColor: '#f6f7fb' }
             : { primaryColor: '#8b5cf6', primaryTextColor: '#e2e8f0', lineColor: '#64748b', secondaryColor: '#1e293b', tertiaryColor: '#0f172a' },
         });
         const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const { svg: rendered } = await mermaid.render(id, code);
-        if (!cancelled) setSvg(DOMPurify.sanitize(rendered, { USE_PROFILES: { svg: true } }));
+        // ★ 兜底：仍允许 foreignObject（某些图类型即便 htmlLabels:false 也可能用），html profile 保留其内文字。
+        if (!cancelled) setSvg(DOMPurify.sanitize(rendered, { USE_PROFILES: { svg: true, html: true }, ADD_TAGS: ['foreignObject'] }));
       } catch (e: any) {
         if (!cancelled) setError(e.message || 'Mermaid 渲染失败');
       }
