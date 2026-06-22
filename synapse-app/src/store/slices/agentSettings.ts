@@ -86,6 +86,9 @@ interface AgentSettingsState {
   mode: AgentMode;
   /** ★ task_boundary：是否启用 Plan 模式任务边界卡片（开关，默认 true；关闭则 systemPrompt 不引导 AI 用这些工具）。 */
   taskBoundaryEnabled: boolean;
+  /** ★ M7 第四轮：消息流是否隐藏系统/元工具调用卡片（show_artifact / task_boundary 系列 / worktree 切换等——
+   *   它们已有专门卡片可视化，工具调用卡片是冗余噪音）。默认 true=隐藏；关闭则全部显示（调试用）。 */
+  hideSystemToolCalls: boolean;
   /** ★ 模型上下文窗口手动覆盖（modelId → 窗口 token）：能力面板推断不准时用户手动改，覆盖所有用 contextWindow 处。 */
   contextWindowOverrides: Record<string, number>;
   currentModel: string;
@@ -134,6 +137,7 @@ export const DEFAULT_BPC_CONFIG: BpcConfig = {
 const initialState: AgentSettingsState = {
   mode: 'planning',
   taskBoundaryEnabled: true,
+  hideSystemToolCalls: true,
   contextWindowOverrides: {},
   currentModel: '',
   systemModel: '', // M4-5-S1：空 = 跟随 currentModel
@@ -252,6 +256,10 @@ export const agentSettingsSlice = createSlice({
     // ★ task_boundary：开关启用/停用 Plan 模式任务边界（关闭后 systemPrompt 不引导、不再生成新边界）。
     setTaskBoundaryEnabled(state, action: PayloadAction<boolean>) {
       state.taskBoundaryEnabled = action.payload;
+    },
+    // ★ M7：开关消息流是否隐藏系统/元工具调用卡片（show_artifact / task_boundary / worktree 等）。
+    setHideSystemToolCalls(state, action: PayloadAction<boolean>) {
+      state.hideSystemToolCalls = action.payload;
     },
     // ★ 设/清模型上下文窗口手动覆盖。value 合法正数 → 设；null/非法 → 清（回退推断值）。
     setContextWindowOverride(state, action: PayloadAction<{ modelId: string; value: number | null }>) {
@@ -408,7 +416,7 @@ export const agentSettingsSlice = createSlice({
 });
 
 export const {
-  setMode, setTaskBoundaryEnabled, setContextWindowOverride, setCurrentModel, setSystemModel, setRecordLayering, setBpc, setMaxToolRounds,
+  setMode, setTaskBoundaryEnabled, setHideSystemToolCalls, setContextWindowOverride, setCurrentModel, setSystemModel, setRecordLayering, setBpc, setMaxToolRounds,
   setAvailableModels, setConnectionStatus,
   setEnableStreaming, setOutputStrategy, setPseudoStreamSpeed,
   setShowStreamCursor, setShowGeneratingPlaceholder, setStreamThinking,

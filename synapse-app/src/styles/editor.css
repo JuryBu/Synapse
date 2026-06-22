@@ -143,8 +143,12 @@
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  border-bottom: 1px solid var(--syn-border);
-  background: var(--syn-overlay-soft);
+  /* ★ 玻璃感统一：原 --syn-overlay-soft 叠在不透明代码底上（暗色太黑/亮色太白）→ 半透明玻璃底 + 模糊，
+     与 .glass-panel 同款，深浅由 --glass-bg 主题变量自适应。 */
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
 .code-editor-filename {
@@ -345,9 +349,12 @@
   align-items: stretch;
   height: 36px;
   min-height: 36px;
-  /* ★ 主题修复：原写死 rgba(0,0,0,0.3) → 浅色模式下深底深字。改用主题表层 --syn-bg-surface，深浅都协调。 */
-  background: var(--syn-bg-surface);
-  border-bottom: 1px solid var(--syn-border);
+  /* ★ 玻璃感统一：原不透明 --syn-bg-surface（暗色太黑/亮色太白）→ 与 .glass-panel 同款半透明玻璃底 + 模糊，
+     透出下层 .editor-area 玻璃，深浅由 --glass-bg 主题变量自适应。 */
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-bottom: 1px solid var(--glass-border);
 }
 
 .tab-bar {
@@ -895,8 +902,11 @@
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  border-bottom: 1px solid var(--syn-border);
-  background: var(--syn-overlay-soft);
+  /* ★ 玻璃感统一：原 --syn-overlay-soft 叠在不透明 viewer 容器底（暗色太黑/亮色太白）→ 半透明玻璃底 + 模糊。 */
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
   min-height: 32px;
 }
 
@@ -1160,8 +1170,11 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  border-bottom: 1px solid var(--syn-border);
-  background: var(--syn-overlay-soft);
+  /* ★ 玻璃感统一：原 --syn-overlay-soft 叠在不透明 viewer 容器底（暗色太黑/亮色太白）→ 半透明玻璃底 + 模糊。 */
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
 .viewer-filename {

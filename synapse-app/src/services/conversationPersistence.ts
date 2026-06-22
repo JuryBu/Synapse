@@ -460,6 +460,9 @@ export async function branchConversation(
   //      timestamp/model/toolCalls 等），与顶层「不带 assistantRuns/fileSnapshots/pendingDiffs」一致；
   //      且不影响 collectMessageShas（只看 contentParts/attachments）和 copyRecord（只看 step/round 计数）。
   const usedIds = new Set<string>();
+  // ★ task_boundary 修复（review MEDIUM）：记 源message.id → 新message.id 映射，供下方 branchedBoundaries 的
+  //   anchorMessageId/endAnchorMessageId 重映射——消息 id 全换新，不重映射边界锚点会匹配不上 → 新分支卡片全错位堆末尾。
+  const idMap = new Map<string, string>();
   const subset = messages.slice(0, cutIdx + 1).map(m => {
     const {
       runId: _runId,
@@ -480,6 +483,7 @@ export async function branchConversation(
     let id = createMessageId();
     while (usedIds.has(id)) id = createMessageId();
     usedIds.add(id);
+    idMap.set(m.id, id);
     return { ...keep, id };
   });
   if (subset.length === 0) return null;
@@ -510,7 +514,11 @@ export async function branchConversation(
       .filter(b => b.startRound === undefined || b.startRound <= keptRounds)
       .map(b => ({
         ...b,
-        steps: b.steps.map(s => ({ ...s })),          // 深拷贝隔离
+        // ★ message.id 已全部换新（见上 idMap），anchor/endAnchor 必须重映射，否则新分支卡片匹配不上消息 → 全错位堆末尾。
+        //   落在被裁区（映射不到）置 undefined → 渲染走孤儿兜底（合理：锚消息不在子集内）。
+        anchorMessageId: b.anchorMessageId ? idMap.get(b.anchorMessageId) : undefined,
+        endAnchorMessageId: b.endAnchorMessageId ? idMap.get(b.endAnchorMessageId) : undefined,
+        steps: b.steps.map(s => ({ ...s, toolCallIds: s.toolCallIds ? [...s.toolCallIds] : undefined })),  // 深拷贝隔离（含嵌套数组）
         history: b.history.map(h => ({ ...h })),       // 深拷贝隔离（历史时间线随分支复制）
         status: b.status === 'active' ? ('done' as const) : b.status,
         endedAt: b.status === 'active' ? tbNow : b.endedAt,
@@ -638,7 +646,17 @@ export async function listConversationSummaries(filters: string | ConversationLi
   const includeLegacy = !normalizedFilters.workspacePath; // 具体 path 时为 false（globalOnly / 不限时为 true）
   if (includeLegacy) {
     const legacy = listLegacyConversationSummaries(normalizedFilters);
-    const seen = new Set(summaries.map(summary => summary.id));
+    // ★ Bug 修复（「全局」分组显示消息截断而非对话标题）：去重必须基于【platform 全量 id】，而非当前
+    //   过滤后的 platformRows id。根因——新建/保存对话会同时写 platform（带 title + 归属）与 legacy 副本
+    //   （localStorage map，无归属、无 metadata.title → getFallbackTitle 退化为首条 user 消息截断）。
+    //   在「全局」(globalOnly) 视图下，一条【有工作区归属】的对话被 platform 的 `workspace_path IS NULL`
+    //   过滤掉 → 不在 platformRows、其 id 不在过滤后的 seen 里 → 它的 legacy 副本被误当成「纯 legacy 全局
+    //   对话」push 进列表，既显示截断标题，又错误地以全局身份泄漏进本不该出现的「全局」分组。
+    //   （「全部」视图无 workspace 过滤、platformRows 含全部对话，故 legacy 副本恒被去重、不暴露此 bug。）
+    //   修法：用一次不带 workspace 条件的轻量 list 取 platform 全量 id 作去重基准——凡 platform 里已存在
+    //   的对话，其 legacy 副本一律不再合入；只有 platform 完全不存在的【真·纯 legacy 旧数据】才补入。
+    const platformIds = await collectPlatformConversationIds();
+    const seen = new Set<string>([...summaries.map(summary => summary.id), ...platformIds]);
     for (const summary of legacy) {
       if (!seen.has(summary.id)) summaries.push({ ...summary, workspacePath: null });
     }
@@ -647,6 +665,33 @@ export async function listConversationSummaries(filters: string | ConversationLi
   return summaries
     .filter(summary => matchesFilters(summary, normalizedFilters))
     .sort((a, b) => b.timestamp - a.timestamp);
+}
+
+/**
+ * ★ Bug 修复辅助（「全局」分组 legacy 去重）：取 platform 侧【全量】对话 id 集合，用于判断某条对话在
+ *   platform 是否已存在，从而避免其 legacy 副本被重复合入。
+ *
+ * 关键：故意【不传】workspacePath / globalOnly——只沿用 archived/tags/limit 贴合当前视图范围。
+ *   否则在「全局」(globalOnly) 视图下，有归属对话会被 platform 过滤掉、其 id 取不到，legacy 副本又会泄漏。
+ *   非 streaming 关键路径，失败静默返回空集（退化为旧行为，至少不报错）。
+ */
+async function collectPlatformConversationIds(): Promise<string[]> {
+  try {
+    const rows = await platform.conversation.list({
+      // archived 用 'all'：legacy 副本无论本体归档与否都应被 platform 已存在判定去重，
+      //   不能因 archived 过滤漏掉 platform 行而让其 legacy 副本以截断标题泄漏。
+      archived: 'all',
+      // 不传 tags：去重只认 id 是否存在，tags 过滤会缩小 platform 集合 → 漏去重。
+      // limit 放大到安全上限（只取 id、成本低），避免大库下当前视图 limit(100/200) 截断导致漏去重。
+      limit: 10000,
+      // 刻意不传 workspacePath / globalOnly：要的是 platform 全量 id（含有归属对话）作去重基准。
+    });
+    return (Array.isArray(rows) ? rows : [])
+      .map((row: any) => row?.id)
+      .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0);
+  } catch {
+    return [];
+  }
 }
 
 export async function loadConversationSnapshot(id: string): Promise<ConversationSnapshot | null> {

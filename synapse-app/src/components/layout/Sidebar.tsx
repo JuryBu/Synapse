@@ -107,7 +107,9 @@ export function Sidebar({ activeView }: SidebarProps) {
       return;
     }
     // demo 兜底（从未打开过任何真实工作区）。
-    if (!workspace.currentPath) {
+    // ★ 兜住历史已写坏的用户：旧版本会把 '/workspace' 占位 sentinel 落盘，重启恢复时它既非真实路径
+    //   （第一分支不进）又非空（旧条件 !currentPath 也不进），示例文件树永久消失。把它一并视同未打开。
+    if (!workspace.currentPath || workspace.currentPath === '/workspace') {
       demoWorkspaceLoadedRef.current = true;
       fileSystem.getWorkspaceTree().then(tree => {
         setFileTree(tree);

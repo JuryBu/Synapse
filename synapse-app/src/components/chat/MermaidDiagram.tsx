@@ -36,8 +36,11 @@ const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
 let _mermaidPromise: Promise<any> | null = null;
 let _dompurifyPromise: Promise<any> | null = null;
 let _mermaidInitedTheme: string | null = null;
-const loadMermaid = () => (_mermaidPromise ??= import('mermaid').then(m => m.default));
-const loadDOMPurify = () => (_dompurifyPromise ??= import('dompurify').then(m => m.default));
+// ★ 失败自愈：import 的 promise 一旦 reject（IO 抖动 / chunk 损坏 / 内存压力），rejected promise 会被
+//   ??= 永久缓存（它非 null，不会重赋值），此后本会话所有 MermaidDiagram 实例都拿同一个 rejected promise，
+//   图表集体永久失效、必须重启 app。这里在失败时把缓存置回 null，允许后续重试（rethrow 不吞错，调用侧照常感知失败）。
+const loadMermaid = () => (_mermaidPromise ??= import('mermaid').then(m => m.default).catch(e => { _mermaidPromise = null; throw e; }));
+const loadDOMPurify = () => (_dompurifyPromise ??= import('dompurify').then(m => m.default).catch(e => { _dompurifyPromise = null; throw e; }));
 
 /** 从 mermaid 输出的 svg 字符串解析自然尺寸（优先 viewBox，退化 width/height 属性，兼容 px/%/pt 单位）。 */
 function parseSvgSize(svg: string): { w: number; h: number } | null {
@@ -61,7 +64,14 @@ export function MermaidDiagram({ code, pending }: { code: string; pending?: bool
   const resolvedTheme = useResolvedTheme();
 
   useEffect(() => {
-    if (pending) return; // 未闭合块不渲染（半截代码喂 mermaid 会 throw）；闭合后 pending=false，effect 重跑。
+    if (pending) {
+      // ★ 性能（M7 第四轮，治「图表加载很久」）：未闭合块不渲染（半截代码喂 mermaid 会 throw），
+      //   但【提前预热】import mermaid/DOMPurify 大 chunk——loadXxx 是 ??= 幂等缓存，多次调用不重复 import。
+      //   流式写图表期间就开始拉 chunk，等块闭合 render 时 import 已就绪 → 闭合即渲染，不再等大 chunk 现拉。
+      void loadMermaid().catch(() => undefined);
+      void loadDOMPurify().catch(() => undefined);
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {

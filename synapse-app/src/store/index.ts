@@ -233,8 +233,16 @@ const persistMiddleware: Middleware = (storeApi) => (next) => (action) => {
     if (type.startsWith('workspace/')) {
       try {
         // 只持久化配置类字段（运行态 synopsisReady/indexingProgress 不存，重启回默认）。
+        // ★ demo 兜底治本：'/workspace' 是示例工作区的占位 sentinel（Sidebar 首次启动 dispatch openWorkspace
+        //   写入），不是真实打开的文件夹。若把它落盘，重启恢复时 Sidebar 的两个分支都不进（既非真实路径、又非空），
+        //   示例文件树永久消失。这里把它视同未打开：currentPath 存 null、name 存空串、recentPaths 过滤掉它。
         const { currentPath, name, recentPaths } = state.workspace;
-        localStorage.setItem(WORKSPACE_KEY, JSON.stringify({ currentPath, name, recentPaths }));
+        const isDemo = currentPath === '/workspace';
+        localStorage.setItem(WORKSPACE_KEY, JSON.stringify({
+          currentPath: isDemo ? null : currentPath,
+          name: isDemo ? '' : name,
+          recentPaths: Array.isArray(recentPaths) ? recentPaths.filter(p => p !== '/workspace') : recentPaths,
+        }));
       } catch { /* localStorage 不可用 */ }
     }
   }
@@ -283,7 +291,14 @@ export const store = configureStore({
     // ★ 工作区持久化恢复：补全运行态默认 + 持久化的 currentPath/name/recentPaths（重启后工作区不丢、工具根延续）。
     ...(persisted.workspace ? { workspace: { currentPath: null, name: '', recentPaths: [], synopsisReady: false, indexingProgress: 0, ...persisted.workspace } } : {}),
   },
-  middleware: (getDefault) => getDefault().concat(persistMiddleware),
+  // ★ 性能（M7 第四轮）：关闭 dev 专属的 serializableCheck / immutableCheck。
+  //   这俩中间件在每个 action 后深度遍历整棵 state 树，而 conversation.messages 是巨大富对象数组
+  //   （contentParts/diffs/hunks/runEvents/thinking 全量嵌套）——发一条消息 = addMessage dispatch =
+  //   立刻全树遍历一遍，长对话单次可达 200ms+，是"发消息卡到未响应"的最大单点（dev 日志已实锤
+  //   "SerializableStateInvariantMiddleware took 60ms" 警告）。production 本就自动关闭这俩，dev 关掉后
+  //   体验与 prod 一致；不可变性由 TypeScript 类型 + reducer 纪律（Immer）保障。
+  middleware: (getDefault) =>
+    getDefault({ serializableCheck: false, immutableCheck: false }).concat(persistMiddleware),
   devTools: import.meta.env.DEV,
 });
 

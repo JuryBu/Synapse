@@ -247,6 +247,32 @@ const TRUNCATION_NOTICE = '\n\n[…内容过长，已截断以避免超出上下
 const MIN_TEXT_BUDGET = 1024;
 
 /**
+ * ★ 性能：一次遍历同时算出「全量历史 token」与「去掉最后一条（当前消息）后的历史 token」。
+ *   等价于分别调用 countConversationTokens(messages) 与 countConversationTokens(messages.slice(0,-1))，
+ *   但只遍历一遍整个历史、且不产生 slice 数组拷贝。用于 run() 关键路径上同时喂 assembledTokens（压缩水位）
+ *   与 historyOnlyTokens（compressContext 护栏）两个消费方。
+ *
+ *   口径严格复刻 systemPrompt.countConversationTokens：每条 +4 的消息格式开销、整体 +2。
+ *   - full        = Σ_all(estimateTokens(content)+4) + 2
+ *   - withoutLast = Σ_{除最后一条}(estimateTokens(content)+4) + 2  = full - (最后一条的 estimateTokens(content)+4)
+ *   边界：空数组时二者皆 2（与 countConversationTokens([]) / countConversationTokens([].slice(0,-1)) 一致）；
+ *        单元素时 withoutLast = 2（去掉唯一一条即空）。
+ */
+function countConversationTokensSplitLast(
+  messages: Array<{ role: string; content: string }>,
+): { full: number; withoutLast: number } {
+  let full = 2;
+  let lastContribution = 0;
+  for (let i = 0; i < messages.length; i++) {
+    const contribution = estimateTokens(messages[i].content) + 4;
+    full += contribution;
+    if (i === messages.length - 1) lastContribution = contribution;
+  }
+  // withoutLast = 全量减去最后一条的贡献；空数组时 lastContribution=0 → withoutLast=full=2，边界一致。
+  return { full, withoutLast: full - lastContribution };
+}
+
+/**
  * M2-R4 问题4 修复：「少条超长」危险态（compressContext 返回 overLimitWithoutCompression=true）下，
  * 切片压缩无可压缩余量，直接全量发送会撑爆窗口。这里对发送体里【最长的文本 part】按比例截断，
  * 把组装总量压回 threshold 以下（尽力而为），避免请求被服务端拒绝或截断。
@@ -535,6 +561,17 @@ export class AgentLoop {
   private toolExecutor: ToolExecutor | null = null;
   private running = false;
   /**
+   * ★ 性能：toolsTokens 记忆化缓存（按 activeTools 数组【引用相等】命中）。
+   *   背景：原先每次 run 在「插入 user 消息 → 发起 fetch」关键路径上同步执行
+   *   `estimateTokens(JSON.stringify(activeTools))`——工具集 schema 可能数十 KB，JSON.stringify + 字符估算
+   *   是主线程上一笔可观开销，且工具集在一次 run 内（乃至跨 run 未启停 MCP 时）通常不变，纯属重复劳动。
+   *   缓存键用 activeTools 的【引用】：getActiveTools() 回退静态快照（this.tools）时引用稳定，跨 run 命中；
+   *   toolsProvider 每次返回新引用时缓存自然失效、重算一次——不会比现状（每次必算）更差，是纯增益、零语义风险。
+   *   ★ 安全性：只缓存「估算值」这一【纯展示/水位输入的数字】，不缓存 activeTools 本身、更不影响实际发送的
+   *     工具集（streamChat 始终用 line ~723 当轮取的 activeTools）。引用变即失效，绝不会用过期工具集的 token 数。
+   */
+  private toolsTokensCache: { toolsRef: ToolDefinition[]; tokens: number } | null = null;
+  /**
    * M2-5 / M3：本 AgentLoop 实例的【执行上下文 id】。
    * - 单 agent（主对话）：构造时不传 → 执行工具时回退当前对话 id（conversation.id ?? AUTOSAVE_ID），
    *   worktree 活动态随对话身份走，与「切换对话不串台」配套。
@@ -583,6 +620,19 @@ export class AgentLoop {
       }
     }
     return this.tools;
+  }
+
+  /**
+   * ★ 性能：估算工具集 token，按 activeTools 数组【引用相等】记忆化。
+   *   见 toolsTokensCache 字段注释——仅缓存「估算数字」，引用未变即复用，引用变了重算并刷新缓存。
+   *   纯增益、零语义风险：不缓存工具集本身，不影响实际发送。
+   */
+  private estimateToolsTokens(activeTools: ToolDefinition[]): number {
+    const cached = this.toolsTokensCache;
+    if (cached && cached.toolsRef === activeTools) return cached.tokens;
+    const tokens = estimateTokens(JSON.stringify(activeTools));
+    this.toolsTokensCache = { toolsRef: activeTools, tokens };
+    return tokens;
   }
 
   stop() {
@@ -735,11 +785,20 @@ export class AgentLoop {
     // ★ M4-5 审查 medium#2：<open_files> 已从 systemPrompt 挪到 messages 末尾，systemTokens 不再涵盖它；
     //   但它仍随请求体发送、占用输入 token，故单独把 openFilesSection 的 token 计入估算口径，保持组装量准确。
     const systemTokens = estimateTokens(systemPrompt) + estimateTokens(openFilesSection);
+    // ★ 性能：toolsTokens 走引用记忆化缓存（见 toolsTokensCache 字段注释）——避免每次 run 在关键路径上
+    //   对可能数十 KB 的工具集做 JSON.stringify + 字符估算。activeTools 引用未变即命中，变了重算一次。
+    //   仅缓存「估算数字」，不影响实际发送的工具集（streamChat 始终用当轮取的 activeTools）。
     const toolsTokens = (toolsEnabled && currentMode !== 'fast' && activeTools.length > 0)
-      ? estimateTokens(JSON.stringify(activeTools))
+      ? this.estimateToolsTokens(activeTools)
       : 0;
     const nonTextTokens = requestHistory.reduce((sum, m) => sum + estimateNonTextPartsTokens(m.content), 0);
-    const assembledTokens = systemTokens + toolsTokens + countConversationTokens(requestHistoryText) + nonTextTokens;
+    // ★ 性能：合并「全量历史 token」与「去掉最后一条（当前消息）的历史 token」两次全历史遍历为单次。
+    //   原先 line ~753 的 countConversationTokens(requestHistoryText) 与 line ~763 的
+    //   countConversationTokens(requestHistoryText.slice(0,-1)) 各遍历一遍整个历史（后者还多一次 slice 数组拷贝）。
+    //   下面逐条累加一次即同时得到二者——数值与原两次调用【逐字节等价】（countConversationTokens 定义：
+    //   Σ(estimateTokens(content)+4) + 2；去尾即全量减去最后一条的 (estimateTokens+4)），仅去重了一遍 O(总长度) 遍历。
+    const { full: historyTokensFull, withoutLast: historyOnlyTokens } = countConversationTokensSplitLast(requestHistoryText);
+    const assembledTokens = systemTokens + toolsTokens + historyTokensFull + nonTextTokens;
     // 兜底口径修复（问题1/3）：用上一轮 API 实测 promptTokens（纯输入侧）而非 totalTokens 取 max。
     // totalTokens = prompt_tokens + completion_tokens（含上一轮模型输出），与本轮纯输入侧 assembledTokens 量纲不同，
     // 取 max 会被上一轮 completion 长度污染、系统性高估。promptTokens 才与 assembledTokens 同口径（=实际发送的输入）。
@@ -749,7 +808,8 @@ export class AgentLoop {
     const triggerTokens = Math.max(assembledTokens, apiRealTokens);
     // M4-1-S4 护栏入参：除最后一条（本轮当前消息）外的历史文本 token，与 compressContext 内同口径
     // （countConversationTokens）。仅历史本身也接近阈值才标 overLimitWithoutCompression，避免误截当前消息。
-    const historyOnlyTokens = countConversationTokens(requestHistoryText.slice(0, -1));
+    // ★ 性能：historyOnlyTokens 已与 assembledTokens 的全量历史 token 在上方 countConversationTokensSplitLast
+    //   一次遍历中同时算出（原先是单独再 countConversationTokens(slice(0,-1)) 跑第二遍），数值逐字节等价。
     // ★ M5-BPC-4：硬压缩阈值可配（本对话覆盖 ?? 全局 bpc.compactThreshold ?? 0.9）。下推 compressContext 与
     //   下方 overLimit truncate 阈值，使「90% 硬阈值」成为用户可调项（BPC 设置面板 / 本对话覆盖）。
     const effectiveCompactThreshold = resolveCompactThreshold(rootState);

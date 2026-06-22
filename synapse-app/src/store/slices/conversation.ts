@@ -80,7 +80,8 @@ export interface TaskBoundary {
   status: 'active' | 'done' | 'aborted';
   startedAt: number;          // ms
   endedAt?: number;           // done/aborted 时回填
-  anchorMessageId?: string;   // 边界开始时锚定的 assistant 消息 id（定位/回溯用，可选）
+  anchorMessageId?: string;   // 边界【开始】锚定的 assistant 消息 id（卡片吞消息区间上界）
+  endAnchorMessageId?: string;// ★ 边界【收口】时刻最后一条消息 id（卡片吞消息区间下界；active 未收口=延伸到当前末尾）
   startRound?: number;        // 对齐 M5-2 轮次地基（可选，首版可不填）
   endRound?: number;
   steps: TaskBoundaryStep[];
@@ -284,6 +285,26 @@ interface ConversationState {
 }
 
 const CONVERSATION_SCHEMA_VERSION = 1;
+
+/**
+ * ★ task_boundary 截断同步（M7 第四轮，治 review HIGH「回溯/编辑/清空截断 messages 时不清理 taskBoundaries」）：
+ *   回溯/编辑/清空把 state.messages 截短后调用——以保留下来的消息为界裁剪任务边界：
+ *     ① anchorMessageId 已不在保留消息里的边界整条丢弃（其锚消息被截掉了，否则会漂到末尾成孤儿僵尸卡）；
+ *     ② endAnchorMessageId 落在被截区的，清掉（区间下界失效，渲染退化为延伸到当前末尾）；
+ *     ③ 仍保留但 status==='active' 的收口为 done（它的 end_task_boundary 工具调用随被截轮一起撤销、
+ *        永不会再执行，不收口会永久脉冲「进行中」）。
+ *   ⚠️ 只在【真发生截断】时调（保留消息数 < 原数）——回溯到最后一条 = no-op，不应误收口正在进行的边界。
+ */
+function clampTaskBoundariesAfterTruncation(state: ConversationState) {
+  if (!state.taskBoundaries || state.taskBoundaries.length === 0) return;
+  const ids = new Set(state.messages.map(m => m.id));
+  const now = Date.now();
+  state.taskBoundaries = state.taskBoundaries.filter(b => !!b.anchorMessageId && ids.has(b.anchorMessageId));
+  for (const b of state.taskBoundaries) {
+    if (b.endAnchorMessageId && !ids.has(b.endAnchorMessageId)) b.endAnchorMessageId = undefined;
+    if (b.status === 'active') { b.status = 'done'; b.endedAt = now; }
+  }
+}
 
 function textToContentParts(content: string): MessageContentPart[] {
   return content ? [{ type: 'text', text: content }] : [];
@@ -514,13 +535,21 @@ export const conversationSlice = createSlice({
     setTaskHeadline(state, action: PayloadAction<{ headline: string; summary?: string; at?: number }>) {
       const now = action.payload.at ?? Date.now();
       const headline = action.payload.headline;
-      const summary = action.payload.summary ?? state.taskHeadline?.summary ?? '';
+      // ★ summary 缺省（undefined）= 不改、保留旧值；传空串 '' = 显式清空。配合 toolRegistry handler 缺省传 undefined
+      //   （review MEDIUM：之前 handler 恒传 ''，把 reducer 「?? 旧值」兜底架空 → 只换标题会误清空概括 + 污染 history）。
+      const summary = action.payload.summary !== undefined
+        ? action.payload.summary
+        : (state.taskHeadline?.summary ?? '');
       state.taskHeadline = { headline, summary, updatedAt: now };
       const active = state.taskBoundaries?.find(b => b.status === 'active');
       if (active) {
         active.headline = headline;
         active.summary = summary;
-        active.history.push({ headline, summary, timestamp: now });
+        // ★ 判重：与最后一条 history 完全相同则不重复 push（防重复/空变更调用撑大变迁时间线）。
+        const last = active.history[active.history.length - 1];
+        if (!last || last.headline !== headline || last.summary !== summary) {
+          active.history.push({ headline, summary, timestamp: now });
+        }
       }
     },
     // ★ 给当前 active 边界追加一条进度 step。无 active 则 no-op（AI 该先 begin）。
@@ -544,6 +573,9 @@ export const conversationSlice = createSlice({
       if (!target) return;
       target.status = p.aborted ? 'aborted' : 'done';
       target.endedAt = now;
+      // ★ 记录收口时刻最后一条消息 id 作为「吞消息」区间下界（卡片按 [anchor, endAnchor] 归组本边界期间的消息）。
+      const lastMsg = state.messages[state.messages.length - 1];
+      if (lastMsg) target.endAnchorMessageId = lastMsg.id;
     },
     // ★ M5-BPC：设定 / 清空本对话【预压触发水位】覆盖（SettingsPanel 本对话覆盖入口 / 命令用）。
     //   合法有限 number → 设；undefined/NaN/非数字 → 清空（视为未覆盖，回退全局默认）。
@@ -830,24 +862,39 @@ export const conversationSlice = createSlice({
           ? action.payload.richTokens
           : undefined;
         // 截断后续消息
+        const editTruncated = idx < state.messages.length - 1;
         state.messages = state.messages.slice(0, idx + 1);
+        if (editTruncated) clampTaskBoundariesAfterTruncation(state);
       }
     },
     // 回溯到某条消息（保留该消息及之前的所有消息）
     truncateAt(state, action: PayloadAction<string>) {
       const idx = state.messages.findIndex(m => m.id === action.payload);
       if (idx >= 0) {
+        const truncated = idx < state.messages.length - 1;
         state.messages = state.messages.slice(0, idx + 1);
+        if (truncated) clampTaskBoundariesAfterTruncation(state);
       }
     },
     // 删除单条消息
     deleteMessage(state, action: PayloadAction<string>) {
       state.messages = state.messages.filter(m => m.id !== action.payload);
+      // ★ task_boundary：删消息可能删掉某边界的 anchor/endAnchor。清理引用被删消息的边界（anchor 没了整条丢弃，
+      //   endAnchor 没了清下界）——但【不收口 active】：删单条不等于打断进行中任务（区别于回溯/编辑的整段截断）。
+      if (state.taskBoundaries && state.taskBoundaries.length > 0) {
+        const ids = new Set(state.messages.map(m => m.id));
+        state.taskBoundaries = state.taskBoundaries.filter(b => !b.anchorMessageId || ids.has(b.anchorMessageId));
+        for (const b of state.taskBoundaries) {
+          if (b.endAnchorMessageId && !ids.has(b.endAnchorMessageId)) b.endAnchorMessageId = undefined;
+        }
+      }
     },
     // ★ Plan_5 M5-3：清空所有消息（回溯到第 1 轮之前等「无任何消息保留」场景）。对话本体 id/title/goal
     //   保留，仅消息归零——区别于 clearConversation（重置整个对话）。
     clearMessages(state) {
       state.messages = [];
+      // ★ task_boundary：消息归零 → 所有边界 anchor 都不在保留集 → clamp 自然全丢弃（防孤儿卡漂末尾）。
+      clampTaskBoundariesAfterTruncation(state);
     },
     // ★ FIX-13：工具执行完成后回写 toolCall 的 status/result/耗时。此前 toolCall 创建为 'pending'，
     //   执行完从不回写 → ToolCallCard 永远显示 spinning（转圈不停）。按 messageId+toolCallId 定位回写。

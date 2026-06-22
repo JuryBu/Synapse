@@ -1224,7 +1224,8 @@ toolRegistry.register({
 }, async (args) => {
   const headline = typeof args.headline === 'string' ? args.headline.trim() : '';
   if (!headline) return '⚠️ set_task_headline 需要 headline。';
-  const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+  // ★ 缺省传 undefined（不是 ''）：让 reducer「summary 未提供=保留旧概括」兜底生效（只换标题不误清空概括/污染 history）。
+  const summary = typeof args.summary === 'string' ? args.summary.trim() : undefined;
   const { store } = await import('@/store');
   const conv = await import('@/store/slices/conversation');
   store.dispatch(conv.setTaskHeadline({ headline, summary, at: Date.now() }));

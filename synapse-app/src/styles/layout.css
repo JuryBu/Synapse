@@ -76,8 +76,12 @@ html[data-wallpaper="enabled"] .settings-panel {
   align-items: center;
   gap: 12px;
   padding-left: 10px;
-  border-bottom: 1px solid var(--syn-border);
-  background: linear-gradient(90deg, rgba(var(--syn-bg-surface-rgb), 0.92), var(--glass-bg));
+  border-bottom: 1px solid var(--glass-border);
+  /* ★ 玻璃感统一：原 0.92 不透明渐变（暗色太黑/亮色太白）→ 与 .glass-panel 同款半透明玻璃底 + 模糊，
+     深浅由 --glass-bg 主题变量自适应（暗 rgba(17,17,24,0.75) / 浅 rgba(255,255,255,0.78)）。 */
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
   color: var(--syn-text-secondary);
   user-select: none;
   position: relative;

@@ -84,4 +84,38 @@
 - [ ] **task_boundary 卡片渲染位置**：首版渲染在消息流【末尾】（所有边界堆底部）。反重力是按任务发生位置内联穿插——需 begin_task_boundary 时记 anchorMessageId（当前 assistant 消息），渲染按 anchor 插到对应消息后。首版能看到卡片 + 历史变迁，精确穿插待优化。
 - [ ] **task_boundary gating 软引导**：现仅靠 systemPrompt planning guidelines 引导（fast 模式 prompt 不提）+ agentSettings.taskBoundaryEnabled 开关（已存但 prompt gating 用 context.taskBoundaryEnabled，需 agentLoop 构造 context 时传入才完全生效）；硬 gating（schema 过滤非 planning 不给工具）+ SettingsPanel 开关 UI 待补。
 - [ ] **sandbox / web-fetcher MCP + 原生读 OFFICE/PDF**（主人图6，明确「之后一定要做」）：当前 sandbox 与 web-fetcher 尚未接；原生用什么库读 office/pdf 待定（现走 LibreOffice 转换 + pdf.js，但工具层未暴露给 AI）。
-- [ ] **task_boundary 回溯/编辑联动**（规范 §10.6）：回溯到第 N 轮时移除 startRound>N 的边界、跨越 N 的收口——属 M5-2 轮次联动层，未做。
+- [x] **task_boundary 回溯/编辑联动**（规范 §10.6）：✅ 第四轮已做——clampTaskBoundariesAfterTruncation 在 truncateAt/editMessage/clearMessages 裁剪边界（anchor 不在则丢弃、active 收口防永久脉冲）。
+
+## 四、第四轮反馈批（task_boundary 吞消息返工 + 性能根治 + UI）
+
+> 主人第四轮真机反馈 8 项 + 我对抗 review（workflow 6 路）自查 11 条 bug，本轮一并处理。
+
+### 性能根治（诊断子代理定位，治「发消息卡到未响应」+ 流式卡顿 + 图表加载久）
+| 项 | 改动 |
+|---|---|
+| 1-A 关 dev 中间件 | `store/index.ts` getDefault 关 serializableCheck+immutableCheck（每 dispatch 深度遍历巨大 messages 树是「未响应」元凶，dev 日志已实锤 60ms+） |
+| 1-B token encode 移出发送路径 | agentLoop 工具集 token 按引用缓存 + 两遍全历史遍历合并成一遍（子代理，纯算术等价，不破坏压缩语义） |
+| 3-A1 回调稳定 | handleEdit/handleRetry/handleDelete/handleUndo 改读 `conversationRef.current.messages` 去 messages 依赖 → MessageBubble memo 流式期不再全列表陪渲 |
+| 3-A2 batchDivider | 依赖改 messages.length（流式 content 变不重算 O(n) 双层遍历） |
+| mermaid 预热 | 未闭合块提前 import mermaid/DOMPurify 大 chunk（幂等缓存），闭合即渲染，治「图表加载久」 |
+
+### task_boundary 卡片吞消息返工（反重力式，本轮最大）
+- **数据层**（conversation.ts）：TaskBoundary 加 `endAnchorMessageId`（吞消息区间下界）；`clampTaskBoundariesAfterTruncation` 截断裁剪（回溯/编辑/清空，治漂末尾+active 永久脉冲 HIGH bug）；`set_task_headline` summary 缺省保留（配合 handler 传 undefined，治误清概括）。
+- **渲染**（AgentPanel）：按 `[anchorMessageId, endAnchorMessageId]` 区间归组，区间消息收进卡片 children（非平铺）；聚合区间 diffs/artifacts 作「已编辑文件」chips。
+- **卡片**（TaskBoundaryCard 重写）：容器布局 = headline+summary+已编辑文件(可点击打开)+进度更新(可折叠)+完整过程(children 可折叠，active 默认展开/done 收起)+历史变迁浮层。
+- **持久化 bug**：branchConversation anchor/endAnchor 按 idMap 重映射 + toolCallIds 深拷贝；handleBranch promotion 补 taskBoundaries/taskHeadline/goal（治分支丢边界 HIGH）。
+
+### UI
+- 系统工具默认隐藏（show_artifact/task_boundary 系列/worktree 等元工具，AgentPanel filterSystemToolCalls）+ SettingsPanel 开关（隐藏系统工具 + 任务边界卡片两个 checkbox）。
+- 顶部栏玻璃化 3 处（子代理，复用 `--glass-bg`：WindowTitleBar/.tab-strip/.code-editor-toolbar+.viewer-toolbar）。
+- artifact 卡片放大（子代理，chat.css .artifact-chip 等，CSS 覆盖图标尺寸）。
+- 全局列表标题修复（子代理，conversationPersistence legacy 去重基准升级为 platform 全量 id）。
+- context window 输入框非受控+key+onBlur/Enter（治逐字中间态 2→20→200 误触发压缩 MEDIUM）。
+- workspace demo sentinel '/workspace' 持久化死局 + mermaid import 失败永久缓存不自愈（子代理）。
+
+### 第四轮小本本（降级/后续）
+- [ ] **1-C 拆 AgentPanel conversation 整对象订阅**（降级：1-A 已治大头，拆订阅改动面大风险高，后续按需）。
+- [ ] **2-B 定时器收敛 / 3-B2 isMermaidFenceClosed 缓存**（降级：live timer 通常仅 1 个、fence 仅流式有图表时，收益小）。
+- [ ] **按消息缓存单条 token**（1-B 子代理提的更大优化，需改 store/类型层挂 token 缓存字段）。
+- [ ] **task_boundary gating 硬过滤**（schema 非 planning 不给工具）——现软引导，主人说「没问题」。
+- [ ] **sandbox / web-fetcher MCP + 原生读 office/pdf**（主人图6，「之后一定要做」）。

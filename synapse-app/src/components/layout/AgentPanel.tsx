@@ -21,7 +21,7 @@ import { toggleAgentPanel, setSidebarVisible } from '@/store/slices/layout';
 import { setActiveView } from '@/store/slices/sidebar';
 import { MessageBubble } from '@/components/chat/MessageBubble';
 import { ApprovalDialog, type ApprovalRequest } from '@/components/ui/ApprovalDialog';
-import { TaskBoundaryCard } from '@/components/chat/TaskBoundaryCard';
+import { TaskBoundaryCard, type BoundaryFile } from '@/components/chat/TaskBoundaryCard';
 import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
@@ -71,6 +71,19 @@ import { buildRichParts } from '@/services/inputCommands/richInput/rebuild';
 import { parseAndDispatch } from '@/services/inputCommands/commandExecutor';
 // ★ M4-6-S4：/loop 最小循环驱动器（串行重发 N 次，可 handleStop 中断）。
 import { loopRunner } from '@/services/inputCommands/loopRunner';
+
+// ★ M7 第四轮：系统/元工具清单——这些工具已有专门卡片可视化（artifact 卡片 / task_boundary 卡片 / worktree 通知），
+//   工具调用卡片是冗余噪音。hideSystemToolCalls 开启时从消息流过滤掉它们（默认开启，设置可关，调试时关掉看全部）。
+const SYSTEM_TOOL_NAMES = new Set([
+  'begin_task_boundary', 'set_task_headline', 'update_task_progress', 'end_task_boundary',
+  'show_artifact', 'enter_worktree', 'exit_worktree',
+]);
+/** 按开关过滤掉系统/元工具调用；全被过滤则返回 undefined（不渲染空的工具调用容器）。 */
+function filterSystemToolCalls<T extends { name?: string }>(tcs: T[] | undefined, hide: boolean): T[] | undefined {
+  if (!hide || !tcs || tcs.length === 0) return tcs;
+  const visible = tcs.filter(tc => !SYSTEM_TOOL_NAMES.has(tc.name ?? ''));
+  return visible.length > 0 ? visible : undefined;
+}
 
 const MAX_IMAGE_PAYLOAD_BYTES = 8 * 1024 * 1024;
 // M4-3-S3：非图片（文档/文本/压缩包等）附件也走 sha256 内容寻址落地，与图片同一契约，
@@ -285,7 +298,71 @@ export function AgentPanel() {
       }
     }
     return map;
-  }, [recordBatchMarks, messages]);
+    // ★ 性能 3-A2：依赖 messages.length 而非整个 messages——分隔线位置只随消息【条数】+ record 批次变，
+    //   不随流式追加的 content 变。流式每 flush messages 引用变但 length 不变 → 不再每 token 重算 O(n) 双层遍历。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordBatchMarks, messages.length]);
+
+  // ★ task_boundary「卡片吞消息」（M7 第四轮返工）：把消息按边界 [anchorMessageId, endAnchorMessageId] 区间归组——
+  //   区间内的消息收进 TaskBoundaryCard（反重力式：一个折叠卡片包住整个任务过程），区间外的消息正常平铺。
+  //   并聚合每个边界区间内的文件变更（diffs/artifacts，同 path 取最新）作卡片「已编辑文件」。
+  //   anchor 已不在消息里的边界归 orphan（末尾兜底，不吞消息）。返回 startIdx→区间 的 Map 供渲染按下标命中。
+  const taskBoundaryRender = useMemo(() => {
+    const boundaries = (conversation.taskBoundaries ?? []) as any[];
+    const startMap = new Map<number, { b: any; startIdx: number; endIdx: number }>();
+    const filesByBoundaryId = new Map<string, BoundaryFile[]>();
+    const orphans: any[] = [];
+    if (boundaries.length === 0) return { startMap, filesByBoundaryId, orphans };
+
+    const basename = (p: string) => (p || '').split(/[/\\]/).pop() || p;
+    const msgIdToIdx = new Map<string, number>();
+    messages.forEach((m: any, i: number) => msgIdToIdx.set(m.id, i));
+
+    const ranges: { b: any; startIdx: number; endIdx: number }[] = [];
+    for (const b of boundaries) {
+      const startIdx = b.anchorMessageId != null ? msgIdToIdx.get(b.anchorMessageId) : undefined;
+      if (startIdx === undefined) { orphans.push(b); continue; }
+      let endIdx = b.endAnchorMessageId != null ? msgIdToIdx.get(b.endAnchorMessageId) : undefined;
+      if (endIdx === undefined || endIdx < startIdx) endIdx = messages.length - 1; // active/下界失效 → 延伸到末尾
+      ranges.push({ b, startIdx, endIdx });
+    }
+    // 防区间重叠（理论不重叠：begin 会收口前一个 active；保险按 startIdx 升序裁剪）。
+    ranges.sort((a, c) => a.startIdx - c.startIdx);
+    let lastEnd = -1;
+    for (const r of ranges) {
+      if (r.startIdx <= lastEnd) r.startIdx = lastEnd + 1;
+      if (r.startIdx > r.endIdx || r.startIdx >= messages.length) continue;
+      startMap.set(r.startIdx, r);
+      lastEnd = r.endIdx;
+      // 聚合区间内文件变更：diff 同 path 取最新状态，artifact 同 path 去重。
+      const files: BoundaryFile[] = [];
+      const fileByKey = new Map<string, BoundaryFile>();
+      for (let i = r.startIdx; i <= r.endIdx && i < messages.length; i++) {
+        const m: any = messages[i];
+        for (const d of (m.diffs ?? [])) {
+          const key = `diff:${d.path}`;
+          const existing = fileByKey.get(key);
+          if (existing) {
+            existing.ref = d; existing.changeType = d.changeType;
+            existing.additions = d.additions; existing.deletions = d.deletions;
+          } else {
+            const f: BoundaryFile = { key, path: d.path, label: basename(d.path), kind: 'diff', changeType: d.changeType, additions: d.additions, deletions: d.deletions, ref: d };
+            fileByKey.set(key, f); files.push(f);
+          }
+        }
+        for (const a of (m.artifacts ?? [])) {
+          const key = `artifact:${a.path}`;
+          if (!fileByKey.has(key)) {
+            const f: BoundaryFile = { key, path: a.path, label: a.label || basename(a.path), kind: 'artifact', ref: a };
+            fileByKey.set(key, f); files.push(f);
+          }
+        }
+      }
+      filesByBoundaryId.set(r.b.id, files);
+    }
+    return { startMap, filesByBoundaryId, orphans };
+  }, [conversation.taskBoundaries, messages]);
+
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRef[]>([]);
   const [previewAttachment, setPreviewAttachment] = useState<AttachmentRef | null>(null);
   // M2-R6 渲染还原：历史消息的 image 附件落库后只有 sha256（无 previewUrl base64），
@@ -1230,17 +1307,19 @@ export function AgentPanel() {
   // Edit user message → truncate after it → re-send（★ C6：带附件编辑——保留/新增图、删图，refCount 精确守恒）
   // ★ D1：onEdit 签名扩 richTokens?——MessageBubble.handleSubmitEdit 透传编辑后【新 extract】的 tokens，落库覆盖旧值。
   const handleEdit = useCallback((msgId: string, newContent: string, attachments?: AttachmentRef[], richTokens?: ExtractedToken[]) => {
-    const editIdx = messages.findIndex((m: any) => m.id === msgId);
+    // ★ 性能 3-A1：读 conversationRef 而非订阅 messages，回调引用稳定 → MessageBubble memo 流式期不被全列表陪渲。
+    const msgs = conversationRef.current.messages;
+    const editIdx = msgs.findIndex((m: any) => m.id === msgId);
     if (editIdx < 0) return;
-    const oldMsg = messages[editIdx];
+    const oldMsg = msgs[editIdx];
     const newAtts = (attachments ?? []).filter(a => a.status === 'ready');
     const keptShas = new Set(newAtts.map(a => a.sha256).filter(Boolean) as string[]);
 
-    invalidateRecordForTruncation(messages.slice(0, editIdx + 1));
+    invalidateRecordForTruncation(msgs.slice(0, editIdx + 1));
     // ★ C6 refCount 守恒（修正旧实现把 messages[editIdx] 整体 GC 导致「编辑丢图」）：
     //   ① 后续消息整体 GC；② 被编辑消息只 release「被移除的原附件」(oldShas − keptShas)，
     //   KEPT（保留的原图）/ADDED（新上传图）不动——引用归属平移给编辑后消息（同一条 id 原地改写）。
-    gcMessages(messages.slice(editIdx + 1));
+    gcMessages(msgs.slice(editIdx + 1));
     const oldShas = collectMessageShas([oldMsg]);
     for (const sha of oldShas) {
       if (!keptShas.has(sha)) void platform.attachment.delete(sha).catch(() => undefined);
@@ -1260,7 +1339,7 @@ export function AgentPanel() {
         });
       }, 100);
     }
-  }, [dispatch, messages, invalidateRecordForTruncation, gcMessages, buildUserContentParts]);
+  }, [dispatch, invalidateRecordForTruncation, gcMessages, buildUserContentParts]);
 
   // ★ Plan_5 M5-4 重试（规范 §5）：入口改挂【user 消息】（不再挂 AI 消息）。
   //   点某条 user 的「重新生成」= 回溯到该 user 所在轮（截断该 user 段之后全部，含本轮 model 段所有
@@ -1268,8 +1347,9 @@ export function AgentPanel() {
   //   统一以「user 消息=轮起点」为锚：重试=自动发出（与回溯「填输入框待发」区分）。复用共享 helper。
   const handleRetry = useCallback((msgId: string) => {
     if (isStreaming) return;
+    const msgs = conversationRef.current.messages;  // ★ 性能 3-A1：读 ref 稳定回调引用
     // ① 共享 helper 按轮截断（before-user 模式：保留到该 user 段为止、丢弃本轮 model 段）。
-    const cut: RoundTruncationResult = computeRoundTruncation(messages, msgId, 'before-user');
+    const cut: RoundTruncationResult = computeRoundTruncation(msgs, msgId, 'before-user');
     if (!cut.ok || cut.lastKeptIndex < 0) return;
 
     // ② 被丢弃的本轮 model 段里的文件变更按快照回退（与回溯一致；removedMessages 即本轮 model 段全部）。
@@ -1280,7 +1360,7 @@ export function AgentPanel() {
 
     void (async () => {
       for (const diff of diffsToRollback) {
-        const snapshot = diff.snapshotId ? conversation.fileSnapshots[diff.snapshotId] : undefined;
+        const snapshot = diff.snapshotId ? conversationRef.current.fileSnapshots[diff.snapshotId] : undefined;
         try {
           await rollbackFileDiff(diff, snapshot);
           dispatch(updateDiffStatus({ diffId: diff.id, status: 'rejected' }));
@@ -1291,7 +1371,7 @@ export function AgentPanel() {
       }
 
       // ③ record 砍批到轮边界（keptRounds = 该 user 所在轮 − 1，本轮 model 段未完成不算已压；与 clampToBatch 同口径）。
-      const conversationId = conversation.id || AUTOSAVE_ID;
+      const conversationId = conversationRef.current.id || AUTOSAVE_ID;
       await clampRecordToRoundTruncation(conversationId, cut);
 
       // ④ GC 被移除的本轮 model 段附件（被保留的那条 user 不在 removedMessages 里，附件不动）。
@@ -1302,7 +1382,7 @@ export function AgentPanel() {
 
       // ⑥ 自动重发该 user（不填输入框）：skipUserMessage=true → 不新增 user 消息，直接用 store 现有历史发起请求。
       if (agentLoopRef.current) {
-        const retryUserMsg = messages.find((m: any) => m.id === msgId);
+        const retryUserMsg = msgs.find((m: any) => m.id === msgId);
         setTimeout(() => {
           agentLoopRef.current?.run((retryUserMsg as any)?.content ?? '', { skipUserMessage: true }).catch((err: any) => {
             dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err.message }));
@@ -1310,24 +1390,25 @@ export function AgentPanel() {
         }, 100);
       }
     })();
-  }, [isStreaming, messages, dispatch, conversation.fileSnapshots, conversation.id, gcMessages]);
+  }, [isStreaming, dispatch, gcMessages]);
 
   // Delete single message
   const handleDelete = useCallback((msgId: string) => {
-    // M2-R6 GC：删单条消息前 release 其附件 sha256。
-    const target = messages.find((m: any) => m.id === msgId);
+    // M2-R6 GC：删单条消息前 release 其附件 sha256。★ 性能 3-A1：读 ref 稳定回调。
+    const target = conversationRef.current.messages.find((m: any) => m.id === msgId);
     if (target) gcMessages([target]);
     dispatch(deleteMessage(msgId));
-  }, [dispatch, messages, gcMessages]);
+  }, [dispatch, gcMessages]);
 
   // ★ Plan_5 M5-3 回溯（规范 §3，2026-06-17 修订口径）：点哪条 user 消息，那条 user 本身回填输入框待发，
   //   它【及之后】全部回溯掉（= 回到该 user 所在轮之前 / 上一整轮结束）。record 砍掉该轮起所有批，
   //   GC 时排除这条 user（其附件随草稿转移、不删）。与重试的区别：回溯把该 user 移入输入框（可改后再发），
   //   重试保留该 user 并自动重发。用 'undo' 截断模式（= branch-user 的截断口径，但原地裁剪当前对话）。
   const handleUndoToMessage = useCallback((msgId: string) => {
+    const msgs = conversationRef.current.messages;  // ★ 性能 3-A1：读 ref 稳定回调引用
     void (async () => {
       // ① 共享 helper 按轮截断（undo 模式：点 user → 保留到该 user 所在轮之前、该轮起全部丢弃，绝不轮中间切）。
-      const cut: RoundTruncationResult = computeRoundTruncation(messages, msgId, 'undo');
+      const cut: RoundTruncationResult = computeRoundTruncation(msgs, msgId, 'undo');
       if (!cut.ok) return;
 
       // ② 被截掉范围内的文件变更按快照回退（与旧逻辑一致，但范围改为「轮取整后的 removedMessages」）。
@@ -1344,7 +1425,7 @@ export function AgentPanel() {
       if (!window.confirm(prompt)) return;
 
       for (const diff of diffsToRollback) {
-        const snapshot = diff.snapshotId ? conversation.fileSnapshots[diff.snapshotId] : undefined;
+        const snapshot = diff.snapshotId ? conversationRef.current.fileSnapshots[diff.snapshotId] : undefined;
         try {
           await rollbackFileDiff(diff, snapshot);
           dispatch(updateDiffStatus({ diffId: diff.id, status: 'rejected' }));
@@ -1355,7 +1436,7 @@ export function AgentPanel() {
       }
 
       // ③ record 砍批到轮边界（keptRounds = 真轮数 N，keptSteps 不含 tool；共享 helper 与 clampToBatch 同口径）。
-      const conversationId = conversation.id || AUTOSAVE_ID;
+      const conversationId = conversationRef.current.id || AUTOSAVE_ID;
       await clampRecordToRoundTruncation(conversationId, cut);
 
       // ④ GC 被移除消息的附件——但【排除第 N+1 轮那条 user】（它的内容/附件要回填输入框待发，
@@ -1377,7 +1458,7 @@ export function AgentPanel() {
         refillInputFromUserMessage(cut.pendingUserMessage as any);
       }
     })();
-  }, [conversation.fileSnapshots, conversation.id, dispatch, messages, gcMessages, refillInputFromUserMessage]);
+  }, [dispatch, gcMessages, refillInputFromUserMessage]);
 
   // M2-3 对话分支：在某条消息处「从此分支」→ 把该消息及之前另存为【新对话】，源对话原样保留。
   // 源若仍是 autosave（未落真实 id），先 save 一次 fork 成真实 id 作为稳定 parent，并把当前 store 切到该真实 id，
@@ -1446,6 +1527,11 @@ export function AgentPanel() {
             // ★ M4-2-S5：promotion（autosave 源提升为真实对话）随对话落工作区归属，使源对话保留其归属，
             //   下方 branchConversation 也据此继承。
             workspacePath: srcWorkspacePath,
+            // ★ review HIGH 修复：promotion 此前漏传 goal/taskBoundaries/taskHeadline → 提升出的源对话落库这些列为 NULL，
+            //   日后从历史切回源对话时目标与任务边界永久丢失。与其它三个 save 入口口径对齐补全。
+            goal: conversationRef.current.goal,
+            taskBoundaries: srcTaskBoundaries,
+            taskHeadline: srcTaskHeadline,
             timestamp: Date.now(),
           });
           // 前置条件：autosave 源必须先 promotion 成稳定真实 id 才能作为 parent。
@@ -1473,6 +1559,10 @@ export function AgentPanel() {
             pendingDiffs: conversationRef.current.pendingDiffs,
             // ★ M4-2-S5：promotion 切到真实源 id 时保持源对话工作区归属（身份变化的 setConversation 须显式带）。
             workspacePath: srcWorkspacePath,
+            // ★ review HIGH 修复：身份变化的 setConversation 须显式带 goal/taskBoundaries/taskHeadline，否则切到真实 id 时 store 丢边界。
+            goal: conversationRef.current.goal,
+            taskBoundaries: srcTaskBoundaries,
+            taskHeadline: srcTaskHeadline,
           }));
           dispatch(setSelectedId(srcId));
         }
@@ -1588,6 +1678,12 @@ export function AgentPanel() {
       type: 'code',
     }));
   }, [dispatch]);
+
+  // ★ task_boundary 卡片「已编辑文件」chip 点击 → 在编辑器打开（artifact/diff 同 path 口径，复用上面两个 opener）。
+  const handleOpenBoundaryFile = useCallback((f: BoundaryFile) => {
+    if (f.kind === 'artifact') openArtifactTarget({ path: f.path });
+    else openDiffTarget({ path: f.path });
+  }, [openArtifactTarget, openDiffTarget]);
 
   // ★ C6/去重：handleEditorKeyDown 移入 useAtMention hook（onSubmit=handleSend 经 handleSendRef 破环）。
   //   handleSend 已定义，回填 handleSendRef 供 hook 的提交回调调用最新实现。
@@ -2094,61 +2190,93 @@ export function AgentPanel() {
               </div>
             ) : (
               <>
-                {/* ★ M6 验收 bug5：先 map 出 {msg,idx} 再过滤 role==='tool'，保留【原始 store 下标】idx
-                    透传给 batchDividerByIdx/MessageBubble——工具结果只在 assistant 的 ToolCallCard（默认折叠）显示，
-                    不再渲染冗余的独立全展开 tool 消息。idx 保留真实下标，divider/回溯/分支按下标定位不错位。 */}
-                {messages
-                  .map((msg: any, idx: number) => ({ msg, idx }))
-                  .filter(({ msg }: { msg: any }) => msg.role !== 'tool')
-                  .map(({ msg, idx }: { msg: any; idx: number }) => (
-                  <Fragment key={msg.id}>
-                    {batchDividerByIdx.has(idx) && (
-                      <CompactDivider marks={batchDividerByIdx.get(idx)!} />
-                    )}
-                  <MessageBubble
-                    id={msg.id}
-                    role={msg.role}
-                    content={msg.content}
-                    timestamp={msg.timestamp}
-                    model={(msg as any).model}
-                    isStreaming={(msg as any).isStreaming}
-                    streamState={(msg as any).streamState}
-                    streamMode={(msg as any).streamMode}
-                    fallbackReason={(msg as any).fallbackReason}
-                    showStreamCursor={(msg as any).showStreamCursor}
-                    showGeneratingPlaceholder={(msg as any).showGeneratingPlaceholder}
-                    durationMs={(msg as any).durationMs}
-                    reconnect={(msg as any).reconnect}
-                    endToEndMs={(msg as any).endToEndMs}
-                    thinking={(msg as any).thinking}
-                    attachments={getRenderAttachments((msg as any).attachments)}
-                    richTokens={(msg as any).richTokens}
-                    toolCalls={(msg as any).toolCalls}
-                    diffs={(msg as any).diffs}
-                    artifacts={(msg as any).artifacts}
-                    workflowRunId={(msg as any).workflowRunId}
-                    onReviewChanges={openReviewChanges}
-                    onOpenDiff={openDiffTarget}
-                    onOpenArtifact={openArtifactTarget}
-                    onOpenAttachment={handleOpenAttachment}
-                    onUndoToMessage={handleUndoToMessage}
-                    onEdit={handleEdit}
-                    onRetry={handleRetry}
-                    onDelete={handleDelete}
-                    onBranch={handleBranch}
-                  />
-                  {/* ★ task_boundary：锚定本消息(begin 时的 assistant)的任务边界卡片【内联渲染在此消息后】（反重力式穿插）。 */}
-                  {conversation.taskBoundaries?.filter((b: any) => b.anchorMessageId === msg.id).map((b: any) => (
-                    <TaskBoundaryCard key={b.id} boundary={b} />
-                  ))}
-                  </Fragment>
-                ))}
+                {/* ★ task_boundary「卡片吞消息」渲染（M7 第四轮返工）：按 taskBoundaryRender.startMap 把边界区间内的
+                    消息收进 TaskBoundaryCard（一个折叠卡片包住整个任务过程，反重力式），区间外的消息正常平铺。
+                    工具结果(role==='tool')只在 assistant 的 ToolCallCard 折叠显示，这里统一过滤、不单独渲染。 */}
+                {(() => {
+                  const { startMap, filesByBoundaryId } = taskBoundaryRender;
+                  const renderBubble = (msg: any) => (
+                    <MessageBubble
+                      key={msg.id}
+                      id={msg.id}
+                      role={msg.role}
+                      content={msg.content}
+                      timestamp={msg.timestamp}
+                      model={(msg as any).model}
+                      isStreaming={(msg as any).isStreaming}
+                      streamState={(msg as any).streamState}
+                      streamMode={(msg as any).streamMode}
+                      fallbackReason={(msg as any).fallbackReason}
+                      showStreamCursor={(msg as any).showStreamCursor}
+                      showGeneratingPlaceholder={(msg as any).showGeneratingPlaceholder}
+                      durationMs={(msg as any).durationMs}
+                      reconnect={(msg as any).reconnect}
+                      endToEndMs={(msg as any).endToEndMs}
+                      thinking={(msg as any).thinking}
+                      attachments={getRenderAttachments((msg as any).attachments)}
+                      richTokens={(msg as any).richTokens}
+                      toolCalls={filterSystemToolCalls((msg as any).toolCalls, agentSettings.hideSystemToolCalls ?? true)}
+                      diffs={(msg as any).diffs}
+                      artifacts={(msg as any).artifacts}
+                      workflowRunId={(msg as any).workflowRunId}
+                      onReviewChanges={openReviewChanges}
+                      onOpenDiff={openDiffTarget}
+                      onOpenArtifact={openArtifactTarget}
+                      onOpenAttachment={handleOpenAttachment}
+                      onUndoToMessage={handleUndoToMessage}
+                      onEdit={handleEdit}
+                      onRetry={handleRetry}
+                      onDelete={handleDelete}
+                      onBranch={handleBranch}
+                    />
+                  );
+                  const out: any[] = [];
+                  let i = 0;
+                  while (i < messages.length) {
+                    const r = startMap.get(i);
+                    if (r) {
+                      // 边界区间 → 收进卡片（过滤 tool 后作 children 过程消息）。
+                      const rangeMsgs: any[] = [];
+                      for (let j = r.startIdx; j <= r.endIdx && j < messages.length; j++) {
+                        const m: any = messages[j];
+                        if (m.role !== 'tool') rangeMsgs.push(m);
+                      }
+                      const startDivider = batchDividerByIdx.get(r.startIdx);
+                      out.push(
+                        <Fragment key={`tb-${r.b.id}`}>
+                          {startDivider && <CompactDivider marks={startDivider} />}
+                          <TaskBoundaryCard
+                            boundary={r.b}
+                            files={filesByBoundaryId.get(r.b.id) ?? []}
+                            onOpenFile={handleOpenBoundaryFile}
+                            childCount={rangeMsgs.length}
+                          >
+                            {rangeMsgs.map((m) => renderBubble(m))}
+                          </TaskBoundaryCard>
+                        </Fragment>,
+                      );
+                      i = r.endIdx + 1;
+                    } else {
+                      const msg: any = messages[i];
+                      if (msg.role !== 'tool') {
+                        const divider = batchDividerByIdx.get(i);
+                        out.push(
+                          <Fragment key={msg.id}>
+                            {divider && <CompactDivider marks={divider} />}
+                            {renderBubble(msg)}
+                          </Fragment>,
+                        );
+                      }
+                      i++;
+                    }
+                  }
+                  return out;
+                })()}
               </>
             )}
-            {/* ★ task_boundary 兜底：anchor 消息已不在可见列表（回溯截断 / 缺 anchor）的边界渲染在末尾，不丢卡片；
-                正常情况边界都已按 anchorMessageId 内联在对应消息后。 */}
-            {conversation.taskBoundaries?.filter((b: any) => !b.anchorMessageId || !messages.some((m: any) => m.id === b.anchorMessageId)).map((b: any) => (
-              <TaskBoundaryCard key={b.id} boundary={b} />
+            {/* ★ task_boundary 兜底：anchor 已不在消息列表的孤儿边界（回溯截断残留等）渲染为无消息体卡片，不丢信息。 */}
+            {taskBoundaryRender.orphans.map((b: any) => (
+              <TaskBoundaryCard key={b.id} boundary={b} childCount={0} />
             ))}
             <div ref={messagesEndRef} />
           </>

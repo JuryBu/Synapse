@@ -34,6 +34,8 @@ import {
   setRecordLayering,
   setBpc,
   setContextWindowOverride,
+  setTaskBoundaryEnabled,
+  setHideSystemToolCalls,
   DEFAULT_BPC_CONFIG,
 } from '@/store/slices/agentSettings';
 import type { WallpaperImage } from '@/store/slices/agentSettings';
@@ -970,14 +972,18 @@ export function SettingsPanel() {
                 <div className="setting-item" style={{ marginTop: 8 }}>
                   <label>上下文窗口（token）</label>
                   <input
+                    // ★ 性能/正确性（review MEDIUM）：非受控 + key 按模型重挂载 + onBlur/Enter 才提交——避免逐字
+                    //   dispatch 把半截值（2→20→200）即时写进全局 store 误触发压缩判断。切模型时 key 变 → 取新模型 override。
+                    key={selectedModelOption.id}
                     type="number"
                     min={1}
-                    value={agentSettings.contextWindowOverrides?.[selectedModelOption.id] ?? ''}
+                    defaultValue={agentSettings.contextWindowOverrides?.[selectedModelOption.id] ?? ''}
                     placeholder={`推断 ${getModelContextWindowForOption(selectedModelOption)}（留空=用推断值）`}
-                    onChange={(e) => {
+                    onBlur={(e) => {
                       const raw = e.target.value.trim();
                       dispatch(setContextWindowOverride({ modelId: selectedModelOption.id, value: raw ? Number(raw) : null }));
                     }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                   />
                   <span className="setting-hint">推断不准时手动改。覆盖后状态栏上下文占用、压缩阈值等所有用到上下文窗口的地方都按此值。</span>
                 </div>
@@ -1043,6 +1049,20 @@ export function SettingsPanel() {
               <span className="setting-hint">
                 {selectedCapabilities?.thinking === false ? '当前模型未声明支持 thinking' : '非流式返回 thinking 时按伪流式展开'}
               </span>
+            </div>
+            <div className="setting-item">
+              <label>任务边界卡片</label>
+              <input type="checkbox"
+                checked={agentSettings.taskBoundaryEnabled ?? true}
+                onChange={e => dispatch(setTaskBoundaryEnabled(e.target.checked))} />
+              <span className="setting-hint">Plan 模式下引导 AI 用任务卡（大标题+进度+已编辑文件）组织多步任务；关闭则不再生成新任务卡。</span>
+            </div>
+            <div className="setting-item">
+              <label>隐藏系统工具调用</label>
+              <input type="checkbox"
+                checked={agentSettings.hideSystemToolCalls ?? true}
+                onChange={e => dispatch(setHideSystemToolCalls(e.target.checked))} />
+              <span className="setting-hint">默认隐藏 show_artifact / 任务边界 / 工作区切换等元工具的调用卡片（它们已有专门卡片）。关掉看全部调用（调试用）。</span>
             </div>
             <div className="setting-item">
               <label>Top P</label>
