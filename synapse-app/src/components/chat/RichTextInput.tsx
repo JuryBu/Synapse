@@ -166,7 +166,12 @@ function RichTextInputInner(
       onInput={handleInput}
       onKeyDown={handleKeyDown}
       onPaste={handlePaste}
-      onCompositionStart={() => { isComposingRef.current = true; }}
+      onCompositionStart={() => {
+        isComposingRef.current = true;
+        // ★ M7 #3：IME 组合输入期间隐藏 placeholder——此时 contenteditable 已显示拼音/候选字符，
+        //   但 input 事件被 isComposing 守卫跳过、data-empty 仍是 true，placeholder 会和拼音字符重叠。
+        if (editorRef.current) editorRef.current.dataset.empty = 'false';
+      }}
       onCompositionEnd={() => {
         isComposingRef.current = false;
         editorRef.current?.normalize(); // P1：合并 IME 拆开的相邻文本节点，再触发检测
