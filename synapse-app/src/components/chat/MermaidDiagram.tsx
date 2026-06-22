@@ -31,6 +31,14 @@ const MIN_SCALE = 0.1;
 const MAX_SCALE = 8;
 const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
 
+// ★ 图表加载性能：mermaid/DOMPurify 模块级单例 import（首次后复用，避免每个图表每次 render 重复 import 解析）；
+//   initialize 按 theme 缓存（只在首次/主题切换时跑，省去每图表每次 render 的重复全局初始化开销）。
+let _mermaidPromise: Promise<any> | null = null;
+let _dompurifyPromise: Promise<any> | null = null;
+let _mermaidInitedTheme: string | null = null;
+const loadMermaid = () => (_mermaidPromise ??= import('mermaid').then(m => m.default));
+const loadDOMPurify = () => (_dompurifyPromise ??= import('dompurify').then(m => m.default));
+
 /** 从 mermaid 输出的 svg 字符串解析自然尺寸（优先 viewBox，退化 width/height 属性，兼容 px/%/pt 单位）。 */
 function parseSvgSize(svg: string): { w: number; h: number } | null {
   const vb = svg.match(/viewBox="([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)"/);
@@ -57,22 +65,26 @@ export function MermaidDiagram({ code, pending }: { code: string; pending?: bool
     let cancelled = false;
     (async () => {
       try {
-        const mermaid = (await import('mermaid')).default;
-        const DOMPurify = (await import('dompurify')).default;
+        const mermaid = await loadMermaid();
+        const DOMPurify = await loadDOMPurify();
         const isLight = resolvedTheme === 'light';
-        mermaid.initialize({
-          startOnLoad: false,
-          theme: isLight ? 'default' : 'dark',
-          securityLevel: 'strict',
-          // 节点文字用 SVG <text> 而非 foreignObject(HTML)，避免被 DOMPurify svg profile 清成「只剩框」。
-          htmlLabels: false,
-          // useMaxWidth:false → svg 输出固定 px 宽高(=viewBox)，不再 width="100%" 自适应，
-          //   让 parseSvgSize 拿到的 viewBox 尺寸 == 实际渲染尺寸，fit-to-contain 计算才准。
-          flowchart: { htmlLabels: false, useMaxWidth: false },
-          themeVariables: isLight
-            ? { primaryColor: '#7c3aed', primaryTextColor: '#111827', lineColor: '#64748b', secondaryColor: '#eef1f7', tertiaryColor: '#f6f7fb' }
-            : { primaryColor: '#8b5cf6', primaryTextColor: '#e2e8f0', lineColor: '#64748b', secondaryColor: '#1e293b', tertiaryColor: '#0f172a' },
-        });
+        const themeKey = isLight ? 'light' : 'dark';
+        // initialize 按 theme 缓存——只首次/主题切换时跑（mermaid.initialize 是全局配置，每图表每次 render 重复跑纯浪费）。
+        //   节点文字用 SVG <text> 而非 foreignObject(HTML)（避免被 DOMPurify svg profile 清成「只剩框」）；
+        //   useMaxWidth:false 让 svg 输出固定 px 宽高(=viewBox)，fit-to-contain 计算才准。
+        if (_mermaidInitedTheme !== themeKey) {
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: isLight ? 'default' : 'dark',
+            securityLevel: 'strict',
+            htmlLabels: false,
+            flowchart: { htmlLabels: false, useMaxWidth: false },
+            themeVariables: isLight
+              ? { primaryColor: '#7c3aed', primaryTextColor: '#111827', lineColor: '#64748b', secondaryColor: '#eef1f7', tertiaryColor: '#f6f7fb' }
+              : { primaryColor: '#8b5cf6', primaryTextColor: '#e2e8f0', lineColor: '#64748b', secondaryColor: '#1e293b', tertiaryColor: '#0f172a' },
+          });
+          _mermaidInitedTheme = themeKey;
+        }
         // 先 parse 预校验（不抛）。
         const valid = await mermaid.parse(code, { suppressErrors: true });
         if (!valid) {
