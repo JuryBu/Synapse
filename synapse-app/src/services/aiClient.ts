@@ -207,6 +207,10 @@ export class AIClient {
   private config: AIClientConfig;
   private abortController: AbortController | null = null;
   private _isStreaming = false;
+  // ★ P0-2 根因B 加固：用户主动 stop 的显式标志。abort() 会把 abortController 置 null，
+  //   此后 `this.abortController?.signal.aborted` 经 ?. 短路成 undefined，classifyError 拿不到「已中止」，
+  //   极端时机下可能把用户主动停误判成网络错而重试。该标志独立于 abortController 生命周期，永真兜底。
+  private _userAborted = false;
 
   constructor(config: AIClientConfig) {
     this.config = config;
@@ -225,9 +229,15 @@ export class AIClient {
   }
 
   abort() {
+    this._userAborted = true; // ★ P0-2：先置位，确保后续 classifyError 即使读不到 signal 也判 aborted。
     this.abortController?.abort();
     this.abortController = null;
     this._isStreaming = false;
+  }
+
+  /** P0-2：classifyError 用的「是否已被用户中止」统一口径——signal 与 _userAborted 取或，任一为真即中止。 */
+  private get aborted(): boolean {
+    return (this.abortController?.signal.aborted ?? false) || this._userAborted;
   }
 
   private buildBody(messages: ChatMessage[], tools: any[] | undefined, useStream: boolean): any {
@@ -449,6 +459,7 @@ export class AIClient {
     tools?: any[],
   ): AsyncGenerator<StreamChunk> {
     this._isStreaming = true;
+    this._userAborted = false; // ★ P0-2：每次新流开始清零，避免上一轮 stop 标志污染本轮重试判定。
     this.abortController = new AbortController();
     const strategy = this.config.outputStrategy ?? (this.config.stream === false ? 'off' : 'auto');
     const modelCanStream = this.config.stream !== false;
@@ -511,7 +522,7 @@ export class AIClient {
 
           // M4-8-S1：优先级② 用统一 classifyError 判定可重试性（替换散落的 429/5xx/404 分支）。
           // 把「被网关包装成 400/422 的上游故障」（body 命中特征词）纳入可重试 gateway_upstream，修真根因。
-          const cls = classifyError(status, errText, undefined, this.abortController?.signal.aborted);
+          const cls = classifyError(status, errText, undefined, this.aborted);
           if (cls.retryable) {
             retries++;
             if (retries <= maxRetries) {
@@ -552,6 +563,9 @@ export class AIClient {
         const decoder = new TextDecoder();
         let buffer = '';
         const toolCalls: Map<number, ToolCallRequest> = new Map();
+        // ★ P0-2 根因A：是否收到过服务器明确的结束信号（finish_reason 非空 或 [DONE]）。
+        //   用于在 reader 自然 done 时区分「正常完成」与「上游中途静默掐断」。
+        let sawFinish = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -592,7 +606,11 @@ export class AIClient {
                   },
                 };
               }
-              const delta = data.choices?.[0]?.delta;
+              // ★ P0-2 根因A：先捕获 finish_reason（OpenAI 标准在最后一个 chunk 给出，此时 delta 常为空对象 {}），
+              //   必须放在 `if (!delta) continue` 之前，否则空 delta 的结束 chunk 会被跳过、漏标 sawFinish。
+              const choice = data.choices?.[0];
+              if (choice?.finish_reason) sawFinish = true;
+              const delta = choice?.delta;
               if (!delta) continue;
 
               if (delta.content) {
@@ -629,7 +647,16 @@ export class AIClient {
           }
         }
 
-        // If we reach here without [DONE], emit done
+        // ★ P0-2 根因A（治本「回答说一半突然停」）：reader 自然返回 done=true 而非抛错。
+        //   若全程从未收到 finish_reason、也无 [DONE]，但已 yield 过实质内容（streamedAny）——
+        //   说明上游/网关在生成完成前【静默掐断】了连接（TCP 正常关闭，read 返回 done 不抛异常），
+        //   内容被截断。抛进下面 catch 当可重试网络错（重连重发 + resetContent），
+        //   而不是把半截内容当正常 done 收尾。
+        //   注：标准 OpenAI 兼容端点必发 [DONE] 或 finish_reason 之一；仅 streamedAny 时判定，空响应不误伤。
+        if (!sawFinish && streamedAny) {
+          throw new Error('STREAM_TRUNCATED: 上游在生成完成前中断连接（无 finish_reason/[DONE]）');
+        }
+        // 正常结束（端点不发 [DONE] 但给了 finish_reason，或合法空响应）。
         for (const tc of toolCalls.values()) {
           yield { type: 'tool_call', toolCall: tc, streamMode: 'real' };
         }
@@ -640,7 +667,7 @@ export class AIClient {
       } catch (err: any) {
         // M4-8-S1：fetch / 流读取异常统一进 classifyError。AbortError（含可中断退避抛出的）
         // 归为不可重试 aborted——绝不当网络错重试，杜绝 stop 触发重试死循环（Plan_5 风险三）。
-        const cls = classifyError(undefined, undefined, err?.name, this.abortController?.signal.aborted);
+        const cls = classifyError(undefined, undefined, err?.name, this.aborted);
         if (!cls.retryable) {
           // aborted：发 'aborted' 让 agentLoop 走中止收尾分支；其它不可重试（理论上 catch 这里只会是 abort）给文案。
           yield { type: 'error', error: cls.category === 'aborted' ? 'aborted' : (err?.message || cls.userMessage) };
@@ -684,7 +711,7 @@ export class AIClient {
         try {
           await this.retryableSleep(delay, this.abortController?.signal);
         } catch (sleepErr: any) {
-          const sleepCls = classifyError(undefined, undefined, sleepErr?.name, this.abortController?.signal.aborted);
+          const sleepCls = classifyError(undefined, undefined, sleepErr?.name, this.aborted);
           if (sleepCls.category === 'aborted') {
             yield { type: 'error', error: 'aborted', streamMode: 'real' };
             this._isStreaming = false;
