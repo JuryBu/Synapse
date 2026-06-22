@@ -429,12 +429,14 @@ toolRegistry.register({
     },
   },
 }, async (args, ctx) => {
-  const { fileSystem, getWorkspaceRootResolved } = await import('./fileSystem');
-  // ★ P0-1：改用 searchInWorkspace——Electron 下走主进程 file:search（磁盘递归 grep + 文件名匹配），
-  //   旧版 searchFiles 只查内存 3 层树 + Web 上传文件，真机里深层目录/未加载到内存的文件根本搜不到。
-  //   root 用「权威根」（活动 worktree 优先，否则已打开工作区），保证搜在用户真实工作区。
-  const root = await getWorkspaceRootResolved(ctx?.contextId);
-  const results = await fileSystem.searchInWorkspace(args.query, root ?? undefined);
+  const { fileSystem, resolveWorkspacePath } = await import('./fileSystem');
+  // ★ search 根与 list_dir 同口径（治「search_files 搜不到任何内容」）：用 resolveWorkspacePath 解析 args.path（缺省 '.'），
+  //   走主进程 file:search（磁盘递归 grep + 文件名匹配）。旧版用 getWorkspaceRootResolved——demo/未打开工作区时它把
+  //   /workspace 假路径视为无根返回 null → searchInWorkspace 回退内部 mock '/workspace'（磁盘不存在）→ 搜空；
+  //   而 list_dir 走 resolveWorkspacePath 能落到 process.cwd()（工程根）。统一为同口径，与 list_dir 落点一致。
+  const rawPath = (typeof args.path === 'string' && args.path.trim()) ? args.path.trim() : '.';
+  const root = await resolveWorkspacePath(rawPath, ctx?.contextId);
+  const results = await fileSystem.searchInWorkspace(args.query, root);
   if (!results || results.length === 0) {
     return `未找到匹配 "${args.query}" 的文件或内容`;
   }
