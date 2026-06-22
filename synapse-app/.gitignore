@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# AI 路径/工具验收测试时生成的临时 marker 文件（落工程根，非源码，勿入库）
+/tool_*.md
+/__synapse_tool_test*.md
