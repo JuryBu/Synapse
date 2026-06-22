@@ -1007,7 +1007,7 @@ export function AgentPanel() {
       //   AI 调 view_file/list_dir 时拿相对路径，fileSystem.resolveWorkspacePath 会按当前 worktree 解析；
       //   绝对路径仅作【dataset.value】用于内部 token 锚点，从不出现在 LLM payload。
       //   顺手做最小转义：剔除换行 / 控制字符（POSIX 文件名可能含 \n，防 prompt injection），并截断 4096 字。
-      const sanitizePath = (s: string) => s.replace(/[\r\n\t -]/g, ' ').slice(0, 4096);
+      const sanitizePath = (s: string) => s.replace(/[\u0000-\u001f]/g, ' ').slice(0, 4096);
       const lines = fileTokens.map(t => `- ${sanitizePath(t.displayLabel ?? t.value)}`).join('\n');
       blocks.push(`# 用户引用的文件 / 目录（按需用 view_file / list_dir 查看）\n${lines}`);
     }
