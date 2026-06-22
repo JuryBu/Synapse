@@ -274,7 +274,10 @@ export function AgentPanel() {
       const hit = endMap.get(eligibleCount);
       if (hit) {
         // 分隔线挂在「下一条消息之前」，即该批最后一条非-tool 消息的下一个下标。
-        const dividerIdx = idx + 1;
+        // ★ M6 验收 bug5：渲染列表已过滤 role==='tool'（工具结果只在 assistant 的 ToolCallCard 折叠显示），
+        //   若 idx+1 落在被过滤的 tool 消息上 divider 会随之丢失——故进位到下一条【非-tool】消息下标，保证 divider 仍挂可见消息前。
+        let dividerIdx = idx + 1;
+        while (dividerIdx < messages.length && (messages[dividerIdx] as any).role === 'tool') dividerIdx++;
         const existing = map.get(dividerIdx) ?? [];
         map.set(dividerIdx, [...existing, ...hit]);
       }
@@ -2003,7 +2006,13 @@ export function AgentPanel() {
               </div>
             ) : (
               <>
-                {messages.map((msg: any, idx: number) => (
+                {/* ★ M6 验收 bug5：先 map 出 {msg,idx} 再过滤 role==='tool'，保留【原始 store 下标】idx
+                    透传给 batchDividerByIdx/MessageBubble——工具结果只在 assistant 的 ToolCallCard（默认折叠）显示，
+                    不再渲染冗余的独立全展开 tool 消息。idx 保留真实下标，divider/回溯/分支按下标定位不错位。 */}
+                {messages
+                  .map((msg: any, idx: number) => ({ msg, idx }))
+                  .filter(({ msg }: { msg: any }) => msg.role !== 'tool')
+                  .map(({ msg, idx }: { msg: any; idx: number }) => (
                   <Fragment key={msg.id}>
                     {batchDividerByIdx.has(idx) && (
                       <CompactDivider marks={batchDividerByIdx.get(idx)!} />
