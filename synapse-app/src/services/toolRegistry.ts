@@ -996,3 +996,110 @@ function parseContextFiles(raw: unknown): string[] | undefined {
   }
   return undefined;
 }
+
+// --- Conversation 原文工具（M7-F2：读 Synapse 自己 SQLite 的历史对话完整原文）---
+// 背景：@对话 引用只注入【摘要】；AI 之前误用外置 mcp__memory-store__conversation_read_original
+//   （那是跨宿主记忆库，与 Synapse 本地对话是两套系统、conv-xxx ID 不互通）。这两个工具查 Synapse 自己的对话库。
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'list_conversations',
+    description:
+      '列出 Synapse 自己的历史对话（本地 SQLite，独立于外置 MCP memory-store，与那边 conv-xxx 不互通）。'
+      + '返回每条的 id / 标题 / 更新时间 / 末条消息预览。需要读某条历史对话的完整原文时，'
+      + '先用本工具拿到 id，再调 read_conversation。query 非空按关键词搜标题/内容，否则列最近的。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '搜索关键词（可选，搜标题/内容）；留空列最近对话' },
+        limit: { type: 'number', description: '返回条数上限（默认 20，最大 50）' },
+      },
+      required: [],
+    },
+  },
+}, async (args) => {
+  const query = typeof args.query === 'string' ? args.query.trim() : '';
+  const limit = Number.isFinite(Number(args.limit)) ? Math.max(1, Math.min(50, Number(args.limit))) : 20;
+  const { platform } = await import('@/platform');
+  let rows: any[] = [];
+  try {
+    rows = query
+      ? await platform.conversation.search(query, { limit })
+      : await platform.conversation.list({ limit });
+  } catch {
+    return '⚠️ 列出对话失败（平台接口异常）。';
+  }
+  if (!rows || rows.length === 0) return query ? `未找到匹配「${query}」的历史对话。` : '暂无历史对话。';
+  const fmtTime = (v: any) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    return new Date(n < 1e12 ? n * 1000 : n).toLocaleString();
+  };
+  const lines = rows.slice(0, limit).map((c, i) => {
+    const id = String(c.id ?? '');
+    const title = String(c.title ?? '未命名对话');
+    const t = fmtTime(c.updatedAt ?? c.updated_at);
+    const last = String(c.lastMessage ?? c.last_message ?? '').replace(/\s+/g, ' ').slice(0, 60);
+    return `${i + 1}. ${title} (id=${id}${t ? `, ${t}` : ''})${last ? ` — ${last}` : ''}`;
+  });
+  return `🗂 Synapse 历史对话（${lines.length} 条）:\n\n${lines.join('\n')}\n\n提示：用 read_conversation(conversationId) 读某条的完整原文。`;
+}, 'custom', 'auto', 'read');
+
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'read_conversation',
+    description:
+      '一字不差读取 Synapse 自己某条历史对话的完整原文（逐条 user/assistant/tool 消息）。'
+      + '⚠️ 这是 Synapse 本地 SQLite 的对话，独立于外置 MCP memory-store（conversation_read_original）——'
+      + '两者是不同系统、conv-xxx ID 不互通，读 Synapse 对话务必用本工具，不要用 memory-store 的。'
+      + '@对话 引用只注入摘要，需要完整原文时用本工具。conversationId 缺省读当前对话；内容超长按 maxChars 截断。',
+    parameters: {
+      type: 'object',
+      properties: {
+        conversationId: { type: 'string', description: '对话 ID（取自 list_conversations / @对话候选；缺省读当前对话）' },
+        maxChars: { type: 'number', description: '返回原文字符上限（默认 24000，最大 60000，防撑爆上下文）' },
+      },
+      required: [],
+    },
+  },
+}, async (args) => {
+  const { platform } = await import('@/platform');
+  const { store } = await import('@/store');
+  const { AUTOSAVE_ID } = await import('./conversationPersistence');
+  const conversationId =
+    (typeof args.conversationId === 'string' && args.conversationId.trim())
+      ? args.conversationId.trim()
+      : (((store.getState() as any)?.conversation?.id as string | null) || AUTOSAVE_ID);
+  const maxChars = Number.isFinite(Number(args.maxChars)) ? Math.max(2000, Math.min(60000, Number(args.maxChars))) : 24000;
+  let msgs: any[] = [];
+  try {
+    msgs = await platform.conversation.listMessages(conversationId);
+  } catch {
+    return `⚠️ 读取对话 ${conversationId} 失败（平台接口异常）。`;
+  }
+  if (!msgs || msgs.length === 0) return `对话 ${conversationId} 无消息记录（id 可能有误，可先用 list_conversations 确认）。`;
+  const roleLabel: Record<string, string> = { user: '用户', assistant: 'AI', tool: '工具结果', system: '系统' };
+  const parts: string[] = [];
+  let used = 0;
+  let truncated = false;
+  for (const m of msgs) {
+    const role = roleLabel[String(m.role)] ?? String(m.role);
+    let text = typeof m.content === 'string' ? m.content : '';
+    // 多模态：content 为空但有 contentParts 时取 text part 拼接
+    if (!text && Array.isArray(m.contentParts)) {
+      text = m.contentParts.filter((p: any) => p?.type === 'text').map((p: any) => p.text ?? '').join('\n');
+    }
+    const tools = Array.isArray(m.toolCalls) && m.toolCalls.length
+      ? `\n  [工具调用: ${m.toolCalls.map((t: any) => t?.name ?? '?').join(', ')}]`
+      : '';
+    const block = `【${role}】${text}${tools}`;
+    if (used + block.length > maxChars) { truncated = true; break; }
+    parts.push(block);
+    used += block.length;
+  }
+  const header = `📖 对话「${conversationId}」完整原文（${parts.length}/${msgs.length} 条消息）:`;
+  const footer = truncated ? `\n\n…（已达 ${maxChars} 字上限截断，共 ${msgs.length} 条消息。需要更多请提高 maxChars。）` : '';
+  return `${header}\n\n${parts.join('\n\n')}${footer}`;
+}, 'custom', 'auto', 'read');
