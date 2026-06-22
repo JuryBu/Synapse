@@ -17,6 +17,25 @@
 
 主人真机验证待跑（清单见主文档「M7 治理小本本」+ 本文件第四章测试点）。
 
+## 📌 第二轮真机验收（2026-06-22，主人逐功能点测后报 10 问题）→ 修复批
+
+调研 workflow `wgrr260oc`（6 路根因）。已修 9 项 + #7，剩 #8（可选）+ C2c（待验证）。
+
+| commit | 修了什么 |
+|---|---|
+| **bbe70d5** C1 | #1 @选文件 token 跑到工作区列表（insertTokenAtTrigger 跨容器 Range）+ #9 自动标题没同步列表/落库 |
+| **bfb10ba** C2a | #3 滚动争抢（贴底守卫）+ #2 全屏（min-height:0）+ #4 满屏 blur GPU（壁纸门控） |
+| **f60b65b** C2b | #4 卡顿大头：MessageBubble React.memo + attachments WeakMap 缓存（流式只重渲当前条） |
+| **fa6f4ad** C3a | #6 已发消息 @ 高亮还原（buildRichParts 只读 chip）+ #10 placeholder 撑高（绝对定位单行省略） |
+| **1a2efba** C3b | #5 工具结果收进 ToolCallCard 折叠（过滤 role=tool 保留真实 idx） |
+| **121d355** C3c | #7 token：gpt 系 gpt-tokenizer o200k 精确、非 gpt 标注 ≈估算 |
+
+### 剩余（M7 / 待定）
+
+- [ ] **#8 空格 @ 输入框态（可选增强）**：主人提的「@ 后进专门输入框、随便输入带空格、点完成」交互。反重力也无此能力，优先级低。当前空格直接退出 @ 匹配（可接受）。
+- [ ] **C2c 流式深优化（待主人验证后定）**：rAF dispatch 批处理（纯优化，有丢尾段风险）+ markdown 延迟解析（流式期纯文本、生成完渲染，有视觉降级）。主人决定「先刷新验证 memo+blur 够不够，够了就不做」。
+- [ ] **AgentPanel.tsx null 字节隐患**：文件 offset ~61755 处有个 `\0` 字符，导致 grep/ripgrep 把它当二进制文件跳过（CC Grep/Bash grep 对该文件失效，只能用 PowerShell Select-String / Read）。编译/运行不受影响（应在某字符串/注释里）。待定位清理。
+
 ## 一、范围（4 项）
 
 | 项 | 主题 | verdict | 优先级 |
