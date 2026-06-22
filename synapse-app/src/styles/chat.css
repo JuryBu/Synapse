@@ -412,6 +412,13 @@
   display: inline;
 }
 
+/* show_artifact 产物卡片（AI 主动推的「打开这个已存在文件」入口，仿 file-change-chip） */
+.message-artifacts { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+.artifact-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--syn-border); border-radius: 8px; background: var(--syn-overlay-soft); color: var(--syn-text-secondary); font-size: 12px; cursor: pointer; transition: all 0.12s ease; }
+.artifact-chip:hover { color: var(--syn-text-primary); border-color: var(--syn-primary); background: var(--syn-overlay-medium); }
+.artifact-chip strong { color: var(--syn-text-primary); font-weight: 600; }
+.artifact-chip .artifact-open { display: inline-flex; align-items: center; gap: 3px; margin-left: 4px; font-size: 11px; color: var(--syn-primary-light); }
+
 /* Tool Result Card */
 .message-file-changes {
   display: flex;

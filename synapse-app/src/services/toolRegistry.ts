@@ -5,6 +5,8 @@
  */
 
 import { buildDiffHunks, countLineChanges, generateChangeId, hashContent, recordTrackedFileChange } from './fileChangeTracker';
+import { recordTrackedArtifact } from './artifactTracker';
+import { resolveEditorType } from './editorFileTypes';
 
 export interface ToolSchema {
   type: 'function';
@@ -248,6 +250,61 @@ toolRegistry.register({
 
   return `文件: ${args.path} (行 ${start + 1}-${end}/${lines.length})\n\n${slice.join('\n')}`;
 }, 'file', 'read', 'read');
+
+// show_artifact：把一个【已存在的文件】作为「产物卡片」推给用户——用户点卡片即在中部编辑器打开。
+//   是 view_file 的展示型孪生：view_file 把文件内容回给 AI，show_artifact 则在 UI 给用户一张可点开的卡片。
+//   只展示已存在文件、绝不写盘 → approval=auto（无需审批）、permissionCategory=read。
+//   handler 校验文件存在（复用 view_file 的 fileSystem.readFile + worktree/相对路径口径，只确认存在不读全文用途）、
+//   预解析 editorType（resolveEditorType 按扩展名），record 到 artifactTracker 当前桶，由 agentLoop 收口消费。
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'show_artifact',
+    description:
+      '把一个【已存在的文件】作为「产物卡片」展示给用户——用户点击卡片即可在中部编辑器中打开该文件。'
+      + '适用于：你刚为用户准备好/生成好一个文件（文档、代码、图片、PDF、网页等），想让用户一键打开查看。'
+      + '注意：这只是展示一个【已经存在】的文件的入口，不会创建或修改任何文件（创建/修改请用 write_to_file）。'
+      + 'path 为文件路径；label 可选，是卡片上显示的名字（不填则取文件名）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '要展示的【已存在文件】的路径' },
+        label: { type: 'string', description: '卡片显示名（可选，缺省取文件名）' },
+      },
+      required: ['path'],
+    },
+  },
+}, async (args, ctx) => {
+  const path = typeof args.path === 'string' ? args.path.trim() : '';
+  if (!path) return '⚠️ show_artifact 需要有效的 path（要展示的已存在文件路径）。';
+
+  const { fileSystem } = await import('./fileSystem');
+  // 复用 view_file 的读取口径（worktree 重定向 / 相对路径锚工作区根），只为确认文件存在——
+  //   读到内容、且不是 Web 模式「文件内容预览:」占位串，即视为存在（与 write_to_file 的存在判定口径一致）。
+  let content = '';
+  try {
+    content = await fileSystem.readFile(path, ctx?.contextId);
+  } catch {
+    return `文件不存在或无法读取: ${path}`;
+  }
+  if (!content || content.startsWith('// 文件内容预览:')) {
+    return `文件不存在或无法读取: ${path}`;
+  }
+
+  const fileName = path.split(/[\\/]/).pop() || path;
+  const label = (typeof args.label === 'string' && args.label.trim()) ? args.label.trim() : fileName;
+  // editorType 预解析：让用户点开时直接走对的查看器（office/pdf/image/markdown/html…），而非一律按 code 打开。
+  const editorType = resolveEditorType(fileName);
+
+  recordTrackedArtifact({
+    id: generateChangeId('artifact'),
+    path,
+    label,
+    editorType,
+  }, ctx?.contextId);
+
+  return `✅ 已把产物卡片推送给用户: ${label}（${path}）。用户可点击卡片在编辑器中打开。`;
+}, 'file', 'auto', 'read');
 
 toolRegistry.register({
   type: 'function',

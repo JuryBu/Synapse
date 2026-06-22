@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, ListChecks, Undo2, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
+import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, FileText, ExternalLink, ListChecks, Undo2, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
 import { memo, useDeferredValue, useState, useCallback, useEffect, useRef } from 'react';
 import { ToolCallCard } from './ToolCallCard';
 import { WorkflowCard } from './WorkflowCard';
@@ -31,6 +31,15 @@ interface FileDiffInfo {
   additions: number;
   deletions: number;
   status: 'pending' | 'accepted' | 'rejected' | 'mixed' | 'superseded';
+}
+
+// ★ show_artifact：产物卡片渲染信息（与 store 的 MessageArtifact 对齐的最小子集；editorType 仅决定卡片图标，
+//   实际打开走 AgentPanel.handleOpenArtifact 用 store 里的 editorType）。
+interface ArtifactInfo {
+  id: string;
+  path: string;
+  label: string;
+  editorType?: 'code' | 'pdf' | 'office' | 'markdown' | 'html' | 'image' | 'video';
 }
 
 interface ThinkingInfo {
@@ -80,11 +89,15 @@ interface MessageProps {
   richTokens?: ExtractedToken[];
   toolCalls?: ToolCallInfo[];
   diffs?: FileDiffInfo[];
+  // ★ show_artifact：AI 主动推的产物卡片（指向已存在文件，点开即在编辑器打开）。
+  artifacts?: ArtifactInfo[];
   // ★ M3-3a：@MultiAI 工作流汇总消息关联的运行实例 id；有则在消息体渲染实时四色 <WorkflowCard/>，
   //   纯文本 content 作为可折叠 fallback。
   workflowRunId?: string;
   onReviewChanges?: () => void;
   onOpenDiff?: (diff: FileDiffInfo) => void;
+  // ★ show_artifact：点击产物卡片 → 在中部编辑器打开该文件（由 AgentPanel 实装 handleOpenArtifact）。
+  onOpenArtifact?: (artifact: ArtifactInfo) => void;
   // ★ M4-3-S3：点击已发附件——图片走预览模态、文档走编辑器 attachment tab（由 AgentPanel 实装）。
   onOpenAttachment?: (att: AttachmentInfo) => void;
   onUndoToMessage?: (id: string) => void;
@@ -143,7 +156,7 @@ function formatBytes(bytes?: number): string {
   return `${bytes} B`;
 }
 
-function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, reconnect, endToEndMs, thinking, attachments, richTokens, toolCalls, diffs, workflowRunId, onReviewChanges, onOpenDiff, onOpenAttachment, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
+function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, streamState, streamMode, fallbackReason, showStreamCursor = true, showGeneratingPlaceholder = true, durationMs, reconnect, endToEndMs, thinking, attachments, richTokens, toolCalls, diffs, artifacts, workflowRunId, onReviewChanges, onOpenDiff, onOpenArtifact, onOpenAttachment, onUndoToMessage, onEdit, onRetry, onDelete, onBranch }: MessageProps) {
   const [copied, setCopied] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -570,6 +583,27 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
                   <span className="message-attachment-name">{att.name}</span>
                   <small>{att.error || formatBytes(att.size)}</small>
                 </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ★ show_artifact：AI 主动推的产物卡片（点开即在中部编辑器打开已存在文件），与 diffs 并列。 */}
+        {artifacts && artifacts.length > 0 && (
+          <div className="message-artifacts">
+            {artifacts.map(art => {
+              const fileName = art.label || art.path.split(/[\\/]/).pop() || art.path;
+              return (
+                <button
+                  key={art.id}
+                  className="artifact-chip"
+                  onClick={() => onOpenArtifact?.(art)}
+                  title={art.path}
+                >
+                  <FileText size={14} />
+                  <strong>{fileName}</strong>
+                  <span className="artifact-open"><ExternalLink size={12} />打开</span>
+                </button>
               );
             })}
           </div>

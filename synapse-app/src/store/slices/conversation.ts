@@ -1,5 +1,6 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import type { ExtractedToken } from '@/services/inputCommands/richInput/types';
+import type { EditorFileType } from '@/services/editorFileTypes';
 
 // M2-R6 附件引用层：image_url / file part 内联 base64 不再落库/发送，统一以 sha256 内容寻址引用。
 //   - sha256：put 返回的内容地址，落库/发送的唯一权威；url/data 是【内存态即时预览】(blobURL/dataUrl)，落库前必清。
@@ -37,6 +38,22 @@ export interface ThinkingBlock {
 
 export type StreamState = 'idle' | 'pending' | 'streaming' | 'complete' | 'error' | 'aborted';
 export type StreamModeUsed = 'real' | 'pseudo' | 'off';
+
+/**
+ * ★ show_artifact：AI 主动推给用户的「产物卡片」——指向一个【已存在的文件】，用户点卡片在中部编辑器打开。
+ *   是 FileDiffSummary（文件改动 diff chip）的孪生体，但更简单：只承载「打开这个文件」所需的最小信息，
+ *   不含 diff/snapshot/行数统计（产物只展示已存在文件，工具不写盘）。
+ *   - path：文件路径（工具 handler 记录时的原始路径，打开链路据此 openTab）。
+ *   - label：卡片显示名（缺省取文件名）。
+ *   - editorType：handler 预解析的编辑器类型（resolveEditorType 按扩展名判定），打开时直接用对的查看器
+ *     （office/pdf/image 等），避免一律按 'code' 打开。旧数据/未解析时 undefined → 打开链路兜底 'code'。
+ */
+export interface MessageArtifact {
+  id: string;
+  path: string;
+  label: string;
+  editorType?: EditorFileType;
+}
 
 export interface FileDiffSummary {
   id: string;
@@ -156,6 +173,12 @@ export interface Message {
   runId?: string;
   runEvents?: AssistantRunEvent[];
   diffs?: FileDiffSummary[];
+  /**
+   * ★ show_artifact：本消息附带的产物卡片（AI 主动推的「已存在文件」入口）。与 diffs 并列、互不影响——
+   *   diffs 是 AI 改动的文件（带 diff/审阅），artifacts 只是 AI 让用户「看一眼这个已存在文件」（点开即在编辑器打开）。
+   *   消费链由 agentLoop 紧挨 consumeTrackedFileChanges 处 consumeTrackedArtifacts + dispatch addMessageArtifact。
+   */
+  artifacts?: MessageArtifact[];
   rollbackSnapshotId?: string;
   error?: string;
   /**
@@ -509,6 +532,16 @@ export const conversationSlice = createSlice({
       }
       state.pendingDiffs.push(normalizeDiff(action.payload.diff));
     },
+    /**
+     * ★ show_artifact：把一张产物卡片挂到指定消息上（孪生 addMessageDiff，但更简单——
+     *   artifact 无审阅态，故不入 pendingDiffs，只追加到该消息的 artifacts 列表）。
+     */
+    addMessageArtifact(state, action: PayloadAction<{ messageId: string; artifact: MessageArtifact }>) {
+      const msg = state.messages.find(m => m.id === action.payload.messageId);
+      if (msg) {
+        msg.artifacts = [...(msg.artifacts ?? []), action.payload.artifact];
+      }
+    },
     updateDiffStatus(state, action: PayloadAction<{ diffId: string; status: FileDiffSummary['status'] }>) {
       const applyStatus = (diff: FileDiffSummary): FileDiffSummary => {
         if (diff.id !== action.payload.diffId) return diff;
@@ -724,7 +757,7 @@ export const {
   setBpcThresholdOverride, setCompactThresholdOverride, addMessage, updateMessage,
   updateMessageMeta, appendMessageContent, setMessageAttachments,
   appendMessageThinking, setMessageStreamState, setMessageReconnect,
-  addMessageDiff, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,
+  addMessageDiff, addMessageArtifact, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,
   setStreaming, appendStreamingContent, clearStreamingContent,
   setModel, setTokenUsage, setPendingMessage, clearConversation, setTitle,
   editMessage, truncateAt, deleteMessage, clearMessages, updateToolCallStatus,

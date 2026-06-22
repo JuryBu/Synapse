@@ -9,7 +9,7 @@ import {
   addMessage, updateMessage, updateMessageMeta, appendMessageContent,
   appendMessageThinking, setMessageStreamState, setMessageReconnect, setStreaming,
   clearStreamingContent, setTitle, setTokenUsage,
-  addAssistantRun, addRunEvent, addMessageDiff, recordFileSnapshot, updateToolCallStatus,
+  addAssistantRun, addRunEvent, addMessageDiff, addMessageArtifact, recordFileSnapshot, updateToolCallStatus,
   type AttachmentRef, type MessageContentPart, type StreamModeUsed,
 } from '../store/slices/conversation';
 import { setConnectionStatus, type RecordLayeringConfig } from '../store/slices/agentSettings';
@@ -23,6 +23,7 @@ import { AUTOSAVE_ID, saveAutosaveSnapshot, renameConversation } from './convers
 import { updateConversation } from '../store/slices/conversationHistory';
 import { generateId } from './ids';
 import { consumeTrackedFileChanges } from './fileChangeTracker';
+import { consumeTrackedArtifacts } from './artifactTracker';
 import { restoreApiMessagesAttachments, chatContentToTextWithPlaceholder } from './attachmentRefs';
 import { getModelContextWindow } from '../store/selectors/modelSelectors';
 import { bpcScheduler } from './bpcScheduler';
@@ -1389,6 +1390,14 @@ export class AgentLoop {
                 timestamp: Date.now(),
                 diffId: change.diff.id,
               }));
+            }
+            // ★ show_artifact：与文件改动同口径——按 execContextId 消费自己桶的产物卡片，挂到当前 assistant 消息上。
+            //   artifact 只是「打开已存在文件」的入口（无 diff/snapshot/审阅），故只 addMessageArtifact，不发 file_change 事件。
+            const artifacts = consumeTrackedArtifacts(execContextId);
+            for (const artifact of artifacts) {
+              if (assistantMessageId) {
+                store.dispatch(addMessageArtifact({ messageId: assistantMessageId, artifact }));
+              }
             }
 
             store.dispatch(addMessage({

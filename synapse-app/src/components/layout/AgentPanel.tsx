@@ -1545,6 +1545,18 @@ export function AgentPanel() {
     }));
   }, [dispatch]);
 
+  // ★ show_artifact：点产物卡片 → 在中部编辑器打开该文件（与 openDiffTarget 同款，EditorArea 按扩展名自动选 viewer）。
+  const openArtifactTarget = useCallback((artifact: { path: string }) => {
+    dispatch(openTab({
+      id: `tab-${Date.now()}`,
+      filePath: artifact.path,
+      fileName: artifact.path.split(/[\\/]/).pop() || artifact.path,
+      isDirty: false,
+      isPreview: true,
+      type: 'code',
+    }));
+  }, [dispatch]);
+
   // ★ C6/去重：handleEditorKeyDown 移入 useAtMention hook（onSubmit=handleSend 经 handleSendRef 破环）。
   //   handleSend 已定义，回填 handleSendRef 供 hook 的提交回调调用最新实现。
   handleSendRef.current = handleSend;
@@ -2081,9 +2093,11 @@ export function AgentPanel() {
                     richTokens={(msg as any).richTokens}
                     toolCalls={(msg as any).toolCalls}
                     diffs={(msg as any).diffs}
+                    artifacts={(msg as any).artifacts}
                     workflowRunId={(msg as any).workflowRunId}
                     onReviewChanges={openReviewChanges}
                     onOpenDiff={openDiffTarget}
+                    onOpenArtifact={openArtifactTarget}
                     onOpenAttachment={handleOpenAttachment}
                     onUndoToMessage={handleUndoToMessage}
                     onEdit={handleEdit}
