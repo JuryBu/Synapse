@@ -80,10 +80,11 @@ export function resolveWorkflowMode(modeName: string): ResolveModeResult {
   const state = store.getState() as any;
   const modes: MultiAIMode[] = state?.multiAI?.modes ?? [];
   const lower = name.toLowerCase();
-  // 先按 name 不区分大小写精确匹配，再按 id 精确匹配。
+  // M6 收尾 C2/LOW-2：优先级反转为 id → name。原因：富文本 atomic token 的 plainText 占位用 mode.id
+  // （英文 slug，无空格），所以 id 命中是主路径；name 匹配仅兼容【用户手打 `@MultiAI:模式名 ...`】的旧语法。
   const matched =
-    modes.find(m => m.name.toLowerCase() === lower) ??
-    modes.find(m => m.id === name);
+    modes.find(m => m.id === name) ??
+    modes.find(m => m.name.toLowerCase() === lower);
 
   if (!matched) {
     const workflowModeNames = modes

@@ -109,14 +109,18 @@ function flattenTree(
     if (!isRoot && node.type === wantType) {
       const rel = toRelative(node.path, rootPath);
       if (fuzzyMatch(query, [node.name, rel, node.path])) {
-        // directory 的 value 末尾补 `/`（与文件区分，复刻路径目录语义）。
-        const value = wantType === 'directory' ? `${rel.replace(/\/+$/, '')}/` : rel;
+        // M6 收尾 C2/联动②：token.value 收敛为【绝对路径】（normSlash 归一）——下游 AI 调 view_file/list_dir
+        // 拿绝对路径直查，避「无活动 worktree 时回落 process.cwd → 读到 Synapse 自身源码」高优 bug。
+        // displayLabel = 相对路径（菜单/pill 仍是 @src/foo.ts 可读形态），dataset.label 同步存。
+        const absNorm = normSlash(node.path);
+        const value = wantType === 'directory' ? `${absNorm.replace(/\/+$/, '')}/` : absNorm;
+        const displayLabel = rel || node.name;
         out.push({
           id: `at-${wantType}-${node.path}`,
           label: node.name,
           description: rel || undefined,
           group: GROUP_BY_TYPE[wantType],
-          meta: { type: wantType, id: node.path, value },
+          meta: { type: wantType, id: node.path, value, displayLabel },
         });
         if (out.length >= limit) return;
       }
@@ -208,12 +212,23 @@ export async function fetchTypeItems(
       );
 
     case 'workflow':
-      // 复用 atSources；token id = modeName，value = mode.name（label 同 name）。
-      return withTriple(
-        getWorkflowItems(query),
-        'workflow',
-        m => String(m.modeName ?? ''),
-      );
+      // M6 收尾 C2/LOW-2：token.value/id 用 mode.id（英文 slug，无空格），让 `@MultiAI:<id>` 占位
+      // 经 parseMultiAITrigger 的 `^(\S+)` 严格扫描不会截断。displayLabel = mode.name（含空格 OK，仅作 pill 显示）。
+      return getWorkflowItems(query).map(it => {
+        const meta = (it.meta ?? {}) as Record<string, unknown>;
+        const modeId = String(meta.modeId ?? '');
+        const modeName = String(meta.modeName ?? it.label);
+        return {
+          ...it,
+          meta: {
+            ...meta,
+            type: 'workflow' as const,
+            id: modeId || modeName, // 兜底：极端旧数据没 modeId 时退回 modeName（仍可能被截断，但功能不挂）
+            value: modeId || modeName,
+            displayLabel: modeName,
+          },
+        };
+      });
 
     case 'settings':
       // 复用 atSources；token id = sectionId，value = 设置项 label。

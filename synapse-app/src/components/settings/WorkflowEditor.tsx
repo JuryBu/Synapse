@@ -128,9 +128,11 @@ export function WorkflowEditor({ mode, availableModels, onSave, onCancel, onDele
   const [description, setDescription] = useState(mode.description ?? '');
   const [nodes, setNodes] = useState<WorkflowNode[]>(() => cloneWorkflow(mode.workflow));
 
+  // M6 收尾 C2/LOW-2：示例用 mode.id（英文 slug，无空格），与富文本 atomic token 的 plainText 占位口径一致。
+  // 旧 `@MultiAI:${name}` 语法仍兼容（resolveWorkflowMode id→name 双路径），但默认引导用户走 id 避空格截断。
   const triggerExample = useMemo(
-    () => `${MULTI_AI_TRIGGER_PREFIX}${name.trim() || '模式名'} 你的任务描述`,
-    [name],
+    () => `${MULTI_AI_TRIGGER_PREFIX}${mode.id || 'mode-id'} 你的任务描述`,
+    [mode.id],
   );
 
   // condition 作为首节点的轻提示（复用 runWorkflow 容错，UI 层只 warning）。

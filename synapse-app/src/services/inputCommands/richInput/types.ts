@@ -17,8 +17,22 @@ export interface TokenSpec {
   type: AtType;
   /** 稳定标识：conversationId / 文件绝对路径 / modeName / sectionId / mcp__server__tool / terminal sessionId。 */
   id: string;
-  /** 显示文本（不含前导 @），如 "Writing A Summer Story" / "src/fileSystem.ts"。 */
+  /**
+   * 持久化锚点 & 发送占位语义。
+   * - workflow：mode.id（英文 slug，无空格，避免 parseMultiAITrigger 截断）
+   * - file/directory：绝对路径（normSlash 归一），供 AI 直接调 view_file 不依赖 worktree 根
+   * - 其它（conv/settings/mcp/terminal）：可读语义，与显示文本同
+   * 这是 plainText 占位串 TOKEN_INLINE[type](value) 的实参，必须语义无歧义。
+   */
   value: string;
+  /**
+   * 可选显示文本（菜单 pill / 编辑器 atomic span textContent 用，不含前导 @）。
+   * - 当 value 不可读时（workflow 用 id / file 用绝对路径），用 displayLabel 还原人类可读形态
+   *   （如 mode.name 含空格 / 文件相对路径）。
+   * - 缺省时 createTokenSpan 自动回落到 value。
+   * - 持久化（D1）要落库，编辑回填重建 atomic span 才能保观感。
+   */
+  displayLabel?: string;
 }
 
 /** 发送时从编辑器有序提取的 token。 */

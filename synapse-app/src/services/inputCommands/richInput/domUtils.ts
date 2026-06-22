@@ -16,8 +16,13 @@ import { isAtType } from './types';
  *  extract 时整体 strip，不与用户真实空格混淆（对抗审查 P6）。用 fromCharCode 构造，源码里不出现不可见字符。 */
 export const ZWSP = String.fromCharCode(0x200b);
 
-/** token 在发送纯文本里的占位形态（语义沿用现有口径：对话/工作流/终端带前缀，文件/目录/MCP 直接 @）。 */
-const TOKEN_INLINE: Record<AtType, (value: string) => string> = {
+/**
+ * token 在发送纯文本里的占位形态（语义沿用现有口径：对话/工作流/终端带前缀，文件/目录/MCP 直接 @）。
+ * 收尾 C2：value 现已收敛为「持久化锚点」语义——workflow=mode.id（无空格）、file/dir=绝对路径，
+ * 让 parseMultiAITrigger 与下游工具调用拿到无歧义形态。
+ * export 出去供 buildRichParts（D1 编辑回填重组算法）复用同一份占位规则——单一真相源防漂移。
+ */
+export const TOKEN_INLINE: Record<AtType, (value: string) => string> = {
   file: (v) => `@${v}`,
   directory: (v) => `@${v}`,
   conversation: (v) => `@对话:${v}`,
@@ -27,7 +32,11 @@ const TOKEN_INLINE: Record<AtType, (value: string) => string> = {
   settings: () => '', // 设置是纯跳转，不进发送文本
 };
 
-/** 构造 atomic token span。textContent 赋值（自动转义，防对话标题里的 <img onerror> 等 XSS，P4）；type 白名单（P5）。 */
+/**
+ * 构造 atomic token span。textContent 赋值（自动转义，防对话标题里的 <img onerror> 等 XSS，P4）；type 白名单（P5）。
+ * 收尾 C2：textContent 改用 displayLabel ?? value 渲染（保人类可读观感），dataset.label 同步存 displayLabel；
+ * dataset.value 仍存「持久化锚点」（workflow=id / file=绝对路径），plainText 占位发送时用它走 TOKEN_INLINE。
+ */
 export function createTokenSpan(t: TokenSpec): HTMLSpanElement {
   const span = document.createElement('span');
   const type: AtType = isAtType(t.type) ? t.type : 'file';
@@ -36,8 +45,9 @@ export function createTokenSpan(t: TokenSpec): HTMLSpanElement {
   span.dataset.type = type;
   span.dataset.id = t.id;
   span.dataset.value = t.value;
+  if (t.displayLabel != null) span.dataset.label = t.displayLabel;
   span.contentEditable = 'false';
-  span.textContent = '@' + t.value;
+  span.textContent = '@' + (t.displayLabel ?? t.value);
   return span;
 }
 
@@ -134,7 +144,12 @@ export function extractContent(root: HTMLElement): ExtractResult {
         if (child.hasAttribute('data-token')) {
           const type = child.dataset.type;
           if (isAtType(type)) {
-            const tk: ExtractedToken = { type, id: child.dataset.id ?? '', value: child.dataset.value ?? '' };
+            const tk: ExtractedToken = {
+              type,
+              id: child.dataset.id ?? '',
+              value: child.dataset.value ?? '',
+              ...(child.dataset.label != null ? { displayLabel: child.dataset.label } : {}),
+            };
             tokens.push(tk);
             text += TOKEN_INLINE[type](tk.value);
           } else {

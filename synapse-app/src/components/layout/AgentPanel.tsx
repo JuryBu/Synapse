@@ -982,6 +982,8 @@ export function AgentPanel() {
     }
     const fileTokens = tokens.filter(t => t.type === 'file' || t.type === 'directory');
     if (fileTokens.length > 0) {
+      // M6 收尾 C2/联动②：t.value 现已收敛为【绝对路径】，注入清单里给 AI 直查的就是绝对路径，
+      // 避「无活动 worktree 时落 process.cwd 读到 Synapse 自身源码」的高优 bug。
       const lines = fileTokens.map(t => `- ${t.value}`).join('\n');
       blocks.push(`# 用户引用的文件 / 目录（按需用 view_file / list_dir 查看）\n${lines}`);
     }

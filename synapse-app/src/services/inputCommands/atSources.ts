@@ -82,7 +82,8 @@ export function getWorkflowItems(query: string): CompletionItem[] {
       label: m.name,
       description: truncate(m.description, DESC_MAX) || undefined,
       group: '工作流' as const,
-      meta: { modeName: m.name },
+      // M6 收尾 C2/LOW-2：meta 同时带 modeId（英文 slug，token.value 用）和 modeName（人类可读，displayLabel 用）。
+      meta: { modeName: m.name, modeId: m.id },
     }));
 }
 

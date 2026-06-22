@@ -167,8 +167,10 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, on
     const trigger = richRef.current?.getAtTrigger() ?? menu.trigger;
     const id = String(meta.id ?? '');
     const value = String(meta.value ?? item.label);
+    // M6 收尾 C2：透传 displayLabel（workflow=mode.name 含空格 / file=相对路径），让 pill 保人类可读；缺省回落 value。
+    const displayLabel = meta.displayLabel != null ? String(meta.displayLabel) : undefined;
     if (type && trigger && id) {
-      richRef.current?.insertTokenAt(trigger, { type, id, value });
+      richRef.current?.insertTokenAt(trigger, { type, id, value, ...(displayLabel != null ? { displayLabel } : {}) });
       onAfterMutate?.();
     }
     closeMenu();
