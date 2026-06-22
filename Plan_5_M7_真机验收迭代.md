@@ -118,4 +118,28 @@
 - [ ] **2-B 定时器收敛 / 3-B2 isMermaidFenceClosed 缓存**（降级：live timer 通常仅 1 个、fence 仅流式有图表时，收益小）。
 - [ ] **按消息缓存单条 token**（1-B 子代理提的更大优化，需改 store/类型层挂 token 缓存字段）。
 - [ ] **task_boundary gating 硬过滤**（schema 非 planning 不给工具）——现软引导，主人说「没问题」。
-- [ ] **sandbox / web-fetcher MCP + 原生读 office/pdf**（主人图6，「之后一定要做」）。
+- [x] **sandbox / web-fetcher MCP + 原生读 office/pdf**（主人图6，「之后一定要做」）：✅ 第六轮已做（详见下章）。
+
+## 五、第六轮（主人睡觉期间自主推进 + web-fetcher 连 electron CDP 自验）
+
+> 主人验收完玻璃后去睡，授权自主推进待办、别中断汇报、明早配合测试、多用 web-fetcher 连 electron 自验。
+
+### 已完成（CDP / 双编译自验）
+| 项 | 结论 |
+|---|---|
+| #153 输入框自动增高 | CDP 实测正常（空 38px → 8 行 195px 随内容增、到 max 200 封顶），不复现，早期版本问题已消 |
+| #154 中止后输入框无法输入 | 根因疑焦点丢失（RichTextInput 无 disabled、contenteditable 始终可编辑；Stop→Send 按钮切换后焦点丢）。handleStop 末尾 rAF focus 输入框。**待主人真机复测** |
+| #155 全局 tab 标题 | 第四轮全局列表标题修复已解决 + 主人第五轮确认「没问题」 |
+| #156 原生读 office/pdf 工具 | 新建 `documentExtract.ts`（pdf.js/mammoth extractRawText/jszip/SheetJS）+ toolRegistry `read_course_material` 填实 + `view_file` 识别二进制走提取。装 xlsx@0.18.5。双编译 EXIT 0 |
+| #157 sandbox/web-fetcher MCP 接入 | `~/.synapse/mcp_config.json` 两者 enabled:true。重启后 CDP 实测 server 全 running + 工具注册：**sandbox(8)/web-fetcher(32)/memory-store(11)** |
+
+### ⚠️ 待主人明早配合测试
+1. **office/pdf 读取**：开个真实 docx/pptx/pdf/xlsx，让 AI 调 `read_course_material` 或 `view_file` 读内容（我没现成 office 文件没法端到端测，只验了代码注册+编译）。
+2. **MCP 调用**：Plan 模式让 AI 调 sandbox 执行代码 / web-fetcher 抓网页截图。注意 sandbox 环境探测 **python/node=false**（你机器没装这俩 runtime）、bash=true——纯 bash/计算可用，跑 python/node 要先装环境；web-fetcher 的 AI 摘要走 codex/claude-code 链路。
+3. **#154 中止后输入**：发消息→中止→直接打字看能否输入。
+
+### 第六轮小本本
+- [ ] **#158 按消息缓存单条 token**（性能）：降级——你已反馈「非常流畅」，偶发小卡顿边际收益小 + 改 store/类型层有风险。明早你定是否要。
+- [ ] **xlsx@0.18.5 已知 CVE**（原型污染/ReDoS，SheetJS 旧版不在 npm 发新版）：本地文档读取攻击面有限、功能不受影响。明早你定换 exceljs / 忽略。
+- [ ] **MCP 路径硬编码**（mcp.ts 写死 `C:\Users\Stardust\.gemini\antigravity`）：自用无碍，分发要改。
+- [ ] **MCP request 默认 30s 超时**：web-fetcher 截图/sandbox 长任务可能超，实测频繁超时再放宽。
