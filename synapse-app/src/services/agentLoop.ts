@@ -1073,6 +1073,40 @@ export class AgentLoop {
         }
       };
 
+      // ★ M6 验收 C2c：流式 dispatch rAF 批处理。原本每个 SSE token 三连 dispatch
+      //   （appendMessageContent + setMessageStreamState + addRunEvent）把主线程打满——生成时整个界面卡死、
+      //   滚动条/选模型/思考卡片全锁死。改为累积 buffer + requestAnimationFrame 合并 flush，dispatch 频率从
+      //   「每 token」降到「每帧(~16ms)」。
+      //   ★ 关键安全点：finalize 用 updateMessageMeta 不覆盖 content（content 全靠流式 appendMessageContent 累积），
+      //     故所有收尾分支前必须 flushStreamBuffer() 把残余 buffer 上屏，否则丢末尾文本（见下方 try/catch 后）。
+      let contentBuffer = '';
+      let deltaBuffer = '';
+      let streamFlushScheduled = false;
+      const flushStreamBuffer = () => {
+        streamFlushScheduled = false;
+        if (!contentBuffer) return;
+        const pendingContent = contentBuffer;
+        const pendingDelta = deltaBuffer;
+        contentBuffer = '';
+        deltaBuffer = '';
+        store.dispatch(appendMessageContent({ id: assistantMessageId, content: pendingContent }));
+        store.dispatch(setMessageStreamState({ id: assistantMessageId, streamState: 'streaming', streamMode: streamModeUsed, fallbackReason }));
+        store.dispatch(addRunEvent({
+          id: generateId('evt'),
+          runId,
+          messageId: assistantMessageId,
+          type: 'content_delta',
+          timestamp: Date.now(),
+          content: pendingDelta,
+        }));
+      };
+      const scheduleStreamFlush = () => {
+        if (streamFlushScheduled) return;
+        streamFlushScheduled = true;
+        // 注：窗口最小化/后台时 rAF 被浏览器暂停 → buffer 累积，切回前台时一次性 flush（比每 token dispatch 更省）。
+        requestAnimationFrame(flushStreamBuffer);
+      };
+
       try {
         const stream = this.client.streamChat(
           apiMessages,
@@ -1108,6 +1142,8 @@ export class AgentLoop {
             // 让重试后的新流覆盖而非追加，杜绝「半截旧 + 完整新」拼接污染气泡与 conversation history。
             if (chunk.resetContent) {
               fullContent = '';
+              contentBuffer = ''; // ★ C2c：重连重置时清掉未 flush 的残余 buffer，避免旧内容污染重生成的新流
+              deltaBuffer = '';
               store.dispatch(updateMessage({ id: assistantMessageId, content: '' }));
               store.dispatch(updateMessageMeta({ id: assistantMessageId, changes: { thinking: undefined } }));
             }
@@ -1117,16 +1153,10 @@ export class AgentLoop {
           if (chunk.type === 'content' && chunk.content) {
             clearRetryNotice();
             fullContent += chunk.content;
-            store.dispatch(appendMessageContent({ id: assistantMessageId, content: chunk.content }));
-            store.dispatch(setMessageStreamState({ id: assistantMessageId, streamState: 'streaming', streamMode: streamModeUsed, fallbackReason }));
-            store.dispatch(addRunEvent({
-              id: generateId('evt'),
-              runId,
-              messageId: assistantMessageId,
-              type: 'content_delta',
-              timestamp: Date.now(),
-              content: chunk.content,
-            }));
+            // ★ C2c：不再每 token 三连 dispatch，累积进 buffer 由 rAF 合并 flush（见 flushStreamBuffer）。
+            contentBuffer += chunk.content;
+            deltaBuffer += chunk.content;
+            scheduleStreamFlush();
           }
           if (chunk.type === 'thinking' && chunk.thinking && showThinking) {
             clearRetryNotice();
@@ -1186,6 +1216,9 @@ export class AgentLoop {
         }));
       }
 
+      // ★ C2c 关键：收尾前强制 flush 残余 buffer——正常完成 / abort(break) / 异常(catch) 三条路径都经过这里，
+      //   finalize 不会用 fullContent 覆盖 content，所以这里不 flush 会丢「最后一帧没来得及 rAF 上屏」的末尾文本。
+      flushStreamBuffer();
       if (!this.running) wasAborted = true;
       store.dispatch(setStreaming(false));
       // M4-8-S3：本轮收尾兜底清气泡「reconnect i/N」（成功/失败/中止/异常任一路径都清，不残留）。

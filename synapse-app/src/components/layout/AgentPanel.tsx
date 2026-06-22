@@ -420,17 +420,20 @@ export function AgentPanel() {
     return () => { cancelled = true; loop.stop(); bpcScheduler.detachLoop(loop); };
   }, [aiClient, settings.safety]);
 
-  // ★ M6 验收 bug3：滚动容器监听——记录用户是否贴底（距底 < 80px 视为贴底）。用户主动上滚 → isAtBottom=false。
+  // ★ M6 验收 bug3：滚动容器监听——记录用户是否贴底（距底 < 60px 视为贴底）。用户主动上滚 → isAtBottom=false。
   const handleMessagesScroll = useCallback(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
-    isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   }, []);
 
-  // Auto-scroll to bottom：仅当用户已贴底才自动滚（不抢用户上滚）；生成期用 'auto' 瞬时滚（'smooth' 高频会争抢/卡顿）。
+  // Auto-scroll to bottom：仅当用户已贴底才自动滚（不抢用户上滚）。
+  // ★ M6 验收：直接设 scrollTop（而非 scrollIntoView）——后者会滚动所有可滚动祖先 + 触发 smooth 动画，
+  //   生成期高频调用时和用户拖动滚动条打架（表现为「拖动条锁死底部、拖不动」）。直接设目标容器 scrollTop 更精确可控。
   useEffect(() => {
     if (!isAtBottomRef.current) return;
-    messagesEndRef.current?.scrollIntoView({ behavior: isStreaming ? 'auto' : 'smooth' });
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages, isStreaming]);
 
   useEffect(() => {
