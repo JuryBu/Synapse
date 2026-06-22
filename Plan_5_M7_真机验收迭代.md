@@ -64,3 +64,24 @@
 - [ ] **#8 权限弹窗原生 UI → 前端化对齐**。
 - [ ] 工具补全：`search_web` 接真实 API、`read_url_content` 修、`read_course_material`/`generate_summary` 真解析（现占位）、`memory_delete` 工具。
 - [ ] **MermaidDiagram DOMPurify 配置冗余**（review low）：htmlLabels:false 已不产出 foreignObject，但 sanitize 仍开 html profile + ADD_TAGS foreignObject，轻微扩攻击面。当前保持现状（图表文字已验证正常，避免改动引入「只剩框」回归），后续可收紧为纯 svg profile 并真机回归。
+
+## 三、第三轮反馈批（已全部完成 + commit）
+
+| 项 | commit | 说明 |
+|---|---|---|
+| 命令中断转圈 → cancelled | `1dc4f86` | 中断/恢复时收尾未完成工具，ToolCallCard 加 cancelled 态 |
+| 模型参数门控 | `d543d02` | 不支持的参数不发请求体 |
+| 性能·ConversationList 断订阅 | `0ded3cd` | 断整 conversation 对象订阅，回调走 store.getState |
+| 权限弹窗前端化 | `715f974` | ApprovalDialog 玻璃浮层替代 window.confirm |
+| show_artifact 产物推送 | `7d922df` | AI 主动推产物卡片，点开在编辑器打开 |
+| search_files 搜不到 | `375cc04` | 搜索根与 list_dir 同口径（resolveWorkspacePath） |
+| **task_boundary 任务边界** | `fce7d97`/`0bdb591`/`1900e6c` | 数据层+持久化+4工具+卡片+历史变迁浮层+渲染+接线全链路 |
+| 工作区重启持久化 | `f176080` | persist workspace + Sidebar 启动恢复 fileSystem |
+| 图表加载提速 | `eb49c5d` | mermaid 模块级单例 + initialize 按 theme 缓存 |
+| 模型参数可单独改 | `49e5f63` | 上下文窗口手动覆盖，覆盖所有用 contextWindow 处 |
+
+### 第三轮小本本（待复核/后续）
+- [ ] **task_boundary 卡片渲染位置**：首版渲染在消息流【末尾】（所有边界堆底部）。反重力是按任务发生位置内联穿插——需 begin_task_boundary 时记 anchorMessageId（当前 assistant 消息），渲染按 anchor 插到对应消息后。首版能看到卡片 + 历史变迁，精确穿插待优化。
+- [ ] **task_boundary gating 软引导**：现仅靠 systemPrompt planning guidelines 引导（fast 模式 prompt 不提）+ agentSettings.taskBoundaryEnabled 开关（已存但 prompt gating 用 context.taskBoundaryEnabled，需 agentLoop 构造 context 时传入才完全生效）；硬 gating（schema 过滤非 planning 不给工具）+ SettingsPanel 开关 UI 待补。
+- [ ] **sandbox / web-fetcher MCP + 原生读 OFFICE/PDF**（主人图6，明确「之后一定要做」）：当前 sandbox 与 web-fetcher 尚未接；原生用什么库读 office/pdf 待定（现走 LibreOffice 转换 + pdf.js，但工具层未暴露给 AI）。
+- [ ] **task_boundary 回溯/编辑联动**（规范 §10.6）：回溯到第 N 轮时移除 startRound>N 的边界、跨越 N 的收口——属 M5-2 轮次联动层，未做。
