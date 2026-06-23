@@ -121,7 +121,8 @@
 - ✅ 批4：H4 归 tb 可选（settings 开关 + dispatchUserSend 发送前收口）+ 插话 queue（queuedMessages + 下降沿自动发 + 护栏①②③④ + 输入框上方排队区 UI）。子代理 ad11cda 做数据+逻辑层(质量高,工具预算到顶停)，主线补 UI 排队区+SettingsPanel 开关+css+护栏②确认（reducer 兜底）。双编译 EXIT 0
 - ✅ 批5a `f103d2e`：H5 同轮长时间干活注入提醒（round≥10 或 >2min 注入一次 system 提醒，flag 防重复+不破坏 prompt cache 前缀）
 - ✅ 批5b：H6 消息小标题+跳转导航（Message.subtitle + DB messages 表 ensureColumn 加列懒迁移 + IPC 20 列严格对齐 + agentLoop fire-and-forget 生成 + 导航 portal 浮层 + scrollToMessage 高亮 + 手改标题；排除 tb 内消息）。子代理 acd4e355 三步做完整，主线 review IPC 列对齐完美
-- 🎉 **第七轮补充反馈（深度反馈批）H1-H6 + A/B 全部完成**
+- ✅ 批6 review 修复：子代理 aecdc5e 对抗审 H1-H6（sequential-thinking + refCount/流消费核实），结论无 HIGH bug、核心逻辑正确可交付；修 1 MEDIUM（排队斜杠命令断链→queue 下降沿改空闲驱动）+ 1 LOW（aiClient off/pseudo abort 口径统一 this.aborted），2 LOW 记小本本
+- 🎉 **第七轮补充反馈（深度反馈批）H1-H6 + A/B 全部完成（含 review 修复）**
 - 🔬 待主人重启统一真机验证：H1 收口/手动按钮、H2 retry 诊断、H4 queue、H5 提醒、H6 小标题导航
 - 🔬 待重启真机验证（与主人验收一起）：H1 自动收口/手动按钮、H2 API 失败重试不再显「已停止」、H4 queue
 - ⚠️ sandbox 分工已按主人纠正落地（B 的 systemPrompt）：危险/要回溯走自己文件体系，一次性试验走 MCP sandbox
@@ -129,6 +130,8 @@
 ## 五、待评估 / 小本本
 - [ ] H4 queue：切换/新建/分支对话时清队列已由 reducer（clearConversation/setConversation）兜底防串台 OK，但队列消息的附件 sha256 未主动 release（边缘泄漏，低危——漏 release 只多占盘，且极低频；TDZ 限制：handleNewConversation/Switch 定义在 clearQueueWithRelease 之前，要补需内联模块级 release）
 - [ ] run_command 文件副作用入快照账本（回溯盲区）
+- [ ] queue 上限可被快速连点击穿（闭包滞后入第 6 条，无害；reducer enqueueMessage 加硬护栏可彻底）（review LOW）
+- [ ] subtitle 并发无节流（极端连发 N 条 user 同时打 N 个系统模型请求，非关键路径）（review LOW）
 - [ ] review status 落库（重启不丢 accept/reject）
 - [ ] 逐文件行级 accept/reject（现 block 最细，ROI 待定）
 - [ ] run_command 细粒度超时 + 工具调用审计日志（沙盒轻量增强延伸）

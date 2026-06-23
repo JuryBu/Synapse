@@ -480,7 +480,7 @@ export class AIClient {
       try {
         yield* this.completeChat(messages, tools, 'off');
       } catch (err: any) {
-        yield { type: 'error', error: err?.name === 'AbortError' ? 'aborted' : (err?.message || '网络错误'), streamMode: 'off' };
+        yield { type: 'error', error: this.aborted ? 'aborted' : (err?.message || '网络错误'), streamMode: 'off' };
       } finally {
         this._isStreaming = false;
       }
@@ -496,7 +496,7 @@ export class AIClient {
           strategy === 'auto' && !modelCanStream ? '当前模型未声明支持真流式，已使用伪流式' : undefined,
         );
       } catch (err: any) {
-        yield { type: 'error', error: err?.name === 'AbortError' ? 'aborted' : (err?.message || '网络错误'), streamMode: 'pseudo' };
+        yield { type: 'error', error: this.aborted ? 'aborted' : (err?.message || '网络错误'), streamMode: 'pseudo' };
       } finally {
         this._isStreaming = false;
       }

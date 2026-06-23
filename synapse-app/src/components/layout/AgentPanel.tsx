@@ -1458,14 +1458,14 @@ export function AgentPanel() {
   //   ② 切换/新建/分支对话：reducer + handleStop/handler 已清队列 + 换对话身份重建 conversationRef → 不会串台发到别的对话。
   //   ④ 竞态再确认：用 conversationRef.current 读最新 isStreaming（!== false 直接放弃，防下一轮已重新开始流式时重入）。
   //      取队首后【同步先 dequeue】再发，避免 effect 重跑/StrictMode 双调导致同一条被发两次。
-  const prevIsStreamingRef = useRef(isStreaming);
   useEffect(() => {
-    const prev = prevIsStreamingRef.current;
-    prevIsStreamingRef.current = isStreaming;
-    // 仅在 true→false 的下降沿处理（流式刚结束）。
-    if (!(prev === true && isStreaming === false)) return;
+    // ★ H4-2 修（review MEDIUM）：原「仅 isStreaming 下降沿发一次」会断链——若排队项是斜杠命令，
+    //   dispatchUserSend 返回 'handled' 不产生流式、不再有下降沿，后续排队消息全部滞留。改为「空闲(非流式)
+    //   且队列非空就发队首」：handled 后队列变化 → effect 因 queuedMessages 依赖重跑 → isStreaming 仍 false
+    //   继续发下一条；直到发出真消息（'sent' → isStreaming 转 true，本次 return 等流式结束）或队列空。
+    if (isStreaming) return;
     if (queuedMessages.length === 0) return;
-    // 护栏④：再确认当前确实空闲（conversationRef 持最新；若已被下一轮占用则放弃，等下个下降沿）。
+    // 护栏④：再确认当前确实空闲（conversationRef 持最新；若已被下一轮占用则放弃，等下次 effect）。
     if (conversationRef.current.isStreaming) return;
     if (!hasApiKey || !hasModel || !agentLoopRef.current) return;
 
