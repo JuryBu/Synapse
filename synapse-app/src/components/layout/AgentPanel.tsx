@@ -172,6 +172,8 @@ export function AgentPanel() {
   //   导致的重复 LLM 压缩 + 通知竞态 + record 水位竞争。compactNow 进入置 true、finally 置 false。
   const isCompactingRef = useRef(false);
   const isStreaming = useAppSelector((s: RootState) => (s as any).conversation.isStreaming);
+  // ★ #13：前台压缩进行中（驱动「压缩中」banner + 发送守卫）。
+  const isCompacting = useAppSelector((s: RootState) => (s as any).conversation.isCompacting);
   // ★ H4-2：排队消息（生成中插话入队，本轮结束自动发）。运行态、不落库。
   const queuedMessages = useAppSelector((s: RootState) => (s as any).conversation.queuedMessages as QueuedMessage[]);
   const settings = useAppSelector((s: RootState) => (s as any).settings);
@@ -1412,6 +1414,12 @@ export function AgentPanel() {
     const tokens = extracted.tokens;
     const readyAttachments = pendingAttachments.filter(att => att.status === 'ready');
     if (!text && readyAttachments.length === 0) return;
+
+    // ★ #13：前台压缩进行中禁止发送（压缩是阻塞操作，不进 queue；压缩完用户自行再发）。
+    if (conversationRef.current.isCompacting) {
+      dispatch(addNotification({ type: 'info', title: '压缩中', message: '上下文正在压缩，请稍候片刻再发送' }));
+      return;
+    }
 
     if (!hasApiKey) {
       dispatch(addNotification({ type: 'warning', title: '未配置 API', message: '请先在设置 → AI 中配置 API Key 和端点' }));
@@ -2727,6 +2735,10 @@ export function AgentPanel() {
       </div>
 
       <div className="agent-input-area">
+        {/* ★ #13：前台压缩阻塞态 banner——压缩期禁止发送，给用户明确反馈（区别于普通生成中）。 */}
+        {isCompacting && (
+          <div className="compacting-banner">⏳ 上下文压缩中，请稍候…</div>
+        )}
         {/* ★ H4-2：插话排队区（参考 Codex）——生成中发的消息进队列、本轮结束自动发；这里列出待发条目，可单条取消 / 一键清空。 */}
         {queuedMessages.length > 0 && (
           <div className="queued-messages">

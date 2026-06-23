@@ -1615,6 +1615,18 @@ html[data-wallpaper="enabled"] .settings-panel {
   color: var(--syn-text-muted);
 }
 
+/* ★ #13：前台压缩阻塞态 banner（输入框上方，警告色玻璃底，明确「压缩中」区别于普通生成）。 */
+.compacting-banner {
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--syn-warning) 14%, var(--glass-bg-solid));
+  border: 1px solid color-mix(in srgb, var(--syn-warning) 32%, transparent);
+  color: var(--syn-text-primary);
+  font-size: 12px;
+  text-align: center;
+}
+
 /* ★ H4-2：插话排队区——输入框上方列出待发的排队消息（生成中插话进队列、本轮结束自动发）。玻璃风格跟随主题。 */
 .queued-messages {
   display: flex;

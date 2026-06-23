@@ -7,7 +7,7 @@ import { AIClient, type ChatMessage, type ToolCallRequest } from './aiClient';
 import { store, type RootState } from '../store';
 import {
   addMessage, updateMessage, updateMessageMeta, appendMessageContent,
-  appendMessageThinking, setMessageStreamState, setMessageReconnect, setStreaming,
+  appendMessageThinking, setMessageStreamState, setMessageReconnect, setStreaming, setCompacting,
   clearStreamingContent, setTitle, setTokenUsage,
   addAssistantRun, addRunEvent, addMessageDiff, addMessageArtifact, recordFileSnapshot, updateToolCallStatus,
   endTaskBoundary,
@@ -1125,14 +1125,16 @@ export class AgentLoop {
 
     while (this.running && round < maxRounds) {
       round++;
-      // ★ H5：本轮已连续跑较多步(≥10)或耗时过长(>2min) → 注入一条 system 提醒，促 AI 主动 end_task_boundary
-      //   汇报进展、别闷头一直干。只注入一次（reminderInjected）；push 到 apiMessages 末尾，不破坏前缀 prompt cache。
+      // ★ #7（反馈修正 H5）：本轮连续干较多步(≥10)或耗时过长(>2min)时，按当前 task_boundary 状态注入 system 提醒，
+      //   促 AI 用 task_boundary 把过程【结构化包裹】——而非「提醒向用户汇报」（task_boundary 是过程包裹，
+      //   汇报应在收口后、无任务边界状态下做）。只注入一次（reminderInjected）；push 末尾不破坏前缀 prompt cache。
       if (!reminderInjected && (round >= 10 || Date.now() - loopStartedAt > 120_000)) {
         reminderInjected = true;
-        apiMessages.push({
-          role: 'system',
-          content: '【系统提醒】你已在本轮连续执行较多步骤或较长时间。若已有阶段性成果，请考虑调用 end_task_boundary 收口并向用户汇报进展，或把剩余工作分解后告知用户，避免长时间闷头执行不反馈。',
-        });
+        const hasActiveBoundary = !!(store.getState() as RootState).conversation.taskBoundaries?.some((b: any) => b.status === 'active');
+        const reminderText = hasActiveBoundary
+          ? '【系统提醒】当前任务边界(task_boundary)已持续较长。它是「过程/干活的包裹」——若你已进入一个新阶段或新主题，请先 end_task_boundary 收口当前、再 begin_task_boundary 开新的；阶段性成果的汇报应在收口后、无任务边界状态下进行，不要在 task 进行中跟用户汇报。'
+          : '【系统提醒】你已连续执行较多步骤却没有用 task_boundary 包裹过程。task_boundary 是把多步干活结构化收纳、避免刷屏的「过程包裹」——请调用 begin_task_boundary 把当前这段工作包起来，干完后 end 收口、在无任务边界状态下汇报结果。';
+        apiMessages.push({ role: 'system', content: reminderText });
       }
       store.dispatch(setStreaming(true));
       store.dispatch(clearStreamingContent());
@@ -1688,6 +1690,7 @@ export class AgentLoop {
     //     BPC 后台路径走 bpcGenerate（用 scheduler 自己的 controller 集合），绝不混进 compressControllers。
     const compressController = new AbortController();
     this.compressControllers.add(compressController);
+    store.dispatch(setCompacting(true)); // ★ #13：前台压缩开始 → 点亮阻塞态（驱动「压缩中」UI + 发送守卫）；finally 必清。
     try {
       // ★ M5-BPC-2：纯生成+落库下沉到 generateAndAppend，本壳【行为逐字节等价】于拆分前——
       //   只是把 controller 建在壳层、signal 传入；返回前缀 recordMd 不变。
@@ -1700,6 +1703,7 @@ export class AgentLoop {
       });
       return result.recordMd;
     } finally {
+      store.dispatch(setCompacting(false)); // ★ #13：压缩结束（成功/降级/中止/异常）必清阻塞态。
       // R5：本次压缩生成结束（成功/降级/中止/异常）即从集合移除【自己这个】 controller，
       // 只 delete 局部变量，绝不整体置空——避免误清别的在途 run 登记的 controller（归属隔离）。
       this.compressControllers.delete(compressController);

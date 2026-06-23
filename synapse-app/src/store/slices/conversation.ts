@@ -279,6 +279,8 @@ interface ConversationState {
   fileSnapshots: Record<string, FileSnapshot>;
   pendingDiffs: FileDiffSummary[];
   isStreaming: boolean;
+  // ★ #13：前台压缩（/compact 手动 + 达硬水位自动）进行中——驱动阻塞 UI + 发送守卫（BPC 后台预压不设此标志，不阻塞用户）。
+  isCompacting: boolean;
   streamingContent: string;
   // ★ H4-2：生成中插话的排队消息（运行态，绝不落库；刷新/重开自然清空）。本轮结束自动发队首。
   queuedMessages: QueuedMessage[];
@@ -450,6 +452,7 @@ const initialState: ConversationState = {
   fileSnapshots: {},
   pendingDiffs: [],
   isStreaming: false,
+  isCompacting: false,
   streamingContent: '',
   queuedMessages: [], // ★ H4-2：排队消息初始为空（运行态）
   model: '',
@@ -826,6 +829,10 @@ export const conversationSlice = createSlice({
     setStreaming(state, action: PayloadAction<boolean>) {
       state.isStreaming = action.payload;
     },
+    // ★ #13：标记前台压缩进行中（compactNow 开始置 true、finally 置 false），驱动阻塞 UI + 发送守卫。
+    setCompacting(state, action: PayloadAction<boolean>) {
+      state.isCompacting = action.payload;
+    },
     // ★ H4-2：把一条消息加入排队队列（生成中插话）。上限护栏在调用方（AgentPanel）拦——满了不 dispatch、给提示。
     enqueueMessage(state, action: PayloadAction<QueuedMessage>) {
       state.queuedMessages.push(action.payload);
@@ -967,7 +974,7 @@ export const {
   updateMessageMeta, appendMessageContent, setMessageAttachments,
   appendMessageThinking, setMessageStreamState, setMessageReconnect,
   addMessageDiff, addMessageArtifact, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,
-  setStreaming, appendStreamingContent, clearStreamingContent,
+  setStreaming, setCompacting, appendStreamingContent, clearStreamingContent,
   enqueueMessage, dequeueMessage, clearQueue,
   setModel, setTokenUsage, setPendingMessage, clearConversation, setTitle,
   editMessage, truncateAt, deleteMessage, clearMessages, updateToolCallStatus,
