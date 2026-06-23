@@ -618,6 +618,10 @@ export class AgentLoop {
   private toolsProvider: (() => ToolDefinition[]) | null = null;
   private toolExecutor: ToolExecutor | null = null;
   private running = false;
+  /** ★ 公开只读运行态（P0 发不出消息根因修复）：供 AgentPanel 在 run 进行中守卫——
+   *  ① aiClient useMemo 运行中返回缓存（不因 isStreaming 轮间假性归零而重建 client → 不触发本 loop 被 useEffect cleanup 中止）；
+   *  ② agentLoop useEffect cleanup 仅 stop 空闲 loop，运行中的 loop 让它带发起时的 client 快照跑完（与 #2「设置变不打断当前流」一致）。 */
+  get isRunning(): boolean { return this.running; }
   /**
    * ★ 性能：toolsTokens 记忆化缓存（按 activeTools 数组【引用相等】命中）。
    *   背景：原先每次 run 在「插入 user 消息 → 发起 fetch」关键路径上同步执行

@@ -592,7 +592,12 @@ export function AgentPanel() {
   //   isStreaming 变 false 触发重算再应用新设置（无感切换、下一轮生效，不打断当前流）。
   const aiClientRef = useRef<AIClient | null>(null);
   const aiClient = useMemo(() => {
-    if (isStreaming && aiClientRef.current) return aiClientRef.current;
+    // ★ P0 根因修复（发不出消息）：除 isStreaming 外再以 agentLoopRef.current.isRunning 守卫——
+    //   run 进行中（尤其工具轮间 agentLoop 会 setStreaming(false) 让 isStreaming【假性归零】）也不重建 client。
+    //   否则 aiClient 引用变 → 下方 agentLoop useEffect([aiClient]) 重建 → cleanup stop 正在跑的 loop →
+    //   this.running=false → while 跳过 → 加了 user 消息却无 AI 回复、且不报错（CDP 实测：发一条建 2~3 个 loop、
+    //   running=true 的 loop 被 cleanup stop）。运行中始终复用同一 client，杜绝自我中止。
+    if ((isStreaming || agentLoopRef.current?.isRunning) && aiClientRef.current) return aiClientRef.current;
     const apiKey = settings.apiKeys?.openai || '';
     const baseUrl = settings.apiEndpoints?.openai || 'https://openrouter.ai/api/v1';
     if (!apiKey || !model) { aiClientRef.current = null; return null; }
@@ -703,7 +708,12 @@ export function AgentPanel() {
     // ★ M5-BPC-4：cleanup 时解绑（detachLoop 仅当传入的是当前持有 loop 才解绑 + 丢在途 BPC，防并发重建误伤新 loop）。
     return () => {
       cancelled = true;
-      loop.stop();
+      // ★ P0 根因修复（发不出消息）：本 effect 依赖 [aiClient, settings.safety]，若在 run 进行中触发重建，
+      //   cleanup 绝不能 stop 正在跑的 loop——否则把刚发起的 run 自我中止（this.running=false → while 跳过 →
+      //   加了 user 消息却无 AI 回复、不报错）。运行中的旧 loop 带发起时的 client 快照跑完（与 #2「设置变不打断
+      //   当前流」一致），新 loop 已接管 agentLoopRef、下一轮生效。仅空闲 loop 才 stop。
+      //   （上方 aiClient useMemo 的 isRunning 守卫已从源头杜绝运行中重建；此处为双保险，亦覆盖 settings.safety 变更路径。）
+      if (!loop.isRunning) loop.stop();
       bpcScheduler.detachLoop(loop);
       // 权限弹窗：loop/组件重建时若有未决审批，拒绝并关闭，防 Promise 悬挂。
       if (approvalResolveRef.current) { approvalResolveRef.current(false); approvalResolveRef.current = null; }
