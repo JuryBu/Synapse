@@ -64,6 +64,8 @@
 .rt-token-mcp         { background: rgba(245, 158, 11, 0.18); color: #d97706; }
 .rt-token-terminal    { background: rgba(107, 114, 128, 0.20); color: var(--syn-text-secondary); }
 .rt-token-settings    { background: rgba(124, 58, 237, 0.16); color: var(--syn-accent); }
+/* #12a：/ 斜杠命令 chip——用玫红/粉色系，与 @ 七类（紫/蓝/绿/橙/灰）明显区分，凸显「命令=动作」语义。 */
+.rt-token-slash       { background: rgba(236, 72, 153, 0.16); color: #db2777; }
 
 /* ========== 两级 @ 类型菜单（AtTypeMenu，Plan_5_M6） ========== */
 /* 复用 .inline-completion-menu 的浮层定位 + .glass-panel 玻璃底；此处仅补两级菜单的差异样式。 */

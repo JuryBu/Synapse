@@ -12,15 +12,28 @@ export type AtType = 'file' | 'directory' | 'conversation' | 'workflow' | 'setti
 /** 一级类型菜单顺序（复刻 Antigravity：文件/目录在前，设置/MCP/终端在后）。 */
 export const AT_TYPES: readonly AtType[] = ['file', 'directory', 'conversation', 'workflow', 'settings', 'mcp', 'terminal'];
 
+/**
+ * #12a：/ 斜杠命令也渲染成内联 atomic token（仿 @ 提及的彩色 chip）。
+ * slash 与七类 @ 引用共用同一套 atomic token 机制（createTokenSpan / extract / buildRichParts），
+ * 但【刻意不并入 AtType / AT_TYPES】——AT_TYPES 驱动一级 @ 类型菜单，混入 slash 会污染该菜单；
+ * slash 的触发（detectSlashTrigger）、占位语义（TOKEN_INLINE.slash = `/cmd `）、配色（.rt-token-slash）
+ * 都是独立的一条线。故引入 TokenType = AtType | 'slash' 作为 token 全集，TokenSpec / TOKEN_INLINE 走它。
+ */
+export type TokenType = AtType | 'slash';
+
+/** token 全集（含 slash），供 createTokenSpan/extract/buildRichParts 的类型守卫复用。 */
+export const TOKEN_TYPES: readonly TokenType[] = [...AT_TYPES, 'slash'];
+
 /** token 规格（构造 span / 重建 / 提取共用）。 */
 export interface TokenSpec {
-  type: AtType;
+  type: TokenType;
   /** 稳定标识：conversationId / 文件绝对路径 / modeName / sectionId / mcp__server__tool / terminal sessionId。 */
   id: string;
   /**
    * 持久化锚点 & 发送占位语义。
    * - workflow：mode.id（英文 slug，无空格，避免 parseMultiAITrigger 截断）
    * - file/directory：绝对路径（normSlash 归一），供 AI 直接调 view_file 不依赖 worktree 根
+   * - slash：命令名（不含斜杠，如 'goal'）——TOKEN_INLINE.slash 还原为 `/<value>`，下游 parseAndDispatch 命中执行
    * - 其它（conv/settings/mcp/terminal）：可读语义，与显示文本同
    * 这是 plainText 占位串 TOKEN_INLINE[type](value) 的实参，必须语义无歧义。
    */
@@ -76,4 +89,9 @@ export interface RichTextInputHandle {
 /** 运行时类型守卫：校验字符串是否合法 AtType（对抗审查 P5，防脏 DOM 的非法 data-type）。 */
 export function isAtType(v: unknown): v is AtType {
   return typeof v === 'string' && (AT_TYPES as readonly string[]).includes(v);
+}
+
+/** 运行时类型守卫：校验字符串是否合法 TokenType（含 slash）。createTokenSpan/extract 用它放行 slash token。 */
+export function isTokenType(v: unknown): v is TokenType {
+  return typeof v === 'string' && (TOKEN_TYPES as readonly string[]).includes(v);
 }

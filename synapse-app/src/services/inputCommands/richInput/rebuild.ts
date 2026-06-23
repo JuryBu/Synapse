@@ -16,16 +16,17 @@
  */
 
 import { TOKEN_INLINE } from './domUtils';
-import type { AtType, ExtractedToken, TokenSpec } from './types';
+import type { ExtractedToken, TokenSpec, TokenType } from './types';
 
 export function buildRichParts(content: string, richTokens?: ExtractedToken[]): Array<string | TokenSpec> {
   if (!richTokens || richTokens.length === 0) return [content];
   const parts: Array<string | TokenSpec> = [];
   let cursor = 0;
   for (const tk of richTokens) {
-    // review MEDIUM：tk.type 来自 JSON 反序列化无类型守卫。未来 AtType 枚举改名或脏数据时 TOKEN_INLINE[unknown]
+    // review MEDIUM：tk.type 来自 JSON 反序列化无类型守卫。未来 TokenType 枚举改名或脏数据时 TOKEN_INLINE[unknown]
     //   为 undefined → undefined(tk.value) TypeError 会挂掉整条消息编辑入口。这里做防御性兜底，与 idx<0 同款『跳过不破文本』。
-    const fn = TOKEN_INLINE[tk.type as AtType];
+    //   #12a：slash token（持久化的命令 chip）也走这条还原路径，TOKEN_INLINE.slash 把它还原成 `/<cmd> ` 占位。
+    const fn = TOKEN_INLINE[tk.type as TokenType];
     if (typeof fn !== 'function') {
       if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
         console.warn('[buildRichParts] unknown token type, skipping', { type: tk.type, value: tk.value });

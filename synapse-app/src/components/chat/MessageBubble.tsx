@@ -15,6 +15,8 @@ import { useAttachments } from '@/hooks/useAttachments';
 import type { RichTextInputHandle, ExtractedToken } from '@/services/inputCommands/richInput/types';
 import { buildRichParts } from '@/services/inputCommands/richInput/rebuild';
 import type { AttachmentRef } from '@/store/slices/conversation';
+import { useAppSelector } from '@/store/hooks';
+import type { RootState } from '@/store';
 
 interface ToolCallInfo {
   id: string;
@@ -355,15 +357,24 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
 
   const isUser = role === 'user';
 
+  // ★ #19 个性化：从 settings 取用户/AI 头像与昵称。
+  //   有自定义头像 → 渲染 <img>；否则保留现有图标色块兜底。
+  //   昵称缺省（undefined/空串）→ 回退「你」/「Synapse AI」。
+  const customAvatar = useAppSelector((s: RootState) => (isUser ? s.settings.userAvatar : s.settings.aiAvatar));
+  const customName = useAppSelector((s: RootState) => (isUser ? s.settings.userName : s.settings.aiName));
+  const roleName = (customName && customName.trim()) ? customName : (isUser ? '你' : 'Synapse AI');
+
   return (
     // ★ H6：data-message-id 作 DOM anchor，供「消息导航」浮层 querySelector 定位 + 滚动跳转 + 高亮闪烁。
     <div className={`message message-${role}`} data-message-id={id} onContextMenu={handleContextMenu}>
-      <div className={`message-avatar ${isUser ? 'user-avatar' : 'assistant-avatar'}`}>
-        {isUser ? <User size={16} /> : <Bot size={16} />}
+      <div className={`message-avatar ${isUser ? 'user-avatar' : 'assistant-avatar'}${customAvatar ? ' has-custom-avatar' : ''}`}>
+        {customAvatar
+          ? <img src={customAvatar} alt={roleName} className="message-avatar-img" />
+          : (isUser ? <User size={16} /> : <Bot size={16} />)}
       </div>
       <div className="message-body">
         <div className="message-header">
-          <span className="message-role">{isUser ? '你' : 'Synapse AI'}</span>
+          <span className="message-role">{roleName}</span>
           {timestamp && (
             <span className="message-time">
               {new Date(timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}

@@ -9,8 +9,8 @@
  *   P11    extract 块级元素 div/p 进入前补换行（防多行粘贴丢换行）
  */
 
-import type { AtType, AtTrigger, ExtractResult, ExtractedToken, TokenSpec } from './types';
-import { isAtType } from './types';
+import type { AtTrigger, ExtractResult, ExtractedToken, TokenSpec, TokenType } from './types';
+import { isTokenType } from './types';
 
 /** 零宽占位符（U+200B）：token 前后各补一个，保证光标在 token 前/后/相邻 token 间/编辑器首尾都有落点；
  *  extract 时整体 strip，不与用户真实空格混淆（对抗审查 P6）。用 fromCharCode 构造，源码里不出现不可见字符。 */
@@ -22,7 +22,7 @@ export const ZWSP = String.fromCharCode(0x200b);
  * 让 parseMultiAITrigger 与下游工具调用拿到无歧义形态。
  * export 出去供 buildRichParts（D1 编辑回填重组算法）复用同一份占位规则——单一真相源防漂移。
  */
-export const TOKEN_INLINE: Record<AtType, (value: string) => string> = {
+export const TOKEN_INLINE: Record<TokenType, (value: string) => string> = {
   file: (v) => `@${v}`,
   directory: (v) => `@${v}`,
   conversation: (v) => `@对话:${v}`,
@@ -30,6 +30,11 @@ export const TOKEN_INLINE: Record<AtType, (value: string) => string> = {
   mcp: (v) => `@${v}`,
   terminal: (v) => `@终端:${v}`,
   settings: () => '', // 设置是纯跳转，不进发送文本
+  // #12a：/ 命令 token 还原为 `/<cmd>`（前导斜杠，【无尾随空格】）。token 与后续参数的分隔靠 buildTokenFragment
+  //   在 token 后补的真实空格（发送 extract 时天然有），故占位不必自带尾空格。这样两条还原路径都更稳：
+  //   ① 发送：`/goal`、`/goal 写周报` 经 parseAndDispatch 的 /^(\S+)([\s\S]*)$/ 正确切 name/rest（单空格不双空格）；
+  //   ② 编辑回填：buildRichParts 占位 `/goal` 在 trimEnd 后的持久化 content 里 indexOf 命中（含无参 /clear），chip 不退化。
+  slash: (v) => `/${v}`,
 };
 
 /**
@@ -39,7 +44,7 @@ export const TOKEN_INLINE: Record<AtType, (value: string) => string> = {
  */
 export function createTokenSpan(t: TokenSpec): HTMLSpanElement {
   const span = document.createElement('span');
-  const type: AtType = isAtType(t.type) ? t.type : 'file';
+  const type: TokenType = isTokenType(t.type) ? t.type : 'file';
   span.className = `rt-token rt-token-${type}`;
   span.setAttribute('data-token', '');
   span.dataset.type = type;
@@ -47,7 +52,9 @@ export function createTokenSpan(t: TokenSpec): HTMLSpanElement {
   span.dataset.value = t.value;
   if (t.displayLabel != null) span.dataset.label = t.displayLabel;
   span.contentEditable = 'false';
-  span.textContent = '@' + (t.displayLabel ?? t.value);
+  // #12a：slash token 前缀用 '/'（命令形态），@ 七类沿用 '@'。chip 文本仍走 displayLabel ?? value 保人类可读。
+  const prefix = type === 'slash' ? '/' : '@';
+  span.textContent = prefix + (t.displayLabel ?? t.value);
   return span;
 }
 
@@ -152,7 +159,7 @@ export function extractContent(root: HTMLElement): ExtractResult {
       } else if (child instanceof HTMLElement) {
         if (child.hasAttribute('data-token')) {
           const type = child.dataset.type;
-          if (isAtType(type)) {
+          if (isTokenType(type)) {
             const tk: ExtractedToken = {
               type,
               id: child.dataset.id ?? '',
@@ -160,7 +167,7 @@ export function extractContent(root: HTMLElement): ExtractResult {
               ...(child.dataset.label != null ? { displayLabel: child.dataset.label } : {}),
             };
             tokens.push(tk);
-            text += TOKEN_INLINE[type](tk.value);
+            text += TOKEN_INLINE[type](tk.value); // slash → `/<cmd> `；@ 七类 → 各自占位
           } else {
             text += child.textContent ?? ''; // 非法 type 当普通文本（P5）
           }

@@ -33,6 +33,13 @@ interface SettingsState {
   //   false 时 handleSend 发送前先收口 active 边界（endTaskBoundary），新消息落在卡片外。
   //   读取处一律按「!== false」兜底（旧 localStorage 整体替换 settings 时缺此字段会是 undefined → 视为 true）。
   attachUserMsgToBoundary: boolean;
+  // ★ #19 个性化：用户/AI 头像（dataURL，已 canvas 压缩裁剪到 ≤256×256）+ 昵称。
+  //   全为可选——空/undefined 时 MessageBubble 回退现有图标色块 + 「你」/「Synapse AI」默认文案。
+  //   旧持久化缺这些字段时 loadSettings 的 `{...initialState, ...payload}` 天然兜底为 initialState 的 undefined/''。
+  userAvatar?: string;
+  userName?: string;
+  aiAvatar?: string;
+  aiName?: string;
   apiKeys: Record<string, string>;
   apiEndpoints: Record<string, string>;
   // New settings
@@ -50,6 +57,11 @@ const initialState: SettingsState = {
   wordWrap: true,
   sendKeyMode: 'enter', // ★ C1：默认 Enter 发送 / Shift+Enter 换行
   attachUserMsgToBoundary: true, // ★ H4-1：默认用户消息归入当前任务边界卡片（维持现状）
+  // ★ #19 个性化：默认全空——头像走图标色块兜底、昵称走「你」/「Synapse AI」兜底。
+  userAvatar: undefined,
+  userName: '',
+  aiAvatar: undefined,
+  aiName: '',
   apiKeys: {},
   apiEndpoints: {
     openai: 'https://api.openai.com/v1',
@@ -93,6 +105,19 @@ export const settingsSlice = createSlice({
     // ★ H4-1：切换「用户消息归入当前任务边界」开关。
     setAttachUserMsgToBoundary(state, action: PayloadAction<boolean>) {
       state.attachUserMsgToBoundary = action.payload;
+    },
+    // ★ #19 个性化：用户/AI 头像（dataURL，传 undefined 清除回退默认图标）。
+    setUserAvatar(state, action: PayloadAction<string | undefined>) {
+      state.userAvatar = action.payload;
+    },
+    setUserName(state, action: PayloadAction<string>) {
+      state.userName = action.payload;
+    },
+    setAiAvatar(state, action: PayloadAction<string | undefined>) {
+      state.aiAvatar = action.payload;
+    },
+    setAiName(state, action: PayloadAction<string>) {
+      state.aiName = action.payload;
     },
     setApiKey(state, action: PayloadAction<{ provider: string; key: string }>) {
       state.apiKeys[action.payload.provider] = action.payload.key;
@@ -148,6 +173,7 @@ export const settingsSlice = createSlice({
 
 export const {
   setLanguage, setFontSize, setAutoSave, setSendKeyMode, setAttachUserMsgToBoundary,
+  setUserAvatar, setUserName, setAiAvatar, setAiName,
   setApiKey, setApiEndpoint, loadSettings,
   setSafety, setPromptInjection,
   setMaxConversationHistory, setAutoArchiveAfter,

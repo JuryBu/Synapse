@@ -23,7 +23,7 @@ import { MessageBubble } from '@/components/chat/MessageBubble';
 import { ApprovalDialog, type ApprovalRequest } from '@/components/ui/ApprovalDialog';
 import { TaskBoundaryCard, type BoundaryFile } from '@/components/chat/TaskBoundaryCard';
 import { resolveEditorType } from '@/services/editorFileTypes';
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fragment } from 'react';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fragment, type ReactNode } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { bpcScheduler } from '@/services/bpcScheduler';
@@ -500,7 +500,8 @@ export function AgentPanel() {
       if (b.endAnchorMessageId == null || endIdx === undefined) endIdx = messages.length - 1; // active/截断 → 延伸到末尾
       for (let i = startIdx; i <= endIdx && i < messages.length; i++) coveredIdx.add(i);
     }
-    const items: Array<{ id: string; subtitle: string; seq: number; timestamp?: number }> = [];
+    // ★ #12b：item 带原始消息下标 idx，供导航浮层在压缩点边界处插入「— 压缩点 —」分隔行。
+    const items: Array<{ id: string; subtitle: string; seq: number; timestamp?: number; idx: number }> = [];
     let seq = 0;
     messages.forEach((m: any, i: number) => {
       if (m.role !== 'user') return;
@@ -508,10 +509,20 @@ export function AgentPanel() {
       if (!subtitle) return;          // 无小标题（未生成/纯附件）→ 不收录
       if (coveredIdx.has(i)) return;  // 在 task_boundary 区间内 → 不收录
       seq += 1;
-      items.push({ id: m.id, subtitle, seq, timestamp: m.timestamp });
+      items.push({ id: m.id, subtitle, seq, timestamp: m.timestamp, idx: i });
     });
     return items;
   }, [conversation.taskBoundaries, messages]);
+
+  // ★ #12b：导航浮层压缩点行 —— 把 batchDividerByIdx（压缩点挂在哪个消息下标前）的下标
+  //   收成升序数组，渲染时在「上一项 idx < 压缩点下标 <= 当前项 idx」的位置前插一行「— 压缩点 —」，
+  //   让用户从导航就能看到哪些消息之后发生过压缩。返回 [{ atIdx, marks }] 升序列表。
+  const navCompactPoints = useMemo(() => {
+    const pts: Array<{ atIdx: number; marks: { index: number; source: BatchSource }[] }> = [];
+    batchDividerByIdx.forEach((marks, atIdx) => pts.push({ atIdx, marks }));
+    pts.sort((a, b) => a.atIdx - b.atIdx);
+    return pts;
+  }, [batchDividerByIdx]);
 
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRef[]>([]);
   const [previewAttachment, setPreviewAttachment] = useState<AttachmentRef | null>(null);
@@ -2405,7 +2416,33 @@ export function AgentPanel() {
             {navItems.length === 0 ? (
               <div className="agent-nav-empty">暂无带标题的消息</div>
             ) : (
-              navItems.map(item => (
+              // ★ #12b：穿插压缩点分隔行——在跨越某压缩点下标的导航项前插「— 压缩点 —」，
+              //   让用户从导航就能看到哪段历史被压缩。压缩点下标的「消费」用游标 cp 顺序推进。
+              (() => {
+                const rows: ReactNode[] = [];
+                let cp = 0; // navCompactPoints 游标
+                let prevIdx = -1; // 上一导航项的消息下标
+                const renderCompactRow = (key: string, marks: { index: number; source: BatchSource }[]) => {
+                  const batchLabel = marks.map(m => `#${m.index + 1}`).join('、');
+                  return (
+                    <div key={key} className="agent-nav-compact" title="此处历史已压缩为 record 摘要批次（对话仍完整保留原文）">
+                      <span className="agent-nav-compact-line" />
+                      <Sparkles size={11} className="agent-nav-compact-icon" />
+                      <span className="agent-nav-compact-text">压缩点 · record 批次 {batchLabel}</span>
+                      <span className="agent-nav-compact-line" />
+                    </div>
+                  );
+                };
+                navItems.forEach(item => {
+                  // 当前项前可能跨越多个压缩点（落在 (prevIdx, item.idx] 区间内）。
+                  while (cp < navCompactPoints.length && navCompactPoints[cp].atIdx <= item.idx) {
+                    if (navCompactPoints[cp].atIdx > prevIdx) {
+                      rows.push(renderCompactRow(`cp-${navCompactPoints[cp].atIdx}`, navCompactPoints[cp].marks));
+                    }
+                    cp += 1;
+                  }
+                  prevIdx = item.idx;
+                  rows.push(
                 <div key={item.id} className="agent-nav-row">
                   {navEditingId === item.id ? (
                     // 编辑态：输入框 + 确认/取消（Enter 保存、Esc 取消）。
@@ -2447,7 +2484,17 @@ export function AgentPanel() {
                     </>
                   )}
                 </div>
-              ))
+                  );
+                });
+                // 落在最后一个导航项之后的压缩点（压缩发生在末尾消息处）也补一行。
+                while (cp < navCompactPoints.length) {
+                  if (navCompactPoints[cp].atIdx > prevIdx) {
+                    rows.push(renderCompactRow(`cp-${navCompactPoints[cp].atIdx}`, navCompactPoints[cp].marks));
+                  }
+                  cp += 1;
+                }
+                return rows;
+              })()
             )}
           </div>
         </div>,

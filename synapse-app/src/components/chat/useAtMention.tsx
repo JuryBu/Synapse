@@ -127,7 +127,10 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, se
     if (slash) {
       const items = commandRegistry.filter(slash.query);
       if (items.length === 0) { closeMenu(); return; }
-      setMenu(m => ({ ...m, open: true, mode: 'slash', level: 'item', selectedType: null, query: slash.query, trigger: null, items, activeIndex: 0, loading: false }));
+      // #12a：slash 现在仿 @ 走 atomic token——把 `/` 锚点（startNode/startOffset）存进 menu.trigger，
+      //   选命令时 applyTokenCompletion 据此删 `/query` 段、原位插 slash chip（AtTrigger 与 SlashTrigger 三字段结构兼容）。
+      const slashTrigger: AtTrigger = { query: slash.query, startNode: slash.startNode, startOffset: slash.startOffset };
+      setMenu(m => ({ ...m, open: true, mode: 'slash', level: 'item', selectedType: null, query: slash.query, trigger: slashTrigger, items, activeIndex: 0, loading: false }));
       return;
     }
     closeMenu();
@@ -189,9 +192,22 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, se
     const meta = (item.meta ?? {}) as Record<string, unknown>;
     if (menu.mode === 'slash') {
       const name = String(meta.name ?? item.label.replace(/^\//, '').split(/\s/)[0]);
-      richRef.current?.setContent([`/${name} `]);
-      richRef.current?.focus();
-      onAfterMutate?.();
+      // #12a：/ 命令也插内联 atomic chip（仿 @）。重新 detect `/` 锚点（HIGH-1/2 重锚定，避 IME normalize 后游离），
+      //   删掉 `/query` 段、原位插 slash token；发送时 TOKEN_INLINE.slash 还原为 `/name `，parseAndDispatch 照常命中执行。
+      const root = richRef.current?.getElement();
+      const slash = root ? detectSlashTrigger(root) : null;
+      const trigger = (slash
+        ? { query: slash.query, startNode: slash.startNode, startOffset: slash.startOffset }
+        : menu.trigger);
+      if (trigger) {
+        richRef.current?.insertTokenAt(trigger, { type: 'slash', id: name, value: name });
+        onAfterMutate?.();
+      } else {
+        // 兜底：锚点丢失（极端情况）→ 退回纯文本，至少命令仍可发送执行。
+        richRef.current?.setContent([`/${name} `]);
+        richRef.current?.focus();
+        onAfterMutate?.();
+      }
       closeMenu();
       return;
     }

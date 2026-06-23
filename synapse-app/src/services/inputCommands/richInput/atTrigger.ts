@@ -157,16 +157,25 @@ export function detectAtTrigger(root: HTMLElement): AtTrigger | null {
   return { query, startNode: start.node, startOffset: start.offset };
 }
 
-/** / 命令触发上下文（单层菜单，无需 Range 锚点——命令始终在编辑器开头整体替换）。 */
+/**
+ * / 命令触发上下文（单层菜单）。
+ * #12a：补 startNode/startOffset 锚点——slash 现在要像 @ 一样删掉 `/query` 段、原位插 atomic chip
+ *   （仿 insertTokenAtTrigger 路径），需精确定位 `/` 字符在文本节点内的偏移。
+ *   命令始终在编辑器开头首个文本节点，startOffset 指向 `/` 字符（已跳过任何前导零宽占位）。
+ */
 export interface SlashTrigger {
   /** / 之后到光标的过滤片段（不含斜杠）。 */
   query: string;
+  /** `/` 字符所在的文本节点（= 编辑器首个非空文本节点）。 */
+  startNode: Text;
+  /** `/` 字符在该文本节点内的原始偏移（含可能的前导零宽，故按 raw 定位而非 stripped）。 */
+  startOffset: number;
 }
 
 /**
  * / 命令触发检测（contenteditable 版，与 @ 互斥，P19）。命中条件（严格，避免与文件路径里的 / 混淆）：
  *   1. 光标 collapsed、focusNode 是文本节点且在 root 内；
- *   2. 编辑器里没有任何 atomic token（/命令是纯文本指令，混 token 不触发）；
+ *   2. 编辑器里没有任何 atomic token（/命令是纯文本指令，混 token 不触发；也含已插入的 slash chip 自身）；
  *   3. focusNode 是 root 下首个非空文本节点（命令只在最开头）；
  *   4. 光标前文本（strip 零宽后）形如 /query（^/ 开头、query 无空白无第二个 /）。
  */
@@ -182,7 +191,10 @@ export function detectSlashTrigger(root: HTMLElement): SlashTrigger | null {
   const textBefore = raw.split(ZWSP).join('');
   const m = /^\/([^\s/]*)$/.exec(textBefore);
   if (!m) return null;
-  return { query: m[1] };
+  // `/` 是 stripped 串的第 0 个字符——映射回 raw 里的实际偏移（跳过任何前导零宽占位）。
+  const slashRawOffset = raw.indexOf('/');
+  if (slashRawOffset < 0) return null;
+  return { query: m[1], startNode: focusNode as Text, startOffset: slashRawOffset };
 }
 
 /** root 下深度优先首个非空（去零宽后）文本节点。 */

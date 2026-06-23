@@ -1736,11 +1736,14 @@ html[data-wallpaper="enabled"] .settings-panel {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: min(520px, 70vh);
+  /* ★ 主人#1：导航项无限增长时限高出滚动条（与 .agent-nav-list overflow-y 配合），别撑满整屏。 */
+  max-height: min(440px, 60vh);
   padding: 10px;
   border: 1px solid var(--syn-border);
   border-radius: 10px;
   box-shadow: var(--glass-shadow);
+  /* 裁切圆角内的滚动内容，使列表滚动条贴合面板边界。 */
+  overflow: hidden;
 }
 .agent-nav-head {
   display: flex;
@@ -1840,6 +1843,30 @@ html[data-wallpaper="enabled"] .settings-panel {
 }
 .agent-nav-row:hover .agent-nav-edit-btn {
   opacity: 1;
+}
+/* ★ #12b：导航浮层内的压缩点分隔行——醒目紫色，与消息流 CompactDivider(bpc 态) 视觉呼应，
+   让用户从导航就能看到哪段历史被压缩了。 */
+.agent-nav-compact {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  margin: 2px 0;
+  color: var(--syn-accent);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.agent-nav-compact-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(var(--syn-accent-rgb,139,92,246), 0.55), transparent);
+}
+.agent-nav-compact-icon {
+  flex-shrink: 0;
+}
+.agent-nav-compact-text {
+  flex-shrink: 0;
 }
 .agent-nav-edit-btn:hover {
   color: var(--syn-accent);

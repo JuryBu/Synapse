@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import type { RootState } from '@/store';
-import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter, setSendKeyMode, setAttachUserMsgToBoundary } from '@/store/slices/settings';
+import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter, setSendKeyMode, setAttachUserMsgToBoundary, setUserAvatar, setUserName, setAiAvatar, setAiName } from '@/store/slices/settings';
 import { clearConversation } from '@/store/slices/conversation';
 import { setConversations, setSelectedId } from '@/store/slices/conversationHistory';
 import { deleteConversationSnapshot, exportConversationSnapshot, listConversationSummaries } from '@/services/conversationPersistence';
@@ -53,6 +53,7 @@ import {
 import type { MultiAIMode, WorkflowNode } from '@/store/slices/multiAI';
 import { MULTI_AI_TRIGGER_PREFIX } from '@/services/multiAITrigger';
 import { WorkflowEditor } from './WorkflowEditor';
+import { AvatarUpload } from './AvatarUpload';
 import { AIClient } from '@/services/aiClient';
 import { describeCapabilities } from '@/services/modelCapabilities';
 import type { AIModelOption } from '@/types/aiModel';
@@ -882,6 +883,50 @@ export function SettingsPanel() {
                 value={Math.round(backgroundSettings.panelOpacity * 100)}
                 onChange={e => dispatch(setBackgroundSettings({ panelOpacity: Number(e.target.value) / 100 }))} />
               <span>{Math.round(backgroundSettings.panelOpacity * 100)}%</span>
+            </div>
+
+            {/* ★ #19 个性化：用户/AI 头像 + 昵称。头像走 AvatarUpload（压缩裁剪输出 dataURL），
+                昵称留空时聊天界面回退默认「你」/「Synapse AI」。 */}
+            <h3 style={{ marginTop: 24 }}>🎭 个性化</h3>
+            <div className="setting-item">
+              <label>用户头像</label>
+              <AvatarUpload
+                variant="user"
+                label="用户头像"
+                value={settings.userAvatar}
+                onChange={(dataUrl) => dispatch(setUserAvatar(dataUrl))}
+              />
+            </div>
+            <div className="setting-item">
+              <label>用户昵称</label>
+              <input
+                type="text"
+                placeholder="你"
+                maxLength={24}
+                value={settings.userName ?? ''}
+                onChange={e => dispatch(setUserName(e.target.value))}
+              />
+              <span className="setting-hint">聊天界面里你的消息显示的名字，留空则显示「你」。</span>
+            </div>
+            <div className="setting-item">
+              <label>AI 头像</label>
+              <AvatarUpload
+                variant="ai"
+                label="AI 头像"
+                value={settings.aiAvatar}
+                onChange={(dataUrl) => dispatch(setAiAvatar(dataUrl))}
+              />
+            </div>
+            <div className="setting-item">
+              <label>AI 昵称</label>
+              <input
+                type="text"
+                placeholder="Synapse AI"
+                maxLength={24}
+                value={settings.aiName ?? ''}
+                onChange={e => dispatch(setAiName(e.target.value))}
+              />
+              <span className="setting-hint">聊天界面里 AI 消息显示的名字，留空则显示「Synapse AI」。</span>
             </div>
           </div>
         )}

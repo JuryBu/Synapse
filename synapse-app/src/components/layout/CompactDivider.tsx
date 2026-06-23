@@ -54,7 +54,8 @@ export function CompactDivider({ marks }: Props) {
     >
       <span className="cd-line" />
       <span className="cd-chip">
-        <Icon size={12} className="cd-icon" />
+        <Icon size={13} className="cd-icon" />
+        <span className="cd-tag">压缩点</span>
         <span className="cd-text">{meta.label} · record 批次 {batchLabel}</span>
       </span>
       <span className="cd-line" />
