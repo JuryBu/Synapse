@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, FileText, ExternalLink, ListChecks, Undo2, GitBranch, ChevronDown, ChevronUp, ChevronRight } from 'lucide-react';
+import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, FileText, ExternalLink, ListChecks, Undo2, GitBranch, ChevronDown, ChevronUp, ChevronRight, Plus, Image as ImageIcon, AtSign } from 'lucide-react';
 import { memo, useDeferredValue, useState, useCallback, useEffect, useRef } from 'react';
 import { ToolCallCard } from './ToolCallCard';
 import { WorkflowCard } from './WorkflowCard';
@@ -235,11 +235,13 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
   }, [editAtt]);
 
   // ★ C6：编辑框 = RichTextInput + 完整两级 @ 菜单（与底部输入框同一套 useAtMention）。Enter 保存、Shift+Enter 换行、Esc 取消。
-  const { menuElement: editMenuElement, handleEditorKeyDown: editKeyDown, refreshMenu: editRefreshMenu } = useAtMention({
+  const { menuElement: editMenuElement, handleEditorKeyDown: editKeyDown, refreshMenu: editRefreshMenu, openAtMenu: editOpenAtMenu } = useAtMention({
     richRef: editRichRef,
     onSubmit: handleSubmitEdit,
     submitOnPlainEnter: true,
   });
+  // ★ #9：编辑态加号小窗开关（对齐底部输入框「加号」形态，替代旧 📎🖼 两按钮）。
+  const [editAddMenuOpen, setEditAddMenuOpen] = useState(false);
 
   // 进入编辑：RichTextInput 挂载后回填 + 聚焦 + 还原原消息附件成可编辑草稿。
   // ★ D1：用 buildRichParts(content, richTokens) 重组——有 richTokens 时无损还原 atomic 块，旧消息无 richTokens 自动降级纯文本。
@@ -478,8 +480,30 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
                 <input ref={editFileInputRef} type="file" multiple hidden onChange={(e) => { const fs = Array.from(e.target.files ?? []); if (fs.length) void editAtt.addFiles(fs, 'file'); e.target.value = ''; }} />
                 <input ref={editImageInputRef} type="file" accept="image/*" multiple hidden onChange={(e) => { const fs = Array.from(e.target.files ?? []); if (fs.length) void editAtt.addFiles(fs, 'image'); e.target.value = ''; }} />
                 <div className="message-edit-actions">
-                  <button className="edit-btn attach" onClick={() => editFileInputRef.current?.click()} title="附加文件">📎</button>
-                  <button className="edit-btn attach" onClick={() => editImageInputRef.current?.click()} title="附加图片">🖼</button>
+                  {/* ★ #9：附文件/附图两按钮收敛为「加号小窗」，与底部输入框 C3 加号对齐（上传文件/上传图片/提及@）。 */}
+                  <div className="add-menu-wrap">
+                    <button
+                      type="button"
+                      className={`input-tool-btn add-menu-trigger${editAddMenuOpen ? ' active' : ''}`}
+                      title="添加内容"
+                      onClick={() => setEditAddMenuOpen(o => !o)}
+                    >
+                      <Plus size={16} />
+                    </button>
+                    {editAddMenuOpen && (
+                      <div className="add-menu">
+                        <button className="add-menu-item" type="button" onClick={() => { setEditAddMenuOpen(false); editFileInputRef.current?.click(); }}>
+                          <FilePlus size={15} /> 上传文件
+                        </button>
+                        <button className="add-menu-item" type="button" onClick={() => { setEditAddMenuOpen(false); editImageInputRef.current?.click(); }}>
+                          <ImageIcon size={15} /> 上传图片
+                        </button>
+                        <button className="add-menu-item" type="button" onClick={() => { setEditAddMenuOpen(false); editOpenAtMenu(); }}>
+                          <AtSign size={15} /> 提及 @
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <button className="edit-btn save" onClick={handleSubmitEdit}>保存并重新发送</button>
                   <button className="edit-btn cancel" onClick={handleCancelEdit}>取消</button>
                 </div>

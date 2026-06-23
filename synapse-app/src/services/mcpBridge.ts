@@ -118,6 +118,26 @@ function parseToolName(fullName: string): { server: string; tool: string } | nul
 }
 
 /**
+ * 调用 MCP 工具前清理参数：剥掉值严格等于空字符串 '' 的顶层键，浅拷贝返回（不 mutate 原 args）。
+ *
+ * 缓解 server 端「空串被当已提供」的互斥误判：部分 server 对互斥参数（如 sandbox_exec 的 code/command）
+ * 做「已提供则冲突」校验，而模型生成 tool_call 常把另一边填成空串，被误判为冲突。剥空串后 server 看见
+ * 的就是「未提供」。与 server 侧修复正交：若 server 也改成「空串=未提供」，两边叠加不冲突。
+ *
+ * ⚠️ 只剥严格 === '' 的值。undefined / null 本就无影响不必处理；0 / false / 空数组 [] / 空对象 {}
+ * 都是有效值，绝不能剥。args 非对象（null/undefined）时返回空对象。
+ */
+function stripEmptyStringArgs(args: Record<string, unknown> | undefined | null): Record<string, unknown> {
+  if (!args || typeof args !== 'object') return {};
+  const cleaned: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (v === '') continue;
+    cleaned[k] = v;
+  }
+  return cleaned;
+}
+
+/**
  * 把 MCP callTool 返回的 { content: [{type:'text',text}|{type:'image',...}] } 扁平化为字符串
  * （读为主场景以文本为主；image / 资源类给占位说明）。兼容 server 直接返回字符串 / 其它结构的情况。
  */
@@ -299,7 +319,14 @@ class MCPBridge {
       const parsed = parseToolName(fullName);
       if (!parsed) return `Error: 非法 MCP 工具名 ${fullName}`;
       try {
-        const result = await platform.mcp.callTool(parsed.server, parsed.tool, args ?? {});
+        // 缓解：剥掉值严格等于空字符串 '' 的顶层参数键。
+        // 背景：部分 MCP server 对互斥参数（如 sandbox_exec 的 code / command）做「已提供则冲突」
+        // 校验，而模型生成 tool_call 时常把另一边填成空串 ''，被 server 误判为「已提供」从而报互斥错。
+        // 这里在调用前剥空串，让 server 看见的就是「未提供」。
+        // 注意只剥严格 '' —— undefined/null 本就无影响；0 / false / [] / {} 都是有效值，绝不可剥。
+        // 与 server 侧修复正交：若 server 也改成「空串=未提供」，两边叠加不冲突。
+        const cleanedArgs = stripEmptyStringArgs(args);
+        const result = await platform.mcp.callTool(parsed.server, parsed.tool, cleanedArgs);
         const text = flattenMcpResult(result);
         return text || '[MCP 工具无返回内容]';
       } catch (err) {

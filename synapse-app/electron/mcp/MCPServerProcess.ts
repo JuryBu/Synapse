@@ -1,10 +1,27 @@
 /**
- * MCP Server Process — stdio JSON-RPC 2.0 通信
- * 管理单个 MCP 服务器子进程的生命周期
+ * MCP Server Process — JSON-RPC 2.0 通信
+ * 管理单个 MCP 服务器的生命周期。支持两种 transport：
+ *   ① stdio（默认）：spawn node 子进程，走 stdin/stdout 行分隔 JSON-RPC。三个本地 server 用这条。
+ *   ② Streamable HTTP（★ #16 新增）：不 spawn 子进程，对远端 endpoint 发 HTTP POST（body 是
+ *      JSON-RPC，响应为 SSE event-stream），用于复用四源共享 HTTP Broker（如 Exa @ /exa/mcp）。
+ *      握手返回 `mcp-session-id` 响应头，后续请求/通知都回带该 session id。
+ *
+ * 两条 transport 共用同一套对外接口（start/stop/request/notify/listTools/callTool/close），
+ * 上层（ipc/mcp.ts、桥接层）无需区分；差异全部封装在本类内部的 isHttp 分支里。
  */
 
 import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
+
+/**
+ * ★ #16：MCPServerProcess 构造可选项。
+ *   - transport：'stdio'（默认）| 'http'。也可通过「有 url 且无 command」隐式判定为 http。
+ *   - url：HTTP transport 的 endpoint（如 http://127.0.0.1:14588/exa/mcp）。
+ */
+export interface MCPProcessOptions {
+    transport?: 'stdio' | 'http';
+    url?: string;
+}
 
 interface JSONRPCRequest {
     jsonrpc: '2.0';
@@ -39,18 +56,37 @@ export class MCPServerProcess extends EventEmitter {
      */
     private startErrorReject: ((err: Error) => void) | null = null;
 
+    /**
+     * ★ #16 HTTP transport 状态。
+     *   - isHttp：true 时 start/request/notify/stop 走 HTTP 分支（不 spawn 子进程）。
+     *   - httpUrl：endpoint。
+     *   - sessionId：initialize 握手后 server 返回的 `mcp-session-id`，后续请求/通知回带。
+     */
+    private readonly isHttp: boolean;
+    private readonly httpUrl: string;
+    private sessionId: string | null = null;
+
     constructor(
         public readonly name: string,
         private command: string,
         private args: string[] = [],
         private env: Record<string, string> = {},
+        opts?: MCPProcessOptions,
     ) {
         super();
+        // HTTP 判定：显式 transport:'http'，或「给了 url 且没给 command」（隐式）。
+        this.httpUrl = opts?.url ?? '';
+        this.isHttp = opts?.transport === 'http' || (!!this.httpUrl && !command);
     }
 
     get status() { return this._status; }
 
     async start(): Promise<void> {
+        // ★ #16 HTTP 分支：不 spawn 子进程，走 Streamable HTTP 握手。
+        if (this.isHttp) {
+            return this.startHttp();
+        }
+
         if (this.process) return;
         this._status = 'starting';
 
@@ -128,6 +164,23 @@ export class MCPServerProcess extends EventEmitter {
     }
 
     async stop(): Promise<void> {
+        // ★ #16 HTTP 分支：尽力对 endpoint 发 DELETE 终止 session（失败忽略），再置 stopped。
+        if (this.isHttp) {
+            const sid = this.sessionId;
+            this.sessionId = null;
+            this._status = 'stopped';
+            if (sid) {
+                try {
+                    await fetch(this.httpUrl, {
+                        method: 'DELETE',
+                        headers: { 'mcp-session-id': sid },
+                    });
+                } catch { /* server 可能不支持 DELETE，忽略 */ }
+            }
+            this.emit('close', 0);
+            return;
+        }
+
         if (!this.process) return;
         this.process.kill('SIGTERM');
         await new Promise<void>(resolve => {
@@ -145,6 +198,11 @@ export class MCPServerProcess extends EventEmitter {
     }
 
     async request(method: string, params?: unknown, timeout = 30000): Promise<unknown> {
+        // ★ #16 HTTP 分支：走 fetch POST + SSE 解析，不经 stdin/stdout。
+        if (this.isHttp) {
+            return this.httpRequest(method, params, timeout);
+        }
+
         if (!this.process?.stdin) throw new Error('MCP not running');
         const id = ++this.requestId;
         const msg: JSONRPCRequest = { jsonrpc: '2.0', id, method, params };
@@ -161,6 +219,12 @@ export class MCPServerProcess extends EventEmitter {
     }
 
     async notify(method: string, params?: unknown): Promise<void> {
+        // ★ #16 HTTP 分支：通知（无 id）也走 POST，server 回 202 无 body。
+        if (this.isHttp) {
+            await this.httpNotify(method, params);
+            return;
+        }
+
         if (!this.process?.stdin) return;
         const msg = { jsonrpc: '2.0', method, params };
         this.process.stdin.write(JSON.stringify(msg) + '\n');
@@ -207,5 +271,140 @@ export class MCPServerProcess extends EventEmitter {
                 // Non-JSON line, ignore
             }
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // ★ #16 Streamable HTTP transport 实现
+    //   协议（已对 Broker /exa/mcp 真机验证）：
+    //     · 对 endpoint 发 HTTP POST，body = JSON-RPC；Accept 头需含 text/event-stream。
+    //     · initialize 响应头返回 mcp-session-id；后续请求/通知都回带该 session id。
+    //     · 响应 Content-Type 为 text/event-stream（SSE，`data: {json}`），通知则回 202 空 body。
+    //   与 stdio 分支共用 request/notify/listTools/callTool 对外接口，差异封装在此。
+    // ─────────────────────────────────────────────────────────────────────
+
+    /** initialize 握手（HTTP）：取并保存 session id，发 initialized 通知，置 running 并广播。 */
+    private async startHttp(): Promise<void> {
+        if (this._status === 'running' || this._status === 'starting') return;
+        this._status = 'starting';
+        this.sessionId = null;
+        try {
+            await this.httpRequest('initialize', {
+                protocolVersion: '2024-11-05',
+                capabilities: { tools: {} },
+                clientInfo: { name: 'synapse', version: '0.1.0' },
+            });
+            await this.httpNotify('notifications/initialized');
+            this._status = 'running';
+            console.log(`[MCP:${this.name}] initialized (http @ ${this.httpUrl}, session=${this.sessionId ?? 'none'})`);
+            // 与 stdio 分支一致：握手成功广播，触发渲染端 mcpBridge.refresh() 补注册 mcp__* 工具。
+            this.emit('status-change', { name: this.name, status: 'running' });
+            this.emit('ready', { name: this.name });
+        } catch (err) {
+            this._status = 'error';
+            console.error(`[MCP:${this.name}] http start failed:`, (err as Error)?.message);
+            throw err;
+        }
+    }
+
+    /** 公共请求头：Accept（JSON + SSE）、Content-Type，已有 session id 时回带。 */
+    private httpHeaders(): Record<string, string> {
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/event-stream',
+        };
+        if (this.sessionId) headers['mcp-session-id'] = this.sessionId;
+        return headers;
+    }
+
+    /** 发一条带 id 的 JSON-RPC 请求并等结果（HTTP POST + SSE 解析 + AbortController 超时）。 */
+    private async httpRequest(method: string, params?: unknown, timeout = 30000): Promise<unknown> {
+        const id = ++this.requestId;
+        const body = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
+        let res: Response;
+        try {
+            res = await fetch(this.httpUrl, {
+                method: 'POST',
+                headers: this.httpHeaders(),
+                body,
+                signal: controller.signal,
+            });
+        } catch (err) {
+            if ((err as Error)?.name === 'AbortError') {
+                throw new Error(`MCP timeout: ${method} (${timeout}ms)`);
+            }
+            throw err;
+        } finally {
+            clearTimeout(timer);
+        }
+        // initialize 响应头带回 session id —— 存下供后续请求/通知回带。
+        const sid = res.headers.get('mcp-session-id');
+        if (sid && !this.sessionId) this.sessionId = sid;
+
+        if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            throw new Error(`MCP http ${res.status} ${method}: ${errText.slice(0, 200)}`);
+        }
+
+        const ct = res.headers.get('content-type') || '';
+        const text = await res.text();
+        const messages = ct.includes('text/event-stream')
+            ? this.parseSSE(text)
+            : (text.trim() ? this.parseJSONLines(text) : []);
+
+        // 找到与本次 id 匹配的响应（SSE 流里可能夹带 server 通知）。
+        const matched = messages.find(
+            m => (m as JSONRPCResponse).id === id,
+        ) as JSONRPCResponse | undefined;
+        if (!matched) {
+            throw new Error(`MCP http ${method}: no matching response for id ${id}`);
+        }
+        if (matched.error) {
+            throw new Error(matched.error.message);
+        }
+        return matched.result;
+    }
+
+    /** 发一条无 id 的通知（HTTP POST，server 通常回 202 空 body）。 */
+    private async httpNotify(method: string, params?: unknown): Promise<void> {
+        const body = JSON.stringify({ jsonrpc: '2.0', method, params });
+        try {
+            await fetch(this.httpUrl, {
+                method: 'POST',
+                headers: this.httpHeaders(),
+                body,
+            });
+        } catch (err) {
+            console.error(`[MCP:${this.name}] http notify "${method}" failed:`, (err as Error)?.message);
+        }
+    }
+
+    /** 解析 SSE 文本：抽出每个事件块的 `data:` 行拼成 JSON。 */
+    private parseSSE(text: string): unknown[] {
+        const out: unknown[] = [];
+        for (const block of text.split(/\r?\n\r?\n/)) {
+            const dataLines = block.split(/\r?\n/).filter(l => l.startsWith('data:'));
+            if (!dataLines.length) continue;
+            const json = dataLines.map(l => l.slice(5).trim()).join('');
+            try { out.push(JSON.parse(json)); } catch { /* 非 JSON data 行忽略 */ }
+        }
+        return out;
+    }
+
+    /** 解析直接返回的 JSON（单对象/数组，或多行 JSON）。 */
+    private parseJSONLines(text: string): unknown[] {
+        const trimmed = text.trim();
+        // 先尝试整体 parse（最常见：单个 JSON 对象/数组）。
+        try {
+            const v = JSON.parse(trimmed);
+            return Array.isArray(v) ? v : [v];
+        } catch { /* 落到逐行 */ }
+        const out: unknown[] = [];
+        for (const line of trimmed.split(/\r?\n/)) {
+            if (!line.trim()) continue;
+            try { out.push(JSON.parse(line)); } catch { /* ignore */ }
+        }
+        return out;
     }
 }

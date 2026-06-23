@@ -81,6 +81,15 @@
 4. **优先级**：A 类 bug 先清，B 类新功能跟上，C 类待你定——是否这个顺序？
 5. **#4 sandbox_exec**：要不要做 Synapse 侧缓解（调用前剥离空字符串可选参数）？
 
+## 六、施工进展（实时）
+- ✅ 批1 `c6cac69`：#2 设置中止（流式中缓存 client 不重建）/ #8 md 公式图（MarkdownViewer KaTeX+图片）/ #16 Exa 框架（npx exa-mcp-server, enabled:false 待主人填 EXA_API_KEY）/ #17 SKILL.md 正文注入
+- ✅ 批2 `eff9325`：#7 H5 语义修正（按 task_boundary 状态注入「开/切 task」）/ #13 压缩阻塞 UI（isCompacting + banner + 发送守卫；崩溃恢复已有）
+- ⬜ A 类剩：#9 编辑消息框对齐加号小窗 / #12 / 命令彩色 chip + 压缩点可见 / 消息导航 UI 补丁（透明度+滚动条）
+- ⬜ B 类：#6 双队列(interrupt+queue)+#11 三框（大，运行时键位 Enter/Shift/Ctrl 可设置）/ #19 个性化（头像+昵称+裁剪上传）
+- ⬜ C 类：#14 record 动态分级（大，hit+距离）/ #18 记忆收敛（systemPrompt 引导原生）/ #4 mcpBridge 剥空字段 / #3 对话级设置持久化验证
+- ⏸ #15 压缩后卡片更新：主人不确定 + headline 概念上不随压缩变，暂记小本本待主人明确指哪个卡片、期望显示什么
+- 🔬 批1/批2 待重启真机验证：#2 设置中止、#8 md公式、#13 压缩 banner、#7 reminder
+
 ## 五、待评估 / 小本本（承接 Plan_6）
 - queue 附件 release / run_command 副作用入账本 / 队列上限连点 / subtitle 并发节流（Plan_6 遗留）
 - #17 缺陷 B：WORKFLOW 注入 BUILT_IN 静态 vs commandRegistry 实际，可能漂移
