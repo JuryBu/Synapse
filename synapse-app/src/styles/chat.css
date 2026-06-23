@@ -26,6 +26,14 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* ★ H3（反馈）：用户消息半透明主体色底——滚动时一眼区分用户/AI 消息（AI 消息保持透明平铺）。
+   color-mix 取主体色 ~8% 透明度，深浅模式自适应；圆角 + 内边距形成气泡块感，不与现有玻璃化变量冲突。 */
+.message.message-user {
+  background: color-mix(in srgb, var(--syn-primary) 8%, transparent);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
 /* Avatar */
 .message-avatar {
   width: 28px;

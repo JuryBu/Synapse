@@ -115,6 +115,8 @@ const UPSTREAM_HINT_WORDS = [
   'upstream_error', 'upstream', 'bad gateway', 'gateway',
   'timeout', 'timed out', 'connection', 'econnreset', 'econnrefused',
   'socket hang up', 'temporarily unavailable', 'service unavailable',
+  // ★ H2：补「请求被取消 / 超期」类——网关把上游 context canceled / deadline exceeded 包装成 400/422 时也按可重试处理。
+  'context canceled', 'context cancelled', 'deadline exceeded', 'request canceled', 'request cancelled',
 ];
 
 export function classifyError(
@@ -123,8 +125,14 @@ export function classifyError(
   errName?: string,
   signalAborted?: boolean,
 ): ErrorClassification {
-  // ① abort 优先级最高——绝不可重试，否则 stop 会触发重试死循环。
-  if (errName === 'AbortError' || signalAborted) {
+  // ① abort 判定——必须是【用户主动停止】（signalAborted = signal.aborted || _userAborted，调用方传 this.aborted）。
+  //   ⚠️ H2 修复（图六根因）：服务端/网关取消连接（context canceled 等）时，fetch 在底层也会把异常抛成
+  //   errName==='AbortError'，但用户【并没有】点停止。旧逻辑 `errName==='AbortError' || signalAborted` 把这种 API
+  //   故障误判成「用户中止」→ 不可重试 + UI 显示「已停止生成」（看着像用户自己停的）。改为只信 signalAborted：
+  //   非用户触发的 AbortError 落到下方 status===undefined 的 network 分支 → 可重试，重试耗尽再显示真实网络错文案。
+  //   竞态安全：abort() 同步先置 _userAborted=true 再 abortController.abort()，故用户停时 signalAborted 必为真。
+  void errName;
+  if (signalAborted) {
     return { retryable: false, category: 'aborted', userMessage: 'aborted' };
   }
 
@@ -370,7 +378,9 @@ export class AIClient {
         status,
         errText,
         fetchErr?.name,
-        this.abortController?.signal.aborted,
+        // ★ H2：用 this.aborted（含 _userAborted 兜底）而非裸 signal.aborted——abort() 会把 abortController 置 null，
+        //   裸读 signal.aborted 经 ?. 短路成 undefined 会漏判用户主动停。与 streamChat catch 调用口径统一。
+        this.aborted,
       );
 
       if (cls.category === 'aborted') {
