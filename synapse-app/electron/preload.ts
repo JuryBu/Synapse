@@ -56,6 +56,14 @@ contextBridge.exposeInMainWorld('synapse', {
     restart: (server: string) => ipcRenderer.invoke('mcp:restart', server),
     start: (server: string) => ipcRenderer.invoke('mcp:start', server),
     stop: (server: string) => ipcRenderer.invoke('mcp:stop', server),
+    // ★ MCP 竞态修复：订阅主进程广播的「server 状态变更（已就绪 running）」事件。
+    //   主进程在 server initialize 握手成功后 webContents.send('mcp:status-changed', {name})，
+    //   渲染端 mcpBridge 据此自动 refresh() 补注册 mcp__* 工具。返回取消订阅函数。
+    onStatusChanged: (cb: (payload: { name: string; status: string }) => void) => {
+      const listener = (_e: any, payload: { name: string; status: string }) => cb(payload);
+      ipcRenderer.on('mcp:status-changed', listener);
+      return () => ipcRenderer.removeListener('mcp:status-changed', listener);
+    },
   },
 
   // 命令执行 (Stage 7 实现)

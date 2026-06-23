@@ -3,13 +3,30 @@
  * MCP 服务器管理：启动/停止/重启/工具调用
  */
 
-import { ipcMain } from 'electron';
+import { ipcMain, BrowserWindow } from 'electron';
 import { MCPServerProcess } from '../mcp/MCPServerProcess';
 import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
 
 const servers = new Map<string, MCPServerProcess>();
+
+/**
+ * ★ MCP 竞态修复：统一在「新建 MCPServerProcess」处挂上 status-change 监听，
+ *   server initialize 握手成功（置 running）时广播 'mcp:status-changed' 给所有渲染窗口。
+ *   渲染端 mcpBridge 收到后自动 refresh() → listTools + registerOne 补注册 mcp__* 工具。
+ *
+ *   为何广播给所有窗口：与 main.ts 的多窗口模型一致（getAllWindows），不假设只有 mainWindow；
+ *   webContents 已销毁的窗口跳过，避免向已关闭窗口 send 抛错。
+ */
+function bindStatusBroadcast(proc: MCPServerProcess): void {
+    proc.on('status-change', (payload: { name: string; status: string }) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+            if (win.isDestroyed() || win.webContents.isDestroyed()) continue;
+            win.webContents.send('mcp:status-changed', payload);
+        }
+    });
+}
 
 interface MCPConfigEntry {
     command: string;
@@ -96,6 +113,7 @@ export async function startEnabledMCPServers(): Promise<void> {
         if (entry.enabled === false) continue; // 仅显式 disabled 跳过；未填默认启动。
         if (servers.has(name)) continue; // 已存在（被动 start 过）则不重复。
         const proc = new MCPServerProcess(name, entry.command, entry.args, entry.env);
+        bindStatusBroadcast(proc);
         servers.set(name, proc);
         tasks.push(
             proc.start()
@@ -146,6 +164,7 @@ export function registerMCPHandlers(): void {
         if (!entry) throw new Error(`MCP server "${name}" not found in config`);
 
         const proc = new MCPServerProcess(name, entry.command, entry.args, entry.env);
+        bindStatusBroadcast(proc);
         servers.set(name, proc);
         await proc.start();
         return { status: 'running' };
@@ -173,6 +192,7 @@ export function registerMCPHandlers(): void {
         const entry = config[name];
         if (!entry) throw new Error(`MCP server "${name}" not found`);
         const newProc = new MCPServerProcess(name, entry.command, entry.args, entry.env);
+        bindStatusBroadcast(newProc);
         servers.set(name, newProc);
         await newProc.start();
         return { status: 'running' };

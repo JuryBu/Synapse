@@ -150,14 +150,66 @@ class MCPBridge {
   /** 当前已注册进 toolRegistry 的 MCP 工具全名集合（用于 refresh 时增量注销已消失的工具）。 */
   private registered = new Set<string>();
 
+  /** 是否已订阅主进程的 server 就绪广播（只订一次，避免重复监听）。 */
+  private subscribed = false;
+  /** pending 退避重查的剩余次数 + 定时器（防并发重复排程）。 */
+  private pendingRetriesLeft = 0;
+  private pendingTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * ★ MCP 竞态修复（事件驱动主路）：首次 refresh 时订阅主进程广播的「server 就绪」事件。
+   *   server initialize 握手成功置 running 后，主进程 webContents.send('mcp:status-changed')，
+   *   这里收到即自动 refresh() → listTools + registerOne 补注册 mcp__* 工具。
+   *   Web 模式 / 旧 preload 无 onStatusChanged → 存在性检查降级跳过，仅靠退避重查兜底。
+   */
+  private ensureSubscribed(): void {
+    if (this.subscribed) return;
+    this.subscribed = true;
+    const sub = (platform.mcp as { onStatusChanged?: (cb: (p: { name: string; status: string }) => void) => () => void }).onStatusChanged;
+    if (typeof sub !== 'function') return; // Web 模式 / 不支持：降级，靠退避重查兜底。
+    try {
+      // 模块级单例，生命周期与渲染进程同寿，订阅常驻无需保留取消句柄。
+      sub((payload) => {
+        console.log(`[mcpBridge] mcp:status-changed received (${payload?.name} → ${payload?.status}), refreshing…`);
+        void this.refresh();
+      });
+    } catch (err) {
+      console.error('[mcpBridge] subscribe onStatusChanged failed:', (err as Error)?.message);
+    }
+  }
+
+  /**
+   * ★ MCP 竞态修复（退避重查兜底，不依赖事件的第二保险）：
+   *   首次 refresh 后若仍有 server 处于 starting（握手未完成、还没 running），
+   *   排程 2-3 次退避重查（递增延迟），不依赖广播事件，与事件驱动构成双保险。
+   *   running 数已覆盖全部 enabled server（无 pending）时不排程；事件先到也会自然把工具补齐。
+   */
+  private schedulePendingRetry(): void {
+    if (this.pendingTimer) return; // 已有排程，避免叠加。
+    if (this.pendingRetriesLeft <= 0) this.pendingRetriesLeft = 3; // 初始化重试预算。
+    const attempt = 4 - this.pendingRetriesLeft; // 1,2,3
+    const delay = 800 * attempt; // 800ms / 1600ms / 2400ms 退避。
+    this.pendingTimer = setTimeout(() => {
+      this.pendingTimer = null;
+      this.pendingRetriesLeft -= 1;
+      console.log(`[mcpBridge] pending server 退避重查（剩余 ${this.pendingRetriesLeft} 次）…`);
+      void this.refresh();
+    }, delay);
+  }
+
   /**
    * 刷新：拉 getStatus → 对每个 running server listTools → 注册/更新工具进 toolRegistry，
    * 并注销「本轮不再出现」的旧 MCP 工具（server 停用 / 重启 / 工具列表变化）。
    *
    * Web 模式 getStatus 返回 { servers: [] } → 注销所有旧 MCP 工具、注册集为空（天然降级，不崩）。
    * 失败（IPC 异常等）catch 后保持现有注册集不变，不影响内置工具。
+   *
+   * ★ MCP 竞态修复：首次调用时订阅 server 就绪广播（事件驱动主路）；本轮若有 starting 的
+   *   pending server，排程退避重查（兜底第二保险）。两路都最终触发 register，互不冲突。
    */
   async refresh(): Promise<void> {
+    this.ensureSubscribed();
+
     let servers: McpServerStatus[] = [];
     try {
       const status = await platform.mcp.getStatus();
@@ -168,9 +220,17 @@ class MCPBridge {
     }
 
     const nextNames = new Set<string>();
+    let hasPending = false; // 本轮是否有 enabled 但仍在 starting（握手未完成）的 server。
 
     for (const server of servers) {
-      if (!server?.name || !server.running) continue;
+      if (!server?.name) continue;
+      if (!server.running) {
+        // ★ 竞态根因点：旧实现这里直接 continue 丢弃所有非 running server。
+        //   现对「正在启动（starting）」的 server 记 pending 标志，触发退避重查（而非永久丢弃）。
+        //   只有 starting 算 pending——stopped/disabled/error 不会自行变 running，重查无意义。
+        if (server.status === 'starting') hasPending = true;
+        continue;
+      }
       let tools: McpToolDef[] = [];
       try {
         tools = (await platform.mcp.listTools(server.name)) as McpToolDef[];
@@ -196,6 +256,15 @@ class MCPBridge {
       }
     }
     this.registered = nextNames;
+
+    // 本轮仍有 starting 的 server → 退避重查兜底（事件驱动是主路，这是不依赖事件的第二保险）。
+    if (hasPending && this.pendingRetriesLeft !== 0) {
+      this.schedulePendingRetry();
+    } else if (!hasPending) {
+      // 全部就绪（或无 pending）→ 清空重试预算与待定定时器，停止兜底重查。
+      this.pendingRetriesLeft = 0;
+      if (this.pendingTimer) { clearTimeout(this.pendingTimer); this.pendingTimer = null; }
+    }
   }
 
   /** 把单个 MCP 工具注册（或覆盖更新）进 toolRegistry。 */

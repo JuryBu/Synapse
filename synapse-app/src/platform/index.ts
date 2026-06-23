@@ -152,6 +152,9 @@ export interface SynapseAPI {
     restart: (server: string) => Promise<void>;
     start: (server: string) => Promise<void>;
     stop: (server: string) => Promise<void>;
+    // ★ MCP 竞态修复：订阅主进程「server 就绪」广播（Electron 专有）。Web 模式无此方法，
+    //   mcpBridge 做存在性检查降级跳过。返回取消订阅函数。
+    onStatusChanged?: (cb: (payload: { name: string; status: string }) => void) => () => void;
   };
   terminal: {
     create: (opts: any) => Promise<any>;
@@ -282,6 +285,8 @@ function getWebMock(): SynapseAPI {
       restart: async () => { },
       start: async () => { },
       stop: async () => { },
+      // Web 模式无 MCP 进程、无就绪事件：返回 no-op 取消函数（mcpBridge 也会做存在性检查）。
+      onStatusChanged: () => () => { },
     },
     terminal: {
       create: async () => ({ id: 'mock-terminal', status: 'web-mode' }),

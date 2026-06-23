@@ -337,10 +337,15 @@ export function AgentPanel() {
 
     const ranges: { b: any; startIdx: number; endIdx: number }[] = [];
     for (const b of boundaries) {
-      const startIdx = b.anchorMessageId != null ? msgIdToIdx.get(b.anchorMessageId) : undefined;
-      if (startIdx === undefined) { orphans.push(b); continue; }
+      const anchorIdx = b.anchorMessageId != null ? msgIdToIdx.get(b.anchorMessageId) : undefined;
+      if (anchorIdx === undefined) { orphans.push(b); continue; }
+      // ★ 反馈#1：卡片区间从 anchor（begin 那刻最后 assistant 消息＝开场白「我按流程来…」）的【下一条】开始，
+      //   开场白留卡片外/前，卡片只含 begin 之后的过程消息。渲染 IIFE 不变：i=anchorIdx 正常渲染开场白，i=startIdx 才触发卡片。
+      const startIdx = anchorIdx + 1;
+      // active（无 endAnchor）或 endAnchor 被截断不在 → 延伸到当前末尾；done 边界用 endAnchor 本身——
+      //   若 endAnchor < startIdx 表示 begin→end 间无过程的空任务，交由下方 startIdx>endIdx 跳过，不误延伸吞后文。
       let endIdx = b.endAnchorMessageId != null ? msgIdToIdx.get(b.endAnchorMessageId) : undefined;
-      if (endIdx === undefined || endIdx < startIdx) endIdx = messages.length - 1; // active/下界失效 → 延伸到末尾
+      if (b.endAnchorMessageId == null || endIdx === undefined) endIdx = messages.length - 1;
       ranges.push({ b, startIdx, endIdx });
     }
     // 防区间重叠（理论不重叠：begin 会收口前一个 active；保险按 startIdx 升序裁剪）。

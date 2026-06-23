@@ -111,6 +111,13 @@ export class MCPServerProcess extends EventEmitter {
             await this.notify('notifications/initialized');
             this._status = 'running';
             console.log(`[MCP:${this.name}] initialized`);
+            // ★ MCP 竞态修复：握手成功置 running 时主动广播事件。旧链路 mcpBridge.refresh() 只在
+            //   AgentPanel 首次 aiClient 就绪时 pull 一次，那一刻 server 还在 starting → 被
+            //   mcpBridge `!server.running` 跳过 → 零个 mcp__* 工具注册。emit 后由 ipc/mcp.ts
+            //   监听并 webContents.send → 渲染端 mcpBridge 自动 refresh()，事件驱动补注册。
+            //   带 server name，便于上层区分是哪个 server 就绪。
+            this.emit('status-change', { name: this.name, status: 'running' });
+            this.emit('ready', { name: this.name });
         } catch (err) {
             this._status = 'error';
             throw err;

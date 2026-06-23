@@ -1072,6 +1072,13 @@
   overflow-y: auto;
   border-radius: 10px;
   padding: 12px 14px;
+  /* ★ 反馈#3：原靠 glass-panel(0.75 + 全局模糊被关=0)太透、文字和背景重合。浮层是临时模态、要清晰可读——
+     用高不透明面板底(0.97)覆盖 glass-panel + 独立 12px 模糊(不跟被关的 --glass-blur)，既清晰又留玻璃质感、不过分深。 */
+  background: rgba(var(--syn-bg-surface-rgb), 0.97) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid var(--syn-border);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28);
 }
 .tb-history-header {
   display: flex;
