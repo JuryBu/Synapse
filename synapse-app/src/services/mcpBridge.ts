@@ -86,6 +86,13 @@ function classifyMcpTool(server: string, tool: string): { approvalLevel: Approva
     return { approvalLevel: 'read', permissionCategory: 'read' };
   }
 
+  if (server === 'exa') {
+    // ★ #16：Exa 是【纯只读语义搜索/抓取】MCP——web_search_exa（联网搜索）、web_fetch_exa（取页内容）
+    //   及其余 *_exa 工具均无副作用、不写本地。全部归 read（approvalLevel:'read'、autoApproveRead 下直放，
+    //   子代理经 read 权限闸门自动纳入）。无写/执行类工具，故无需写/危险分支。
+    return { approvalLevel: 'read', permissionCategory: 'read' };
+  }
+
   // 未知 server：保守按通用关键词识别，命中写/执行给更高等级，否则默认 read。
   if (/(exec|run|launch|command|shell|kill)/.test(t)) {
     return { approvalLevel: 'dangerous', permissionCategory: 'command' };

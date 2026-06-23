@@ -85,6 +85,20 @@ export function ensureDefaultMCPConfig(): void {
                     args: [path.join(base, 'mcp-web-fetcher', 'dist', 'index.js')],
                     enabled: false,
                 },
+                // ★ #16 Exa MCP（广泛语义搜索：web_search_exa / web_fetch_exa 等）。
+                //   ⚠️ 与上面三个不同：本机【没有】本地 mcp-exa/dist/index.js（find 全盘未命中），
+                //   Exa 在本环境只通过四源共享 HTTP Broker（http://127.0.0.1:14588/exa/mcp）提供。
+                //   而 MCPServerProcess 目前【纯 stdio】（spawn + stdin/stdout JSON-RPC），不支持 HTTP transport。
+                //   故这里用官方 stdio 版 `exa-mcp-server`（npx 拉起，走 stdio，适配现有架构），
+                //   需环境变量 EXA_API_KEY；缺 key 故 enabled:false（不默认启动，免缺 key 反复握手失败刷日志）。
+                //   主人开启前需：① 填 EXA_API_KEY ② 改 enabled:true（首次 npx 会联网拉包）。
+                //   备选：待 MCPServerProcess 支持 HTTP transport 后，可改为直连 Broker /exa/mcp。
+                'exa': {
+                    command: 'npx',
+                    args: ['-y', 'exa-mcp-server'],
+                    env: { EXA_API_KEY: '' },
+                    enabled: false,
+                },
             },
         };
         fs.mkdirSync(dir, { recursive: true });

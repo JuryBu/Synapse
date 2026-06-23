@@ -10,6 +10,8 @@ export interface SkillDefinition {
   contentPath: string;
   enabled: boolean;
   sourceType: 'builtin' | 'global' | 'workspace';
+  /** #17: SKILL.md 正文，由 loadRulesFromFS 每轮从 contentPath 读取并缓存；undefined 表示尚未加载或文件缺失。 */
+  content?: string;
 }
 
 export interface WorkflowDefinition {
@@ -217,6 +219,9 @@ class ExtensionManager {
     const workspaceRules = await this.readOptionalRule(workspacePath);
     this.globalRules = globalRules ?? '';
     this.workspaceRules = workspaceRules ?? '';
+    // #17: 整合进同一「每轮加载」流——一并读取 enabled skill 的 SKILL.md 正文，
+    //   这样 agentLoop 现有的 loadRulesFromFS() 调用即可顺带刷新 skill 正文，无需改 agentLoop。
+    await this.loadSkillsContent();
     this.rulesSources = [
       {
         name: 'SYNAPSE.md',
@@ -245,12 +250,21 @@ class ExtensionManager {
     const parts: string[] = [];
 
     // Skills injection
+    // #17: 注入 SKILL.md 正文（行为指导），而非仅 name/description。
+    //   有正文者注入全文（SKILL 是行为指导，优先完整）；未读到正文者退回 name + description 摘要。
     const enabledSkills = this.getEnabledSkills();
     if (injectSkills && enabledSkills.length > 0) {
+      const skillBlocks = enabledSkills.map(s => {
+        const header = `### ${s.name}\n${s.description}`;
+        if (s.content && s.content.trim()) {
+          return `${header}\n\n${s.content.trim()}`;
+        }
+        return header;
+      });
       parts.push(`<skills>
-可用技能:
-${enabledSkills.map(s => `- ${s.name}: ${s.description}`).join('\n')}
-当用户的问题匹配某技能的触发模式时，自动应用该技能的专业范式。
+可用技能（含完整行为指导，当用户问题匹配某技能触发模式时，遵循对应技能正文的范式与步骤）:
+
+${skillBlocks.join('\n\n---\n\n')}
 </skills>`);
     }
 
@@ -275,6 +289,24 @@ ${this.workspaceRules ? `工作区规则:\n${this.workspaceRules}` : ''}
     }
 
     return parts.join('\n\n');
+  }
+
+  /**
+   * #17: 为所有 enabled skill 读取其 contentPath（各 skill 目录下的 SKILL.md）正文并缓存到
+   *   skill.content。复用 readOptionalRule（IPC file:exists/read）。文件缺失/读取失败时置为 undefined，
+   *   buildExtensionPrompt 仅注入有正文者的全文。串行读取，数量很少（≤7），不必并发。
+   */
+  private async loadSkillsContent(): Promise<void> {
+    const { isElectron } = await import('@platform/index');
+    if (!isElectron || !window.synapse) return;
+    for (const skill of this.skills) {
+      if (!skill.enabled) {
+        skill.content = undefined;
+        continue;
+      }
+      const content = await this.readOptionalRule(skill.contentPath);
+      skill.content = content ?? undefined;
+    }
   }
 
   private async readOptionalRule(filePath: string): Promise<string | null> {

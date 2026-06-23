@@ -563,11 +563,16 @@ export function AgentPanel() {
   const supportsMaxTokens = supportedParameters.length === 0 || supportedParameters.includes('max_tokens');
 
   // Build AIClient from current settings
+  // ★ #2（反馈）：流式生成中改设置不重建 AIClient——否则 useMemo 依赖变 → new AIClient → useEffect 重建 AgentLoop →
+  //   当前流绑定的旧 client 实例被废弃 → 输出中途中止。改为：流式中返回现有实例（设置变更先缓存），本轮结束后
+  //   isStreaming 变 false 触发重算再应用新设置（无感切换、下一轮生效，不打断当前流）。
+  const aiClientRef = useRef<AIClient | null>(null);
   const aiClient = useMemo(() => {
+    if (isStreaming && aiClientRef.current) return aiClientRef.current;
     const apiKey = settings.apiKeys?.openai || '';
     const baseUrl = settings.apiEndpoints?.openai || 'https://openrouter.ai/api/v1';
-    if (!apiKey || !model) return null;
-    return new AIClient({
+    if (!apiKey || !model) { aiClientRef.current = null; return null; }
+    const client = new AIClient({
       apiKey,
       baseUrl,
       model,
@@ -585,7 +590,10 @@ export function AgentPanel() {
       reasoningEffort: currentCapabilities?.reasoning ? agentSettings.reasoningEffort : 'auto',
       speedTier: currentCapabilities?.speedTierOptions?.includes(agentSettings.speedTier) ? agentSettings.speedTier : 'auto',
     });
+    aiClientRef.current = client;
+    return client;
   }, [
+    isStreaming,
     settings.apiKeys?.openai,
     settings.apiEndpoints?.openai,
     model,

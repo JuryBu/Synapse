@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import { Eye, Columns2, Pencil } from 'lucide-react';
 import { useAppDispatch } from '@/store/hooks';
 import { CodeEditor } from '@/components/editor/CodeEditor';
@@ -95,7 +98,7 @@ export function MarkdownViewer({
         </div>
       </div>
 
-      {mode === 'preview' && <MarkdownPreview content={content} />}
+      {mode === 'preview' && <MarkdownPreview content={content} filePath={filePath} />}
       {mode === 'source' && (
         <CodeEditor
           filename={fileName}
@@ -123,7 +126,7 @@ export function MarkdownViewer({
             />
           </div>
           <div className="split-pane">
-            <MarkdownPreview content={content} />
+            <MarkdownPreview content={content} filePath={filePath} />
           </div>
         </div>
       )}
@@ -131,10 +134,39 @@ export function MarkdownViewer({
   );
 }
 
-function MarkdownPreview({ content }: { content: string }) {
+function MarkdownPreview({ content, filePath }: { content: string; filePath: string }) {
+  // ★ #8：把 md 里 ![](路径) 的图片源解析为可显示 URL。
+  //   - 网络/数据/已是协议的 url 原样透传；
+  //   - 本地绝对路径 → fileSystem.getDisplayUrl（Electron 下转 synapse-file://，带白名单+防穿越）；
+  //   - 相对路径 → 先拼到当前 md 文件所在目录，再走 getDisplayUrl。
+  //   口径与 MessageBubble/HtmlViewer 一致，统一经 synapse-file:// 协议加载本地资源（防黑屏）。
+  const resolveImgSrc = (src: string): string => {
+    if (!src) return src;
+    // 网络 / data / blob / 已是自定义协议：不动。
+    if (/^(https?:|data:|blob:|synapse-file:)/i.test(src)) return src;
+    // 去掉 file:// 前缀（少数 md 会写 file:///C:/...），剩下当作绝对路径处理。
+    let p = src.replace(/^file:\/\//i, '');
+    const isAbsolute = /^([a-zA-Z]:[\\/]|[\\/])/.test(p);
+    if (!isAbsolute) {
+      // 相对路径：拼到当前 md 文件所在目录下。filePath 为绝对路径，取其目录段。
+      const dir = filePath.replace(/[\\/][^\\/]*$/, '');
+      p = `${dir}/${p}`;
+    }
+    return fileSystem.getDisplayUrl(p) || src;
+  };
+
   return (
     <div className="markdown-content">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        components={{
+          img({ src, alt, ...props }) {
+            const resolved = typeof src === 'string' ? resolveImgSrc(src) : src;
+            return <img src={resolved} alt={alt ?? ''} {...props} />;
+          },
+        }}
+      >
         {content}
       </ReactMarkdown>
     </div>
