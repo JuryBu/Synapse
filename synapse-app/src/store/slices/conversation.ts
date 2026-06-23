@@ -1,6 +1,9 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import type { ExtractedToken } from '@/services/inputCommands/richInput/types';
 import type { EditorFileType } from '@/services/editorFileTypes';
+// ★ #6/#10：同文件多次写合并成一条累积 diff 时，按「最早 before 基线 → 最新内容」重算 hunks/增删行。
+//   fileChangeTracker 对本文件是 `import type`（运行时擦除），此处反向导入纯函数无运行时循环依赖。
+import { countLineChanges, buildDiffHunks } from '@/services/fileChangeTracker';
 
 // M2-R6 附件引用层：image_url / file part 内联 base64 不再落库/发送，统一以 sha256 内容寻址引用。
 //   - sha256：put 返回的内容地址，落库/发送的唯一权威；url/data 是【内存态即时预览】(blobURL/dataUrl)，落库前必清。
@@ -110,6 +113,14 @@ export interface FileDiffSummary {
    *  resolveWorktreePath 重定向到当时的 worktree，避免落到主工作区（created 误删同名文件 / edited afterHash 不匹配）。
    *  旧 diff 无此字段（undefined）→ 重定向短路 = 主工作区，行为同改造前，向后兼容。 */
   contextId?: string;
+  /** ★ #6/#10 合并：累积 diff 链上「最早那次写之前」的快照 id / before hash。同一文件多次写合并成一条时，
+   *  before 基线恒取这个最早快照（而非相邻快照），保证 accept 落最新内容、reject 回退到【最初态】非中间态。
+   *  旧 diff 无此字段 → 合并逻辑 `?? snapshotId/beforeHash` 兜底降级，向后兼容。 */
+  originalSnapshotId?: string;
+  originalBeforeHash?: string;
+  /** ★ #6/#10 合并：本次 write_to_file 的最新落盘内容（透传 args.content），【仅供 addMessageDiff 合并时重算】，
+   *  存入 pendingDiffs 前会被剥除（不持久化，避免全文件内容落库膨胀）。 */
+  afterContent?: string;
 }
 
 export interface FileDiffHunk {
@@ -704,11 +715,61 @@ export const conversationSlice = createSlice({
       }
     },
     addMessageDiff(state, action: PayloadAction<{ messageId: string; diff: FileDiffSummary }>) {
+      const incoming = action.payload.diff;
+      // afterContent 是合并重算所需的「本次最新落盘内容」，存储前剥除（不持久化全文件，避免落库膨胀）。
+      const { afterContent, ...incomingRest } = incoming;
+
+      // ★ #6/#10：同一文件多次 write 合并成一条累积 diff——杜绝冗余堆叠 + 旧条 afterHash 失效导致的「接受失败」卡死。
+      //   合并条件：同 path && 同 contextId && 现存条为纯 pending（mixed/已处理不合并，避免吞掉用户的局部 accept/reject 决定）。
+      //   且需拿得到本次最新内容(afterContent)才能基于「最早基线→最新」重算；拿不到则退化为普通追加（向后兼容）。
+      if (afterContent !== undefined) {
+        const prevIdx = state.pendingDiffs.findIndex(d =>
+          d.path === incoming.path &&
+          (d.contextId ?? undefined) === (incoming.contextId ?? undefined) &&
+          d.status === 'pending',
+        );
+        if (prevIdx >= 0) {
+          const prev = state.pendingDiffs[prevIdx];
+          // 原始基线：最早那次写之前的快照（沿 originalSnapshotId 链；首条用其 snapshotId 兜底）。
+          const baselineSnapId = prev.originalSnapshotId ?? prev.snapshotId;
+          const origBefore = (baselineSnapId ? state.fileSnapshots[baselineSnapId]?.content : undefined) ?? '';
+          const { additions, deletions } = countLineChanges(origBefore, afterContent);
+          const merged = normalizeDiff({
+            ...incomingRest,
+            id: prev.id,                                   // 复用 prev.id：React key 稳定 + msg.diffs 易定位
+            changeType: origBefore === '' ? 'created' : 'edited',
+            additions,
+            deletions,
+            hunks: buildDiffHunks(origBefore, afterContent),
+            beforeHash: prev.originalBeforeHash ?? prev.beforeHash,
+            afterHash: incoming.afterHash,
+            snapshotId: baselineSnapId,                    // 指向最早快照 → reject 回退到【最初态】非中间态
+            originalSnapshotId: baselineSnapId,
+            originalBeforeHash: prev.originalBeforeHash ?? prev.beforeHash,
+            contextId: prev.contextId ?? incoming.contextId,
+          });
+          state.pendingDiffs[prevIdx] = merged;
+          // 同步替换挂着这条 diff 的消息里的副本（合并停留在最早那条消息上，待审浮层按 pendingDiffs 显示一条）。
+          for (const m of state.messages) {
+            if (!m.diffs) continue;
+            const di = m.diffs.findIndex(d => d.id === prev.id);
+            if (di >= 0) m.diffs[di] = merged;
+          }
+          return;
+        }
+      }
+
+      // 无可合并 prev（或拿不到 afterContent）：正常追加，并落基线锚点（originalSnapshotId/originalBeforeHash）供后续合并。
+      const seeded = normalizeDiff({
+        ...incomingRest,
+        originalSnapshotId: incomingRest.originalSnapshotId ?? incomingRest.snapshotId,
+        originalBeforeHash: incomingRest.originalBeforeHash ?? incomingRest.beforeHash,
+      });
       const msg = state.messages.find(m => m.id === action.payload.messageId);
       if (msg) {
-        msg.diffs = [...(msg.diffs ?? []), normalizeDiff(action.payload.diff)];
+        msg.diffs = [...(msg.diffs ?? []), seeded];
       }
-      state.pendingDiffs.push(normalizeDiff(action.payload.diff));
+      state.pendingDiffs.push(seeded);
     },
     /**
      * ★ show_artifact：把一张产物卡片挂到指定消息上（孪生 addMessageDiff，但更简单——

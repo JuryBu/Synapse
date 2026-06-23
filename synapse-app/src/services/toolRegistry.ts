@@ -428,6 +428,9 @@ toolRegistry.register({
       hunks: buildDiffHunks(beforeContent, args.content),
       // ★ worktree 隔离（审查 HIGH）：记下写入时的执行上下文，回滚/审阅据此重定向到同一 worktree（不落主工作区）。
       contextId: ctx?.contextId,
+      // ★ #6/#10：透传本次最新落盘内容，供 addMessageDiff 合并同文件多次写时按「最早基线→最新」重算累积 diff；
+      //   该字段在入 pendingDiffs 前被 reducer 剥除，不持久化。
+      afterContent: args.content,
     },
   }, ctx?.contextId);
   return `✅ 已写入文件: ${args.path} (${args.content.length} 字符)`;
