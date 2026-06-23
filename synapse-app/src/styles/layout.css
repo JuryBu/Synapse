@@ -1686,3 +1686,203 @@ html[data-wallpaper="enabled"] .settings-panel {
   background: #ef4444;
   color: #fff;
 }
+
+/* ===== ★ H6（M8 第七轮反馈）消息导航 ===== */
+/* 导航入口按钮与对话切换器并排在 agent-conv-switch 行（补 gap，不破坏原 trigger 的 flex:1 撑满）。 */
+.agent-conv-switch {
+  gap: 6px;
+}
+.agent-nav-trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--syn-border);
+  border-radius: 7px;
+  background: var(--syn-bg-surface);
+  color: var(--syn-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--syn-transition-fast);
+}
+.agent-nav-trigger:hover,
+.agent-nav-trigger.active {
+  border-color: rgba(var(--syn-accent-rgb), 0.5);
+  background: rgba(var(--syn-accent-rgb), 0.1);
+  color: var(--syn-text-primary);
+}
+.agent-nav-trigger-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* 导航浮层（portal fixed，复用 glass-panel 玻璃底） */
+.agent-nav-panel {
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: min(520px, 70vh);
+  padding: 10px;
+  border: 1px solid var(--syn-border);
+  border-radius: 10px;
+  box-shadow: var(--glass-shadow);
+}
+.agent-nav-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--syn-border);
+  color: var(--syn-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+.agent-nav-head-count {
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(var(--syn-accent-rgb), 0.16);
+  color: var(--syn-accent);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.agent-nav-list {
+  flex: 1;
+  min-height: 40px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.agent-nav-empty {
+  padding: 18px 8px;
+  text-align: center;
+  color: var(--syn-text-muted);
+  font-size: 12px;
+}
+.agent-nav-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 6px;
+}
+.agent-nav-row:hover {
+  background: rgba(var(--syn-accent-rgb), 0.08);
+}
+.agent-nav-jump {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--syn-text-secondary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-nav-jump:hover {
+  color: var(--syn-text-primary);
+}
+.agent-nav-seq {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: rgba(var(--syn-accent-rgb), 0.14);
+  color: var(--syn-accent);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.agent-nav-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.agent-nav-edit-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--syn-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--syn-transition-fast), color var(--syn-transition-fast);
+}
+.agent-nav-row:hover .agent-nav-edit-btn {
+  opacity: 1;
+}
+.agent-nav-edit-btn:hover {
+  color: var(--syn-accent);
+  background: rgba(var(--syn-accent-rgb), 0.12);
+}
+.agent-nav-edit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+}
+.agent-nav-edit input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid rgba(var(--syn-accent-rgb), 0.5);
+  border-radius: 6px;
+  background: var(--syn-bg-surface);
+  color: var(--syn-text-primary);
+  font-size: 12px;
+  outline: none;
+}
+.agent-nav-edit-ok,
+.agent-nav-edit-cancel {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--syn-text-muted);
+  cursor: pointer;
+}
+.agent-nav-edit-ok:hover {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.12);
+}
+.agent-nav-edit-cancel:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+/* ★ H6：跳转后目标消息高亮闪烁（0.3s 起，整体约 1.2s 渐隐） */
+.message.message-nav-flash {
+  animation: messageNavFlash 1.2s ease-out;
+  border-radius: 8px;
+}
+@keyframes messageNavFlash {
+  0% { background: rgba(var(--syn-accent-rgb), 0.28); }
+  30% { background: rgba(var(--syn-accent-rgb), 0.28); }
+  100% { background: transparent; }
+}

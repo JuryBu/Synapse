@@ -1,4 +1,4 @@
-import { SendHorizontal, Sparkles, Zap, StopCircle, Plus, Download, PanelRightClose, MessageSquare, ChevronDown, Search, Globe, FolderInput, Paperclip, AtSign, Workflow } from 'lucide-react';
+import { SendHorizontal, Sparkles, Zap, StopCircle, Plus, Download, PanelRightClose, MessageSquare, ChevronDown, Search, Globe, FolderInput, Paperclip, AtSign, Workflow, List, Check, X, Pencil } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import {
@@ -253,6 +253,15 @@ export function AgentPanel() {
   const convAnchorRef = useRef<HTMLButtonElement>(null);
   const convPanelRef = useRef<HTMLDivElement>(null);
   const [convMenuPos, setConvMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  // ★ H6（M8 第七轮反馈）：消息导航浮层——列出有 subtitle 的用户消息（排除 task_boundary 区间内），点击跳转。
+  //   navMenuOpen 控制开合；anchor/panel ref 仿 conv 浮层做点外/Esc 关闭；navMenuPos 为 portal fixed 坐标。
+  const [navMenuOpen, setNavMenuOpen] = useState(false);
+  const navAnchorRef = useRef<HTMLButtonElement>(null);
+  const navPanelRef = useRef<HTMLDivElement>(null);
+  const [navMenuPos, setNavMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  // 当前正在编辑标题的导航项消息 id（null = 无）；编辑草稿文本。
+  const [navEditingId, setNavEditingId] = useState<string | null>(null);
+  const [navEditDraft, setNavEditDraft] = useState('');
   // 浮层本地列表刷新：按当前范围拉全量（含归档，浮层语义是「全量切换器」），结果只写本地 state、不碰共享 slice。
   const reloadConvMenu = useCallback(async () => {
     try {
@@ -296,6 +305,63 @@ export function AgentPanel() {
     setConvSearch('');
     setConvMenuOpen(true);
   }, []);
+
+  // ★ H6：消息导航浮层 —— 点外/Esc 关闭（同 conv 浮层口径，排除 anchor 与 panel）。
+  useEffect(() => {
+    if (!navMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (navAnchorRef.current?.contains(t)) return;
+      if (navPanelRef.current?.contains(t)) return;
+      setNavMenuOpen(false);
+    };
+    const onEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') setNavMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [navMenuOpen]);
+  // ★ H6：打开导航浮层时按 anchor 算 portal fixed 坐标（同 conv 浮层）。
+  const openNavMenu = useCallback(() => {
+    const rect = navAnchorRef.current?.getBoundingClientRect();
+    if (rect) {
+      const width = Math.min(340, Math.max(240, rect.width * 2));
+      const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+      setNavMenuPos({ top: rect.bottom + 6, left, width });
+    }
+    setNavEditingId(null);
+    setNavMenuOpen(true);
+  }, []);
+  // ★ H6：跳转到指定消息 —— 在滚动容器内按 data-message-id 定位，直接设 scrollTop（不用 scrollIntoView，
+  //   避免滚动所有祖先 + smooth 动画与生成期自动滚底打架，同 M6 验收口径），再加 0.3s 高亮闪烁 class。
+  const scrollToMessage = useCallback((messageId: string) => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const el = container.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`) as HTMLElement | null;
+    if (!el) return;
+    // ★ 用 rect 差值算容器内偏移（不依赖 offsetParent——.agent-messages 非定位上下文，offsetTop 会算到更外层而偏）：
+    //   目标在容器内的滚动位置 = 当前 scrollTop + (目标顶 - 容器顶)，减 12px 上边距让目标不贴顶。
+    const containerRect = container.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const top = container.scrollTop + (elRect.top - containerRect.top) - 12;
+    container.scrollTop = Math.max(0, top);
+    // 高亮闪烁：先移除再加（连续点同一项也能重新触发动画），动画结束后清理 class。
+    el.classList.remove('message-nav-flash');
+    // 强制 reflow 让 remove 生效，使重复点击能重新播放动画。
+    void el.offsetWidth;
+    el.classList.add('message-nav-flash');
+    window.setTimeout(() => el.classList.remove('message-nav-flash'), 1200);
+  }, []);
+  // ★ H6：保存手动改写的消息小标题（空串=保留原标题不动；非空回写 updateMessageMeta，随消息落库）。
+  const saveNavSubtitle = useCallback((messageId: string, draft: string) => {
+    const next = draft.trim().slice(0, 14); // 与生成上限 SUBTITLE_HARD_CHARS 对齐
+    setNavEditingId(null);
+    if (!next) return; // 空 → 不覆盖（避免误清；想清空可后续扩展）
+    dispatch(updateMessageMeta({ id: messageId, changes: { subtitle: next, subtitleGeneratedAt: Date.now() } }));
+  }, [dispatch]);
+
   // 浮层内本地搜索过滤（不重拉 slice）：按标题 / 最近消息匹配。
   const convFilteredList = useMemo(() => {
     const q = convSearch.trim().toLowerCase();
@@ -414,6 +480,35 @@ export function AgentPanel() {
       filesByBoundaryId.set(r.b.id, files);
     }
     return { startMap, filesByBoundaryId, orphans };
+  }, [conversation.taskBoundaries, messages]);
+
+  // ★ H6（M8 第七轮反馈）：消息导航项 —— 取所有带 subtitle 的【用户消息】，排除落在 task_boundary
+  //   区间（anchorMessageId..endAnchorMessageId）内的消息（边界内消息已被 TaskBoundaryCard 折叠，不单列导航）。
+  //   active 边界（无 endAnchor）视为延伸到当前末尾。返回 { id, subtitle, seq } 列表，供浮层渲染与跳转。
+  const navItems = useMemo(() => {
+    const boundaries = (conversation.taskBoundaries ?? []) as any[];
+    const msgIdToIdx = new Map<string, number>();
+    messages.forEach((m: any, i: number) => msgIdToIdx.set(m.id, i));
+    // 计算被 boundary 覆盖的消息下标集合（含区间端点；anchor 本身＝边界开场白也算覆盖内，不单列）。
+    const coveredIdx = new Set<number>();
+    for (const b of boundaries) {
+      const startIdx = b.anchorMessageId != null ? msgIdToIdx.get(b.anchorMessageId) : undefined;
+      if (startIdx === undefined) continue; // anchor 已不在消息里（被截断）→ 该边界不参与覆盖判断
+      let endIdx = b.endAnchorMessageId != null ? msgIdToIdx.get(b.endAnchorMessageId) : undefined;
+      if (b.endAnchorMessageId == null || endIdx === undefined) endIdx = messages.length - 1; // active/截断 → 延伸到末尾
+      for (let i = startIdx; i <= endIdx && i < messages.length; i++) coveredIdx.add(i);
+    }
+    const items: Array<{ id: string; subtitle: string; seq: number; timestamp?: number }> = [];
+    let seq = 0;
+    messages.forEach((m: any, i: number) => {
+      if (m.role !== 'user') return;
+      const subtitle = m.subtitle as string | undefined;
+      if (!subtitle) return;          // 无小标题（未生成/纯附件）→ 不收录
+      if (coveredIdx.has(i)) return;  // 在 task_boundary 区间内 → 不收录
+      seq += 1;
+      items.push({ id: m.id, subtitle, seq, timestamp: m.timestamp });
+    });
+    return items;
   }, [conversation.taskBoundaries, messages]);
 
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRef[]>([]);
@@ -2264,7 +2359,84 @@ export function AgentPanel() {
           )}
           <ChevronDown size={13} className="agent-conv-chevron" />
         </button>
+        {/* ★ H6：消息导航入口——有带小标题的用户消息时才显示；点击打开导航浮层快速跳转。 */}
+        {navItems.length > 0 && (
+          <button
+            ref={navAnchorRef}
+            className={`agent-nav-trigger ${navMenuOpen ? 'active' : ''}`}
+            onClick={() => (navMenuOpen ? setNavMenuOpen(false) : openNavMenu())}
+            title="消息导航 · 快速跳转"
+          >
+            <List size={13} />
+            <span className="agent-nav-trigger-count">{navItems.length}</span>
+          </button>
+        )}
       </div>
+
+      {/* ★ H6 消息导航浮层（portal 到 body；点外/Esc 关闭；点项跳转 + 高亮；标题可双击改写）。 */}
+      {navMenuOpen && navMenuPos && createPortal(
+        <div
+          ref={navPanelRef}
+          className="agent-nav-panel glass-panel"
+          style={{ position: 'fixed', top: navMenuPos.top, left: navMenuPos.left, width: navMenuPos.width }}
+        >
+          <div className="agent-nav-head">
+            <List size={13} />
+            <span>消息导航</span>
+            <span className="agent-nav-head-count">{navItems.length}</span>
+          </div>
+          <div className="agent-nav-list">
+            {navItems.length === 0 ? (
+              <div className="agent-nav-empty">暂无带标题的消息</div>
+            ) : (
+              navItems.map(item => (
+                <div key={item.id} className="agent-nav-row">
+                  {navEditingId === item.id ? (
+                    // 编辑态：输入框 + 确认/取消（Enter 保存、Esc 取消）。
+                    <div className="agent-nav-edit">
+                      <input
+                        autoFocus
+                        value={navEditDraft}
+                        maxLength={14}
+                        onChange={e => setNavEditDraft(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { e.preventDefault(); saveNavSubtitle(item.id, navEditDraft); }
+                          else if (e.key === 'Escape') { e.preventDefault(); setNavEditingId(null); }
+                        }}
+                      />
+                      <button className="agent-nav-edit-ok" title="保存" onClick={() => saveNavSubtitle(item.id, navEditDraft)}>
+                        <Check size={12} />
+                      </button>
+                      <button className="agent-nav-edit-cancel" title="取消" onClick={() => setNavEditingId(null)}>
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        className="agent-nav-jump"
+                        title={item.subtitle}
+                        onClick={() => { scrollToMessage(item.id); setNavMenuOpen(false); }}
+                      >
+                        <span className="agent-nav-seq">{item.seq}</span>
+                        <span className="agent-nav-label">{item.subtitle}</span>
+                      </button>
+                      <button
+                        className="agent-nav-edit-btn"
+                        title="改写标题"
+                        onClick={() => { setNavEditingId(item.id); setNavEditDraft(item.subtitle); }}
+                      >
+                        <Pencil size={11} />
+                      </button>
+                    </>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>,
+        document.body,
+      )}
 
       {/* ★ M4-2-S7 对话管理浮层（portal 到 body，避开 header overflow 裁剪；点外/Esc 关闭）。 */}
       {convMenuOpen && convMenuPos && createPortal(

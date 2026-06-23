@@ -354,7 +354,8 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
   const isUser = role === 'user';
 
   return (
-    <div className={`message message-${role}`} onContextMenu={handleContextMenu}>
+    // ★ H6：data-message-id 作 DOM anchor，供「消息导航」浮层 querySelector 定位 + 滚动跳转 + 高亮闪烁。
+    <div className={`message message-${role}`} data-message-id={id} onContextMenu={handleContextMenu}>
       <div className={`message-avatar ${isUser ? 'user-avatar' : 'assistant-avatar'}`}>
         {isUser ? <User size={16} /> : <Bot size={16} />}
       </div>

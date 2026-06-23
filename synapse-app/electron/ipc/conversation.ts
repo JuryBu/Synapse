@@ -132,6 +132,9 @@ function mapMessage(row: any) {
         runEvents: fromJson(row.run_events),
         diffs: fromJson(row.diffs),
         rollbackSnapshotId: row.rollback_snapshot_id,
+        // ★ H6：消息小标题（用户消息语义标题，供「消息导航」跳转）。旧行该列 NULL → undefined（不进导航）。
+        subtitle: row.subtitle ?? undefined,
+        subtitleGeneratedAt: row.subtitle_generated_at ?? undefined,
     };
 }
 
@@ -439,14 +442,16 @@ export function registerConversationHandlers(): void {
         richTokens?: unknown[]; // ★ D1：富文本 atomic token 持久化锚点
         thinking?: unknown; streamState?: string; durationMs?: number; runId?: string;
         runEvents?: unknown[]; diffs?: unknown[]; rollbackSnapshotId?: string; error?: string;
+        subtitle?: string; subtitleGeneratedAt?: number; // ★ H6：消息小标题
     }) => {
-        // ★ D1：列/占位符/值三者数量严格对齐（18 列 18 ?）。rich_tokens 紧跟 attachments，与 database.ts ensureColumn 顺序一致。
+        // ★ D1/H6：列/占位符/值三者数量严格对齐（20 列 20 ?）。subtitle/subtitle_generated_at 排在末尾 error 之后，
+        //   与 database.ts ensureColumn 顺序一致。
         db.prepare(
             `INSERT OR REPLACE INTO messages (
               id, conversation_id, role, content, timestamp, tool_calls, model,
               content_parts, attachments, rich_tokens, thinking, stream_state, duration_ms,
-              run_id, run_events, diffs, rollback_snapshot_id, error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              run_id, run_events, diffs, rollback_snapshot_id, error, subtitle, subtitle_generated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
             msg.id,
             msg.conversationId,
@@ -466,6 +471,8 @@ export function registerConversationHandlers(): void {
             toJson(msg.diffs),
             msg.rollbackSnapshotId || null,
             msg.error || null,
+            msg.subtitle || null,
+            msg.subtitleGeneratedAt ?? null,
         );
         // 更新对话消息数和时间戳
         db.prepare(
@@ -487,6 +494,7 @@ export function registerConversationHandlers(): void {
         richTokens?: unknown[]; // ★ D1：富文本 atomic token 持久化锚点
         thinking?: unknown; streamState?: string; durationMs?: number; runId?: string;
         runEvents?: unknown[]; diffs?: unknown[]; rollbackSnapshotId?: string; error?: string;
+        subtitle?: string; subtitleGeneratedAt?: number; // ★ H6：消息小标题
     }>, opts?: { systemTouch?: boolean }) => {
         const systemTouch = Boolean(opts?.systemTouch);
         const tx = db.transaction(() => {
@@ -494,13 +502,13 @@ export function registerConversationHandlers(): void {
             // ★ M4-2-S2 终极兜底：纯 INSERT 撞 messages.id UNIQUE 会整事务回滚（弹「自动保存失败」toast）。
             //   改 INSERT OR REPLACE，即便运行态 id 仍碰撞（已由 services/ids.ts 收敛到 randomUUID 极大降概率），
             //   也只覆盖同 id 行而非整批失败，与 message:add（早已是 OR REPLACE）口径统一。
-            // ★ D1：18 列 18 ? 严格对齐，rich_tokens 紧跟 attachments。
+            // ★ D1/H6：20 列 20 ? 严格对齐，subtitle/subtitle_generated_at 排在末尾 error 之后。
             const insert = db.prepare(
                 `INSERT OR REPLACE INTO messages (
                   id, conversation_id, role, content, timestamp, tool_calls, model,
                   content_parts, attachments, rich_tokens, thinking, stream_state, duration_ms,
-                  run_id, run_events, diffs, rollback_snapshot_id, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  run_id, run_events, diffs, rollback_snapshot_id, error, subtitle, subtitle_generated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             );
             for (const msg of messages) {
                 insert.run(
@@ -522,6 +530,8 @@ export function registerConversationHandlers(): void {
                     toJson(msg.diffs),
                     msg.rollbackSnapshotId || null,
                     msg.error || null,
+                    msg.subtitle || null,
+                    msg.subtitleGeneratedAt ?? null,
                 );
             }
             const last = messages[messages.length - 1];

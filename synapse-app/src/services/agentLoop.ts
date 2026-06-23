@@ -138,6 +138,33 @@ export async function generateTitleFromText(source: string): Promise<string | nu
   return generated;
 }
 
+/** ★ H6 消息小标题：目标 ≤12 字，清洗硬截留余量到此上限（比对话标题 20 更短，导航条窄）。 */
+const SUBTITLE_HARD_CHARS = 14;
+/** ★ H6 消息小标题：生成提示词（≤12 字、仅输出短标题、无标点/引号/前缀）。复用 sanitizeTitle 清洗内核。 */
+const SUBTITLE_SYSTEM_PROMPT = '你是消息标题助手。只输出一个不超过 12 个汉字的中文短标题，概括用户这条消息的核心意图，不要任何标点、引号、书名号、前缀或解释，只输出标题本身。';
+
+/**
+ * ★ H6（M8 第七轮反馈）：从一条用户消息文本生成【语义小标题】（≤12 字），供「消息导航」浮层跳转定位。
+ *   与 generateTitleFromText 同范式（runSystemModelOnce + sanitizeTitle 清洗 + 重试 1 次 + 失败降级 null），
+ *   但口径更短（SUBTITLE_HARD_CHARS=14）。★铁律：失败返回 null，调用方据此放弃回写（保持「无标题=不进导航」）。
+ *   纯生成，不做任何 dispatch。
+ */
+export async function generateSubtitleFromText(source: string): Promise<string | null> {
+  const src = (source ?? '').trim();
+  if (!src) return null;
+  const prompt = `请为下面这条用户消息拟一个不超过 12 个汉字的中文短标题，只输出标题：\n\n${src.slice(0, 2000)}`;
+  let generated: string | null = null;
+  for (let attempt = 0; attempt <= TITLE_RETRY; attempt++) {
+    // 复用 sanitizeTitle（trim / 去引号书名号 / 去前缀 / 取首行），再按更短的 SUBTITLE_HARD_CHARS 二次硬截。
+    let t = sanitizeTitle(await runSystemModelOnce(prompt, { system: SUBTITLE_SYSTEM_PROMPT }));
+    if (t && t.length > SUBTITLE_HARD_CHARS) t = t.slice(0, SUBTITLE_HARD_CHARS);
+    generated = t;
+    if (generated) break;
+    if (attempt < TITLE_RETRY) await new Promise(r => setTimeout(r, TITLE_RETRY_INTERVAL_MS));
+  }
+  return generated;
+}
+
 // ★ M4-2-S2：运行态 id 生成收敛到共享 services/ids.ts（crypto.randomUUID + 回退，保留 prefix），
 //   治问题 2b(1) 弱熵同毫秒碰撞。原本地 generateId 已删，调用点签名不变（仍 generateId('run'/'evt'/...)）。
 
@@ -705,6 +732,31 @@ export class AgentLoop {
         model: currentModel,
       };
       store.dispatch(addMessage(userMsg));
+
+      // ★ H6（M8 第七轮反馈）：本轮开始即对【这条用户消息】fire-and-forget 生成语义小标题（≤12 字），
+      //   供「消息导航」浮层跳转。范式同对话标题（systemModelClient 20s 超时 + 重试 1 次 + 失败降级 null）：
+      //   1. 仅当消息有可概括文本时才生成（纯图片/附件无文本 → 不生成，导航自然不收录）。
+      //   2. ★铁律 fire-and-forget：void 丢弃 promise，绝不被主流式 await——系统模型慢/失败都不阻塞回复。
+      //   3. 竞态守卫：回写前确认对话未切换（id 快照一致）+ 该消息仍在当前 messages + subtitle 仍未被设过
+      //      （未被用户手改/上一次生成），否则不覆盖（尊重手改、避免重复回写）。失败 null → 放弃，导航不收录此条。
+      const subtitleSource = userMessage.trim();
+      if (subtitleSource) {
+        const subtitleMsgId = userMsg.id;
+        const subtitleConvIdSnapshot = (store.getState() as RootState).conversation.id;
+        void (async () => {
+          const generated = await generateSubtitleFromText(subtitleSource);
+          if (!generated) return; // 全失败 → 不回写（无标题=不进导航）
+          const live = (store.getState() as RootState).conversation;
+          if (live.id !== subtitleConvIdSnapshot) return; // 对话已切换/清空 → 不回写
+          const target = live.messages.find((m: any) => m.id === subtitleMsgId);
+          if (!target) return;                  // 消息已被删/分支裁掉 → 不回写
+          if ((target as any).subtitle) return; // 已有标题（手改或重复回写）→ 尊重不覆盖
+          store.dispatch(updateMessageMeta({
+            id: subtitleMsgId,
+            changes: { subtitle: generated, subtitleGeneratedAt: Date.now() },
+          }));
+        })();
+      }
     }
     // Build system prompt with mode context
     const workspaceName = (rootState as any).workspace?.name;

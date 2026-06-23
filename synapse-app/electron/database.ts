@@ -207,6 +207,10 @@ export function initDatabase(): Database.Database {
     ensureColumn(db, 'messages', 'diffs', 'TEXT');
     ensureColumn(db, 'messages', 'rollback_snapshot_id', 'TEXT');
     ensureColumn(db, 'messages', 'error', 'TEXT');
+    // ★ H6（M8 第七轮反馈）：用户消息语义小标题（≤12 字，供「消息导航」跳转）。subtitle 存文本、
+    //   subtitle_generated_at 存生成/手改时间戳（ms）。旧库自动补列、旧行 NULL → 读取降级 undefined（无标题，不进导航）。
+    ensureColumn(db, 'messages', 'subtitle', 'TEXT');
+    ensureColumn(db, 'messages', 'subtitle_generated_at', 'INTEGER');
 
     // M2-R1 多批次 record：batches_json 落多批结构（真相源），record_schema_version 标记 v2。
     // content_md 旧列保留不删（v1 回滚保险 / 懒迁移源）。用 ensureColumn 兼容旧库。

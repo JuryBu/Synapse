@@ -210,6 +210,14 @@ export interface Message {
    *   逐条 run 计时仍走各自的 durationMs，互不干扰。
    */
   endToEndMs?: number;
+  /**
+   * ★ H6（M8 第七轮反馈）：本条【用户消息】的语义小标题（≤12 字）。本轮开始时由系统模型 fire-and-forget
+   *   生成（generateSubtitleFromText），供「消息导航」浮层快速跳转定位。非瞬态——随消息落库（DB subtitle 列），
+   *   sanitize 黑名单不剔除天然透传。仅 user 消息生成；assistant/tool 无此字段。可由用户手动改写覆盖。
+   */
+  subtitle?: string;
+  /** ★ H6：subtitle 生成/手改的时间戳（ms）。竞态守卫与「是否已生成」判断据此。 */
+  subtitleGeneratedAt?: number;
   runId?: string;
   runEvents?: AssistantRunEvent[];
   diffs?: FileDiffSummary[];

@@ -119,7 +119,10 @@
 - ✅ 批3a `cdacb53`：H1 task_boundary 卡住（agentLoop wasAborted/lastError 兜底收口 + handleStop 收口 + TaskBoundaryCard 手动「结束」按钮）/ A Review Changes 中文化+IDE视图 / B systemPrompt 引导（含修正版 sandbox 分工）
 - ✅ 批3b `7941a30`：H2 auto-retry 诊断（classifyError 只信用户主动 abort 标志，服务端 context canceled 改判 network 重试+显真因；completeChat 统一 this.aborted；网关词表扩充）/ H3 用户消息半透明主体色底（CDP 实测 22 条生效）
 - ✅ 批4：H4 归 tb 可选（settings 开关 + dispatchUserSend 发送前收口）+ 插话 queue（queuedMessages + 下降沿自动发 + 护栏①②③④ + 输入框上方排队区 UI）。子代理 ad11cda 做数据+逻辑层(质量高,工具预算到顶停)，主线补 UI 排队区+SettingsPanel 开关+css+护栏②确认（reducer 兜底）。双编译 EXIT 0
-- ⬜ H5 同轮长时间注入提醒 / H6 消息小标题+跳转导航
+- ✅ 批5a `f103d2e`：H5 同轮长时间干活注入提醒（round≥10 或 >2min 注入一次 system 提醒，flag 防重复+不破坏 prompt cache 前缀）
+- ✅ 批5b：H6 消息小标题+跳转导航（Message.subtitle + DB messages 表 ensureColumn 加列懒迁移 + IPC 20 列严格对齐 + agentLoop fire-and-forget 生成 + 导航 portal 浮层 + scrollToMessage 高亮 + 手改标题；排除 tb 内消息）。子代理 acd4e355 三步做完整，主线 review IPC 列对齐完美
+- 🎉 **第七轮补充反馈（深度反馈批）H1-H6 + A/B 全部完成**
+- 🔬 待主人重启统一真机验证：H1 收口/手动按钮、H2 retry 诊断、H4 queue、H5 提醒、H6 小标题导航
 - 🔬 待重启真机验证（与主人验收一起）：H1 自动收口/手动按钮、H2 API 失败重试不再显「已停止」、H4 queue
 - ⚠️ sandbox 分工已按主人纠正落地（B 的 systemPrompt）：危险/要回溯走自己文件体系，一次性试验走 MCP sandbox
 
