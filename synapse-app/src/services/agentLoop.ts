@@ -10,8 +10,8 @@ import {
   appendMessageThinking, setMessageStreamState, setMessageReconnect, setStreaming, setCompacting,
   clearStreamingContent, setTitle, setTokenUsage,
   addAssistantRun, addRunEvent, addMessageDiff, addMessageArtifact, recordFileSnapshot, updateToolCallStatus,
-  endTaskBoundary,
-  type AttachmentRef, type MessageContentPart, type StreamModeUsed,
+  endTaskBoundary, dequeueInterrupt,
+  type AttachmentRef, type MessageContentPart, type StreamModeUsed, type QueuedMessage,
 } from '../store/slices/conversation';
 import { setConnectionStatus, type RecordLayeringConfig } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
@@ -1123,8 +1123,57 @@ export class AgentLoop {
       || ((store.getState() as RootState).conversation?.id as string | null)
       || AUTOSAVE_ID;
 
+    // ★ Plan_7 #6：轮间【插队】消费——生成中用户用 Ctrl/Cmd+Enter 插话进 interruptMessages，
+    //   每轮工具调用结束、下一轮 API 请求【前】把【全部】待插消息按入队序取出，作为 user 消息插入：
+    //     ① dispatch addMessage(user) 进 UI（落到当前 run 的对话流里，正常渲染）；
+    //     ② 转成 ChatMessage、还原附件 base64 后 push 进本次发送的 apiMessages（让 AI 下一轮 API 请求就看到）；
+    //     ③ dequeueInterrupt 出队。
+    //   语义边界：只在轮间插（不打断正在跑的工具/流），插入后当前 run 继续带着插话往下跑。
+    //   竞态守卫：消费前确认对话身份未切换（conversation.id 与 execContextId 一致），切了就不消费（防串台/误插新对话）。
+    const drainInterruptMessages = async (): Promise<void> => {
+      while (this.running) {
+        const liveConv = (store.getState() as RootState).conversation;
+        const pending = liveConv.interruptMessages as QueuedMessage[];
+        if (!pending || pending.length === 0) break;
+        // 身份守卫：对话已切换（execContextId 是 contextId 或入口对话 id）→ 不消费（队列也会被 setConversation 清，双保险）。
+        const liveId = (liveConv.id as string | null) ?? AUTOSAVE_ID;
+        if (!this.contextId && liveId !== execContextId) break;
+        const head = pending[0];
+        // 先出队（同步），防 await 期间重复消费同一条。
+        store.dispatch(dequeueInterrupt(undefined));
+        // 还原排队项为「就绪附件」（剥内存预览，发送态走 sent；与队列自动发同口径）。
+        const interruptAttachments: AttachmentRef[] = (head.attachments ?? []).map(att => ({
+          ...att,
+          previewUrl: undefined,
+          payloadUrl: undefined,
+          status: 'sent' as const,
+          error: undefined,
+        }));
+        // ① 进 UI：作为本 run 对话流里的一条 user 消息（含富文本 token，编辑回填无损还原）。
+        store.dispatch(addMessage({
+          id: generateId(),
+          role: 'user',
+          content: head.text,
+          contentParts: head.contentParts && head.contentParts.length > 0 ? head.contentParts : undefined,
+          attachments: interruptAttachments.length > 0 ? interruptAttachments : undefined,
+          richTokens: head.richTokens,
+          timestamp: Date.now(),
+        }));
+        // ② 进 API：转 ChatMessage（contentParts 优先，纯文本兜底），单条还原附件 base64 后 push。
+        const interruptChat: ChatMessage = head.contentParts && head.contentParts.length > 0
+          ? { role: 'user', content: head.contentParts as any }
+          : { role: 'user', content: head.text };
+        const restored = await restoreApiMessagesAttachments([interruptChat])
+          .catch(() => ({ messages: [interruptChat], skippedInvalidImages: 0 }));
+        apiMessages.push(...restored.messages);
+      }
+    };
+
     while (this.running && round < maxRounds) {
       round++;
+      // ★ Plan_7 #6：下一轮 API 请求【前】消费插队消息——把生成中用户插话作为 user 消息插入 UI + apiMessages，
+      //   让 AI 本轮就看到。首轮队列必空（用户刚发、无机会插）→ no-op；工具轮 continue 回循环顶亦在此统一消费。
+      await drainInterruptMessages();
       // ★ #7（反馈修正 H5）：本轮连续干较多步(≥10)或耗时过长(>2min)时，按当前 task_boundary 状态注入 system 提醒，
       //   促 AI 用 task_boundary 把过程【结构化包裹】——而非「提醒向用户汇报」（task_boundary 是过程包裹，
       //   汇报应在收口后、无任务边界状态下做）。只注入一次（reminderInjected）；push 末尾不破坏前缀 prompt cache。

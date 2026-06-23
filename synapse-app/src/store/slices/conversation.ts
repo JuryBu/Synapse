@@ -284,6 +284,11 @@ interface ConversationState {
   streamingContent: string;
   // ★ H4-2：生成中插话的排队消息（运行态，绝不落库；刷新/重开自然清空）。本轮结束自动发队首。
   queuedMessages: QueuedMessage[];
+  // ★ Plan_7 #6：生成中【插队】消息（interrupt，运行态，绝不落库）。与 queuedMessages 是孪生双队列：
+  //   - queuedMessages（queue）：本轮 agent loop 彻底结束（isStreaming true→false）才发，由 AgentPanel 空闲 effect 驱动。
+  //   - interruptMessages（interrupt）：run 进行中的【下个空闲轮间】（一轮工具调用结束、下轮 API 请求前）由 agentLoop
+  //     取队首插入 messages，让 AI 当前 run 的下一轮就看到——不打断正在跑的工具/流，只在轮间插。
+  interruptMessages: QueuedMessage[];
   model: string;
   tokenCount: number;
   tokenUsage: TokenUsage | null;
@@ -455,6 +460,7 @@ const initialState: ConversationState = {
   isCompacting: false,
   streamingContent: '',
   queuedMessages: [], // ★ H4-2：排队消息初始为空（运行态）
+  interruptMessages: [], // ★ Plan_7 #6：插队消息初始为空（运行态）
   model: '',
   tokenCount: 0,
   tokenUsage: null,
@@ -509,6 +515,8 @@ export const conversationSlice = createSlice({
       state.pendingDiffs = (action.payload.pendingDiffs ?? []).map(normalizeDiff);
       // ★ H4-2：换对话身份（切换/加载/分支） → 清空排队队列（运行态，绝不跨对话带过去）。
       state.queuedMessages = [];
+      // ★ Plan_7 #6：换对话身份 → 一并清空插队队列（孪生 queuedMessages，防串台）。
+      state.interruptMessages = [];
       state.model = action.payload.model ?? state.model;
       if ('parentId' in action.payload) state.parentId = action.payload.parentId ?? null;
       if ('branchedFromMessageId' in action.payload) {
@@ -854,6 +862,41 @@ export const conversationSlice = createSlice({
     clearQueue(state) {
       state.queuedMessages = [];
     },
+    // ★ Plan_7 #6：把一条消息加入【插队】队列（生成中 Ctrl/Cmd+Enter 插话）。上限护栏在调用方（AgentPanel）拦。
+    //   语义：run 进行中的下个空闲轮间由 agentLoop 取队首插入 messages，让 AI 当前 run 下一轮看到。
+    enqueueInterrupt(state, action: PayloadAction<QueuedMessage>) {
+      state.interruptMessages.push(action.payload);
+    },
+    // ★ Plan_7 #6：从插队队列移除一条。不传 → 删队首（agentLoop 轮间消费后调）；传 id → 用户单独取消某条。
+    //   ⚠️ Redux 单向流：reducer 不返回值。agentLoop 消费前需先读 interruptMessages[0] 取内容，再 dequeue 移除。
+    dequeueInterrupt(state, action: PayloadAction<{ index?: number; id?: string } | undefined>) {
+      const p = action.payload ?? {};
+      if (p.id !== undefined) {
+        state.interruptMessages = state.interruptMessages.filter(m => m.id !== p.id);
+        return;
+      }
+      const idx = typeof p.index === 'number' ? p.index : 0;
+      if (idx >= 0 && idx < state.interruptMessages.length) {
+        state.interruptMessages.splice(idx, 1);
+      }
+    },
+    // ★ Plan_7 #6：清空整个插队队列。Stop / 切换对话 / 新建 / 分支 入口调用（孪生 clearQueue）。
+    clearInterruptQueue(state) {
+      state.interruptMessages = [];
+    },
+    // ★ Plan_7 #11：在两队列间移动一条消息（输入框上方三框：queue 项 ↔ interrupt 项互相切换）。
+    //   原子搬移——同一项对象整体从源队列移到目标队列尾部，附件引用随项转移（不 release、refCount 守恒）。
+    //   from/to 取 'queue'|'interrupt'；同名（from===to）或找不到该 id → no-op。
+    moveQueueItem(state, action: PayloadAction<{ id: string; from: 'queue' | 'interrupt'; to: 'queue' | 'interrupt' }>) {
+      const { id, from, to } = action.payload;
+      if (from === to) return;
+      const src = from === 'queue' ? state.queuedMessages : state.interruptMessages;
+      const idx = src.findIndex(m => m.id === id);
+      if (idx < 0) return;
+      const [item] = src.splice(idx, 1);
+      if (to === 'queue') state.queuedMessages.push(item);
+      else state.interruptMessages.push(item);
+    },
     appendStreamingContent(state, action: PayloadAction<string>) {
       state.streamingContent += action.payload;
     },
@@ -881,6 +924,8 @@ export const conversationSlice = createSlice({
       state.streamingContent = '';
       // ★ H4-2：换对话身份 → 清空排队队列（防上条对话残留排队消息串台进新对话）。
       state.queuedMessages = [];
+      // ★ Plan_7 #6：换对话身份 → 一并清空插队队列（孪生 queuedMessages，防串台）。
+      state.interruptMessages = [];
       state.tokenCount = 0;
       state.tokenUsage = null;
       // M2-3：新对话无分支来源。
@@ -976,6 +1021,7 @@ export const {
   addMessageDiff, addMessageArtifact, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,
   setStreaming, setCompacting, appendStreamingContent, clearStreamingContent,
   enqueueMessage, dequeueMessage, clearQueue,
+  enqueueInterrupt, dequeueInterrupt, clearInterruptQueue, moveQueueItem,
   setModel, setTokenUsage, setPendingMessage, clearConversation, setTitle,
   editMessage, truncateAt, deleteMessage, clearMessages, updateToolCallStatus,
 } = conversationSlice.actions;

@@ -40,10 +40,21 @@ const INITIAL_MENU: MenuState = { open: false, mode: 'at', level: 'type', select
 
 interface UseAtMentionOptions {
   richRef: RefObject<RichTextInputHandle | null>;
-  /** Ctrl+Enter（底部）或 Enter（编辑框）触发的提交回调（发送 / 保存）。 */
-  onSubmit: () => void;
+  /**
+   * Ctrl+Enter（底部）或 Enter（编辑框）触发的提交回调（发送 / 保存）。
+   * ★ Plan_7 #6：opts.withModifier = 触发时是否按下 Ctrl/Cmd（供生成中区分主键 / 修饰键 → queue / interrupt）。
+   *   非生成中调用方可忽略此参数（行为不变）。
+   */
+  onSubmit: (opts?: { withModifier?: boolean }) => void;
   /** true=单 Enter 提交（编辑框，恒 Enter 保存）；false（默认）=由 sendKeyMode 决定底部输入框提交键。 */
   submitOnPlainEnter?: boolean;
+  /**
+   * ★ Plan_7 #6：生成中（isStreaming）运行时键位模式。true 时无视 sendKeyMode 强制启用「双提交键」——
+   *   plain Enter 与 Ctrl/Cmd+Enter 都触发 onSubmit（分别带 withModifier=false/true，由调用方映射 queue/interrupt），
+   *   Shift+Enter 永远换行。false（默认）维持原 sendKeyMode 逻辑（非生成中正常发送）。
+   *   传 getter 而非布尔值：handleEditorKeyDown 在 keydown 当刻读最新流式态，避免 hook 依赖频繁重建。
+   */
+  runtimeMode?: () => boolean;
   /**
    * ★ C1（M7 第七轮反馈#6）：底部主输入框的发送键模式（仅当 submitOnPlainEnter 为 false 时生效）。
    *   'enter'     = plain Enter 发送 / Shift+Enter 换行。
@@ -68,7 +79,7 @@ interface UseAtMentionResult {
   openAtMenu: (type?: AtType) => void;
 }
 
-export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, sendKeyMode = 'ctrlEnter', onAfterMutate }: UseAtMentionOptions): UseAtMentionResult {
+export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, sendKeyMode = 'ctrlEnter', runtimeMode, onAfterMutate }: UseAtMentionOptions): UseAtMentionResult {
   const dispatch = useAppDispatch();
   const [menu, setMenu] = useState<MenuState>(INITIAL_MENU);
   const atRequestSeqRef = useRef(0);
@@ -236,7 +247,19 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, se
   }, [menu.mode, menu.selectedType, menu.trigger, dispatch, closeMenu, richRef, onAfterMutate]);
 
   const handleEditorKeyDown = useCallback((e: KeyboardEvent): boolean => {
-    // ★ C1（M7 第七轮反馈#6）：提交键判定分两类——
+    // ★ Plan_7 #6：生成中【运行时双提交键】优先（runtimeMode 当刻为 true）——无视 sendKeyMode，
+    //   plain Enter（withModifier=false）与 Ctrl/Cmd+Enter（withModifier=true）都触发提交（onSubmit 据此分 queue/interrupt），
+    //   Shift+Enter 永远换行。plain Enter 仍让位菜单（菜单开时选候选）；Ctrl/Cmd+Enter 即便菜单开也直接提交。
+    if (e.key === 'Enter' && !e.shiftKey && runtimeMode?.()) {
+      const withModifier = e.ctrlKey || e.metaKey;
+      if (withModifier || !menu.open) {
+        e.preventDefault();
+        onSubmit({ withModifier });
+        return true;
+      }
+      // plain Enter 且菜单开 → 不在此提交，继续往下走菜单导航分支（选候选）。
+    } else {
+    // ★ C1（M7 第七轮反馈#6）：非生成中提交键判定分两类——
     //   ① plain-Enter 提交：编辑框（submitOnPlainEnter）或底部 'enter' 模式。plain Enter（无修饰键）触发，
     //      受菜单守卫——菜单开时让位给「选候选」，仅菜单关才提交。Shift+Enter 永远换行（不进此分支）。
     //   ② ctrl/cmd-Enter 提交：底部 'ctrlEnter' 模式（默认）。Ctrl 或 Cmd+Enter 触发，即便菜单开也直接提交。
@@ -249,6 +272,7 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, se
       e.preventDefault();
       onSubmit();
       return true;
+    }
     }
     if (!menu.open) return false;
     if (e.key === 'ArrowDown') {
@@ -284,7 +308,7 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, se
       return true;
     }
     return false;
-  }, [submitOnPlainEnter, sendKeyMode, menu.open, menu.mode, menu.level, menu.items, menu.activeIndex, applyTypeSelect, applyTokenCompletion, closeMenu, onSubmit]);
+  }, [submitOnPlainEnter, sendKeyMode, runtimeMode, menu.open, menu.mode, menu.level, menu.items, menu.activeIndex, applyTypeSelect, applyTokenCompletion, closeMenu, onSubmit]);
 
   const menuElement = (
     <AtTypeMenu

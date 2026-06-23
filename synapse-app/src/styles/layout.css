@@ -1699,6 +1699,93 @@ html[data-wallpaper="enabled"] .settings-panel {
   color: #fff;
 }
 
+/* ★ Plan_7 #11：输入框上方三框——排队 / 插队 / 审查更改。复用 .queued-messages 玻璃外框，按用途换主题色。 */
+/* 框2：插队（interrupt）——用 warning 色区分（语义「打断/插入」更显眼）。 */
+.queued-messages.box-interrupt {
+  background: color-mix(in srgb, var(--syn-warning) 8%, var(--glass-bg-solid));
+  border-color: color-mix(in srgb, var(--syn-warning) 26%, transparent);
+}
+/* 框3：审查更改（review）——用 info 色区分。 */
+.queued-messages.box-review {
+  background: color-mix(in srgb, var(--syn-info) 8%, var(--glass-bg-solid));
+  border-color: color-mix(in srgb, var(--syn-info) 26%, transparent);
+}
+/* ★ 每框最多显示约 4 项，超出限高出滚动条。 */
+.queued-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+/* 队列项的功能按钮（编辑 ✎ / 切换 ⇄ / review 接受 ✓）——比取消按钮更中性。 */
+.queued-item-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--syn-text-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.queued-item-btn:hover {
+  background: var(--syn-overlay-medium);
+  color: var(--syn-text-primary);
+}
+.queued-item-btn.ok:hover {
+  background: var(--syn-success, #22c55e);
+  color: #fff;
+}
+/* review 框：右上「全部拒绝 / 全部接受」并排。 */
+.review-box-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.queued-clear-btn.primary {
+  color: var(--syn-info);
+  font-weight: 600;
+}
+/* review 项：左侧「打开文件」按钮占满（文件名 + 行增删徽标），右侧拒绝/接受。 */
+.review-item-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--syn-text-primary);
+  font-size: 12px;
+  text-align: left;
+}
+.review-item-open:hover .review-item-name {
+  text-decoration: underline;
+}
+.review-item-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.review-item-stat {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.review-item-stat .review-add { color: var(--syn-success, #22c55e); }
+.review-item-stat .review-del { color: #ef4444; }
+
 /* ===== ★ H6（M8 第七轮反馈）消息导航 ===== */
 /* 导航入口按钮与对话切换器并排在 agent-conv-switch 行（补 gap，不破坏原 trigger 的 flex:1 撑满）。 */
 .agent-conv-switch {

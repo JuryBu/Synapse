@@ -34,7 +34,7 @@ import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
 import { mcpBridge } from '@/services/mcpBridge';
 import { addNotification } from '@/store/slices/notifications';
-import { addMessage, clearConversation, clearMessages, editMessage, truncateAt, deleteMessage, endTaskBoundary, enqueueMessage, dequeueMessage, clearQueue, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setPendingMessage, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart, type QueuedMessage } from '@/store/slices/conversation';
+import { addMessage, clearConversation, clearMessages, editMessage, truncateAt, deleteMessage, endTaskBoundary, enqueueMessage, dequeueMessage, clearQueue, enqueueInterrupt, dequeueInterrupt, clearInterruptQueue, moveQueueItem, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setPendingMessage, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart, type QueuedMessage, type FileDiffSummary } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
 // ★ M3-3a：generateWorkflowRunId 预生成稳定 runId，跑前先建占位 assistant 消息 + 关联卡片实时显示。
 import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@/services/multiAITrigger';
@@ -56,7 +56,7 @@ import { generateId as generateMessageId } from '@/services/ids';
 import { setSelectedId, updateConversation, type ConversationSummary } from '@/store/slices/conversationHistory';
 import { openTab, setActiveTab as setActiveEditorTab } from '@/store/slices/editorTabs';
 import { type RootState } from '@/store';
-import { rollbackFileDiff } from '@/services/fileRollback';
+import { rollbackFileDiff, applyDiffReview } from '@/services/fileRollback';
 import { describeCapabilities } from '@/services/modelCapabilities';
 import { getRecord, clampToBatch, getRecordSkeleton } from '@/services/recordStore';
 import { identifyRounds } from '@/services/roundBoundary';
@@ -172,10 +172,17 @@ export function AgentPanel() {
   //   导致的重复 LLM 压缩 + 通知竞态 + record 水位竞争。compactNow 进入置 true、finally 置 false。
   const isCompactingRef = useRef(false);
   const isStreaming = useAppSelector((s: RootState) => (s as any).conversation.isStreaming);
+  // ★ Plan_7 #6：keydown 当刻读最新流式态供 useAtMention runtimeMode getter（避免 hook 依赖频繁重建）。
+  const isStreamingRef = useRef(isStreaming);
+  isStreamingRef.current = isStreaming;
   // ★ #13：前台压缩进行中（驱动「压缩中」banner + 发送守卫）。
   const isCompacting = useAppSelector((s: RootState) => (s as any).conversation.isCompacting);
   // ★ H4-2：排队消息（生成中插话入队，本轮结束自动发）。运行态、不落库。
   const queuedMessages = useAppSelector((s: RootState) => (s as any).conversation.queuedMessages as QueuedMessage[]);
+  // ★ Plan_7 #6：插队消息（生成中 Ctrl/Cmd+Enter 插话，下个空闲轮间插入）。运行态、不落库。
+  const interruptMessages = useAppSelector((s: RootState) => (s as any).conversation.interruptMessages as QueuedMessage[]);
+  // ★ Plan_7 #11：待审阅的文件改动（review changes 框列出 + 全部接受/拒绝）。
+  const pendingDiffs = useAppSelector((s: RootState) => (s as any).conversation.pendingDiffs as FileDiffSummary[]);
   const settings = useAppSelector((s: RootState) => (s as any).settings);
   const agentSettings = useAppSelector((s: RootState) => (s as any).agentSettings);
   // M2-6：handleBranch 等异步回调（useCallback 依赖窄）需读当前 mode / reasoningEffort 落库，
@@ -189,14 +196,18 @@ export function AgentPanel() {
   // ★ C6/去重：@ 两级菜单整套逻辑抽到 useAtMention hook（与编辑框 MessageBubble 共用）。
   //   handleSend 在 hook 之后定义且用到 hook 的 closeMenu，故 onSubmit 经 ref 破环
   //   （hook 在前，提供 menuElement/handleEditorKeyDown/refreshMenu/closeMenu；handleSend 在后赋值给 ref）。
-  const handleSendRef = useRef<() => void>(() => {});
+  // ★ Plan_7 #6：onSubmit 透传 { withModifier }（Ctrl/Cmd+Enter 与否），供生成中分流 queue/interrupt。
+  const handleSendRef = useRef<(opts?: { withModifier?: boolean }) => void>(() => {});
   // ★ C1（M7 第七轮反馈#6）：底部输入框发送键模式（设置可切换，默认 'enter'=Enter 发送/Shift+Enter 换行）。
   const sendKeyMode = (settings.sendKeyMode === 'ctrlEnter' ? 'ctrlEnter' : 'enter') as 'enter' | 'ctrlEnter';
+  // ★ Plan_7 #6：生成中发送键主键动作（设置可切换，默认 'queue'=主键排队 / Ctrl·Cmd+Enter 插队）。
+  const runtimeEnterAction = (settings.runtimeEnterAction === 'interrupt' ? 'interrupt' : 'queue') as 'queue' | 'interrupt';
   const { menuElement, handleEditorKeyDown, refreshMenu, closeMenu, openAtMenu } = useAtMention({
     richRef,
-    onSubmit: () => handleSendRef.current(),
+    onSubmit: (opts) => handleSendRef.current(opts),
     submitOnPlainEnter: false,
     sendKeyMode, // ★ C1：底部输入框按设置切换发送键
+    runtimeMode: () => isStreamingRef.current, // ★ Plan_7 #6：生成中启用双提交键（Enter / Ctrl·Cmd+Enter）
     onAfterMutate: () => setCanSend(!richRef.current?.isEmpty()),
   });
   const [activeAgentTab, setActiveAgentTab] = useState<'chat' | 'plan' | 'context'>('chat');
@@ -1343,6 +1354,24 @@ export function AgentPanel() {
     const cur = (conversationRef.current.queuedMessages as QueuedMessage[]) ?? [];
     if (cur.length > 0) releaseQueuedAttachments(cur);
     dispatch(clearQueue());
+    // ★ Plan_7 #6：插队队列同口径清空 + release（中止/切换/新建/分支共用，防中止后乱插、防串台）。
+    const curInt = (conversationRef.current.interruptMessages as QueuedMessage[]) ?? [];
+    if (curInt.length > 0) releaseQueuedAttachments(curInt);
+    dispatch(clearInterruptQueue());
+  }, [dispatch, releaseQueuedAttachments]);
+
+  // ★ Plan_7 #11：仅清空【排队】框（三框各自的「清空」按钮用，互不影响另一队列）。先 release 再清。
+  const clearQueueOnly = useCallback(() => {
+    const cur = (conversationRef.current.queuedMessages as QueuedMessage[]) ?? [];
+    if (cur.length > 0) releaseQueuedAttachments(cur);
+    dispatch(clearQueue());
+  }, [dispatch, releaseQueuedAttachments]);
+
+  // ★ Plan_7 #11：仅清空【插队】框。先 release 再清。
+  const clearInterruptOnly = useCallback(() => {
+    const cur = (conversationRef.current.interruptMessages as QueuedMessage[]) ?? [];
+    if (cur.length > 0) releaseQueuedAttachments(cur);
+    dispatch(clearInterruptQueue());
   }, [dispatch, releaseQueuedAttachments]);
 
   // ★ H4-2：取消单条排队消息（× 按钮）。先 release 该项附件再从队列移除（refCount 守恒）。
@@ -1352,6 +1381,57 @@ export function AgentPanel() {
     if (target) releaseQueuedAttachments([target]);
     dispatch(dequeueMessage({ id }));
   }, [dispatch, releaseQueuedAttachments]);
+
+  // ★ Plan_7 #6：取消单条插队消息（× 按钮）。孪生 handleCancelQueued——先 release 再 dequeueInterrupt。
+  const handleCancelInterrupt = useCallback((id: string) => {
+    const cur = (conversationRef.current.interruptMessages as QueuedMessage[]) ?? [];
+    const target = cur.find(it => it.id === id);
+    if (target) releaseQueuedAttachments([target]);
+    dispatch(dequeueInterrupt({ id }));
+  }, [dispatch, releaseQueuedAttachments]);
+
+  // ★ Plan_7 #11：在两队列间切换某项（queue 项 ↔ interrupt 项）。原子搬移，附件引用随项转移（不 release）。
+  const handleToggleQueueItem = useCallback((id: string, from: 'queue' | 'interrupt') => {
+    dispatch(moveQueueItem({ id, from, to: from === 'queue' ? 'interrupt' : 'queue' }));
+  }, [dispatch]);
+
+  // ★ Plan_7 #11：review changes 框——接受/拒绝单个文件改动。复用 fileRollback.applyDiffReview（与编辑器 review tab 同一套审批逻辑）。
+  const handleReviewAccept = useCallback(async (diffId: string) => {
+    const conv = conversationRef.current;
+    const diff = (conv.pendingDiffs as FileDiffSummary[]).find(item => item.id === diffId);
+    if (!diff) return;
+    const snapshot = diff.snapshotId ? conv.fileSnapshots[diff.snapshotId] : undefined;
+    try {
+      await applyDiffReview(diff, snapshot, 'accepted');
+      dispatch(updateDiffStatus({ diffId, status: 'accepted' }));
+    } catch (err: any) {
+      dispatch(addNotification({ type: 'error', title: '接受失败', message: err?.message || diff.path }));
+    }
+  }, [dispatch]);
+
+  const handleReviewReject = useCallback(async (diffId: string) => {
+    const conv = conversationRef.current;
+    const diff = (conv.pendingDiffs as FileDiffSummary[]).find(item => item.id === diffId);
+    if (!diff) return;
+    const snapshot = diff.snapshotId ? conv.fileSnapshots[diff.snapshotId] : undefined;
+    try {
+      await applyDiffReview(diff, snapshot, 'rejected');
+      dispatch(updateDiffStatus({ diffId, status: 'rejected' }));
+    } catch (err: any) {
+      dispatch(addNotification({ type: 'error', title: '回退失败', message: err?.message || diff.path }));
+    }
+  }, [dispatch]);
+
+  // ★ Plan_7 #11：review changes 框——全部接受/拒绝（仅对 pending 项，逐个串行处理，与 ReviewChangesView runBatch 同口径）。
+  const handleReviewBatch = useCallback((action: 'accept' | 'reject') => {
+    const pending = ((conversationRef.current.pendingDiffs as FileDiffSummary[]) ?? []).filter(d => d.status === 'pending');
+    void (async () => {
+      for (const diff of pending) {
+        if (action === 'accept') await handleReviewAccept(diff.id);
+        else await handleReviewReject(diff.id);
+      }
+    })();
+  }, [handleReviewAccept, handleReviewReject]);
 
   // ★ H4-2：发送核心——从「文本 + tokens + 就绪附件」执行一次用户发送（斜杠/@MultiAI 分流 + H4-1 收口 +
   //   组装 contentParts + 调 agentLoop.run）。被两条路共用：① handleSend（从输入框 DOM extract 后调）；
@@ -1417,7 +1497,7 @@ export function AgentPanel() {
     return 'sent';
   }, [settings.attachUserMsgToBoundary, buildUserContentParts, buildContextFromTokens, runWorkflowFromInput, buildSlashHelpers, closeMenu, dispatch]);
 
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback((opts?: { withModifier?: boolean }) => {
     // ★ M6：数据源从受控 input → richRef.extract()（DOM 唯一真值）。plainText 已内建 token 占位语义（P10），
     //   下游 parseAndDispatch/parseMultiAITrigger 直接吃 plainText 即命中；tokens 供 buildContextFromTokens 注入。
     const extracted = richRef.current?.extract() ?? { plainText: '', tokens: [] };
@@ -1445,28 +1525,44 @@ export function AgentPanel() {
       return;
     }
 
-    // ★ H4-2：生成中插话 → 不再静默丢弃，改为【排队】（本轮 agent loop 结束自动发，见 isStreaming 下降沿 effect）。
-    //   护栏③：队列上限 5 条，满了提示并拒绝入队。入队成功后清空输入框 + 草稿附件（与正常发送同款 UI 收尾），
-    //   但【不 release 附件 sha256】——这些引用要随排队消息留到自动发时使用（release 会令实体被删，自动发时图丢失）。
+    // ★ Plan_7 #6：生成中插话 → 不再静默丢弃，入【双队列】之一（不打断生成）：
+    //   - queue（排队）：本轮 agent loop 彻底结束后由空闲 effect 自动发。
+    //   - interrupt（插队）：下个空闲轮间由 agentLoop 插入 messages，AI 当前 run 下一轮就看到。
+    //   分流：主键（plain Enter / 点发送钮，withModifier=false）→ runtimeEnterAction；修饰键（Ctrl·Cmd+Enter）→ 相反。
+    //   每队列各自上限 5。入队成功后清输入框 + 草稿附件，但【不 release sha256】（引用随队列项留到发送时复用）。
     if (isStreaming) {
-      if (queuedMessages.length >= 5) {
-        dispatch(addNotification({ type: 'warning', title: '排队已满', message: '最多排队 5 条消息，请等当前回复结束后再发' }));
+      const withModifier = opts?.withModifier === true;
+      const target: 'queue' | 'interrupt' = withModifier
+        ? (runtimeEnterAction === 'queue' ? 'interrupt' : 'queue')
+        : runtimeEnterAction;
+      const targetLen = target === 'interrupt' ? interruptMessages.length : queuedMessages.length;
+      if (targetLen >= 5) {
+        dispatch(addNotification({
+          type: 'warning',
+          title: target === 'interrupt' ? '插队已满' : '排队已满',
+          message: `最多${target === 'interrupt' ? '插队' : '排队'} 5 条消息，请等当前回复结束后再发`,
+        }));
         return;
       }
       const contentPartsForQueue = buildUserContentParts(text, readyAttachments);
-      dispatch(enqueueMessage({
-        id: generateMessageId('queued'),
+      const item: QueuedMessage = {
+        id: generateMessageId(target === 'interrupt' ? 'interrupt' : 'queued'),
         text,
         contentParts: contentPartsForQueue.length > 0 ? contentPartsForQueue : undefined,
         attachments: readyAttachments.length > 0 ? readyAttachments : undefined,
         richTokens: tokens.length > 0 ? tokens : undefined,
         enqueuedAt: Date.now(),
-      }));
+      };
+      dispatch(target === 'interrupt' ? enqueueInterrupt(item) : enqueueMessage(item));
       richRef.current?.clear(); setCanSend(false);
-      setPendingAttachments([]); // ★ 注意：不 release sha256（引用转移给排队项，自动发时复用）
+      setPendingAttachments([]); // ★ 注意：不 release sha256（引用转移给队列项，发送时复用）
       setPreviewAttachment(null);
       closeMenu();
-      dispatch(addNotification({ type: 'info', title: '已排队', message: '当前回复结束后将自动发送这条消息' }));
+      dispatch(addNotification({
+        type: 'info',
+        title: target === 'interrupt' ? '已插队' : '已排队',
+        message: target === 'interrupt' ? '将在 AI 下一步操作前插入这条消息' : '当前回复结束后将自动发送这条消息',
+      }));
       return;
     }
 
@@ -1476,7 +1572,7 @@ export function AgentPanel() {
     setPendingAttachments([]);
     setPreviewAttachment(null);
     dispatchUserSend({ text, tokens, readyAttachments });
-  }, [pendingAttachments, isStreaming, queuedMessages.length, hasApiKey, hasModel, buildUserContentParts, dispatchUserSend, closeMenu, dispatch]);
+  }, [pendingAttachments, isStreaming, runtimeEnterAction, queuedMessages.length, interruptMessages.length, hasApiKey, hasModel, buildUserContentParts, dispatchUserSend, closeMenu, dispatch]);
 
   // ★ H4-2：isStreaming 由 true→false 下降沿 = 本轮 agent loop 结束 → 若有排队消息且条件满足，自动发队首。
   //   护栏：
@@ -1490,15 +1586,19 @@ export function AgentPanel() {
     //   dispatchUserSend 返回 'handled' 不产生流式、不再有下降沿，后续排队消息全部滞留。改为「空闲(非流式)
     //   且队列非空就发队首」：handled 后队列变化 → effect 因 queuedMessages 依赖重跑 → isStreaming 仍 false
     //   继续发下一条；直到发出真消息（'sent' → isStreaming 转 true，本次 return 等流式结束）或队列空。
+    // ★ Plan_7 #6：兼收【插队残留】——用户若在 run 最后一轮（无下一轮 drain 机会）插话，interruptMessages
+    //   会残留，agentLoop 已结束不再消费它。此处 run 结束后把残留 interrupt 也当队首发出（queue 优先、
+    //   queue 空再发 interrupt），避免插话永久滞留。语义合理：没赶上本轮 → 结束后立即发。
     if (isStreaming) return;
-    if (queuedMessages.length === 0) return;
     // 护栏④：再确认当前确实空闲（conversationRef 持最新；若已被下一轮占用则放弃，等下次 effect）。
     if (conversationRef.current.isStreaming) return;
     if (!hasApiKey || !hasModel || !agentLoopRef.current) return;
 
-    const head = queuedMessages[0];
-    // 先移除队首（同步 dispatch，防重复发送）。
-    dispatch(dequeueMessage(undefined));
+    const fromQueue = queuedMessages.length > 0;
+    const head = fromQueue ? queuedMessages[0] : interruptMessages[0];
+    if (!head) return;
+    // 先移除队首（同步 dispatch，防重复发送）——从对应队列移除。
+    dispatch(fromQueue ? dequeueMessage(undefined) : dequeueInterrupt(undefined));
     // 还原排队项为「就绪草稿附件」（status 置 ready，发送时 dispatchUserSend 内部转 'sent'；剥内存预览，落库只留 sha256）。
     const readyAttachments: AttachmentRef[] = (head.attachments ?? []).map(att => ({
       ...att,
@@ -1510,7 +1610,7 @@ export function AgentPanel() {
     // 空内容防御（理论不会入队空消息，双保险）。
     if (!head.text && readyAttachments.length === 0) return;
     dispatchUserSend({ text: head.text, tokens: head.richTokens ?? [], readyAttachments });
-  }, [isStreaming, queuedMessages, hasApiKey, hasModel, dispatchUserSend, dispatch]);
+  }, [isStreaming, queuedMessages, interruptMessages, hasApiKey, hasModel, dispatchUserSend, dispatch]);
 
   const handleStop = useCallback(() => {
     // ★ M3-2b 修复（high）：Stop 按钮要同时管「普通对话」与「@MultiAI 工作流」两条路。
@@ -1604,6 +1704,14 @@ export function AgentPanel() {
       }
     }
   }, [dispatch]);
+
+  // ★ Plan_7 #11：编辑某条队列/插队消息（✎ 按钮）——把内容回填输入框（含富文本 token + 附件草稿，复用 refillInputFromUserMessage），
+  //   再从原队列移除。⚠️ 不 release 附件：引用从队列项转移回输入框草稿（refCount 守恒，与 refillInputFromUserMessage 同口径）。
+  const handleEditQueueItem = useCallback((item: QueuedMessage, from: 'queue' | 'interrupt') => {
+    refillInputFromUserMessage({ content: item.text, attachments: item.attachments, richTokens: item.richTokens });
+    dispatch(from === 'interrupt' ? dequeueInterrupt({ id: item.id }) : dequeueMessage({ id: item.id }));
+    richRef.current?.focus();
+  }, [dispatch, refillInputFromUserMessage]);
 
   // Edit user message → truncate after it → re-send（★ C6：带附件编辑——保留/新增图、删图，refCount 精确守恒）
   // ★ D1：onEdit 签名扩 richTokens?——MessageBubble.handleSubmitEdit 透传编辑后【新 extract】的 tokens，落库覆盖旧值。
@@ -2786,21 +2894,73 @@ export function AgentPanel() {
         {isCompacting && (
           <div className="compacting-banner">⏳ 上下文压缩中，请稍候…</div>
         )}
-        {/* ★ H4-2：插话排队区（参考 Codex）——生成中发的消息进队列、本轮结束自动发；这里列出待发条目，可单条取消 / 一键清空。 */}
+        {/* ★ Plan_7 #11：输入框正上方三框（从上到下：排队 / 插队 / 审查更改）。每框最多显示 4 项，超出滚动。 */}
+        {/* ── 框1：排队（queue）。生成中发的消息进此队列、本轮回复结束自动发。每项可编辑 ✎ / 删除 ✕ / 切到插队 ⇅。 ── */}
         {queuedMessages.length > 0 && (
-          <div className="queued-messages">
+          <div className="queued-messages box-queue">
             <div className="queued-messages-header">
               <span className="queued-messages-count">{queuedMessages.length} 条排队中 · 当前回复结束后自动发送</span>
-              <button className="queued-clear-btn" onClick={clearQueueWithRelease} title="清空全部排队">清空</button>
+              <button className="queued-clear-btn" onClick={clearQueueOnly} title="清空全部排队">清空</button>
             </div>
-            {queuedMessages.map((q) => (
-              <div key={q.id} className="queued-item" title={q.text || '(附件)'}>
-                <span className="queued-item-text">{q.text || (q.attachments?.length ? `📎 ${q.attachments.length} 个附件` : '(空)')}</span>
-                <button className="queued-item-cancel" onClick={() => handleCancelQueued(q.id)} title="取消这条排队">×</button>
-              </div>
-            ))}
+            <div className="queued-list">
+              {queuedMessages.map((q) => (
+                <div key={q.id} className="queued-item" title={q.text || '(附件)'}>
+                  <span className="queued-item-text">{q.text || (q.attachments?.length ? `📎 ${q.attachments.length} 个附件` : '(空)')}</span>
+                  <button className="queued-item-btn" onClick={() => handleEditQueueItem(q, 'queue')} title="编辑这条（回填到输入框）"><Pencil size={13} /></button>
+                  <button className="queued-item-btn" onClick={() => handleToggleQueueItem(q.id, 'queue')} title="改为插队（AI 下一步前插入）">⇄</button>
+                  <button className="queued-item-cancel" onClick={() => handleCancelQueued(q.id)} title="删除这条">×</button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
+        {/* ── 框2：插队（interrupt）。生成中 Ctrl·Cmd+Enter 发的消息进此队列、AI 下个空闲轮间插入。每项可编辑 / 删除 / 切到排队。 ── */}
+        {interruptMessages.length > 0 && (
+          <div className="queued-messages box-interrupt">
+            <div className="queued-messages-header">
+              <span className="queued-messages-count">{interruptMessages.length} 条插队中 · AI 下一步操作前插入</span>
+              <button className="queued-clear-btn" onClick={clearInterruptOnly} title="清空全部插队">清空</button>
+            </div>
+            <div className="queued-list">
+              {interruptMessages.map((q) => (
+                <div key={q.id} className="queued-item" title={q.text || '(附件)'}>
+                  <span className="queued-item-text">{q.text || (q.attachments?.length ? `📎 ${q.attachments.length} 个附件` : '(空)')}</span>
+                  <button className="queued-item-btn" onClick={() => handleEditQueueItem(q, 'interrupt')} title="编辑这条（回填到输入框）"><Pencil size={13} /></button>
+                  <button className="queued-item-btn" onClick={() => handleToggleQueueItem(q.id, 'interrupt')} title="改为排队（本轮结束后发）">⇄</button>
+                  <button className="queued-item-cancel" onClick={() => handleCancelInterrupt(q.id)} title="删除这条">×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* ── 框3：审查更改（review changes）。列待审阅的文件改动，点击打开文件；可单个或「全部接受 / 全部拒绝」。 ── */}
+        {(() => {
+          const pendingReview = pendingDiffs.filter(d => d.status === 'pending');
+          if (pendingReview.length === 0) return null;
+          return (
+            <div className="queued-messages box-review">
+              <div className="queued-messages-header">
+                <span className="queued-messages-count">{pendingReview.length} 个文件待审查</span>
+                <span className="review-box-actions">
+                  <button className="queued-clear-btn" onClick={() => handleReviewBatch('reject')} title="全部拒绝（回退改动）">全部拒绝</button>
+                  <button className="queued-clear-btn primary" onClick={() => handleReviewBatch('accept')} title="全部接受">全部接受</button>
+                </span>
+              </div>
+              <div className="queued-list">
+                {pendingReview.map((d) => (
+                  <div key={d.id} className="queued-item review-item" title={d.path}>
+                    <button className="review-item-open" onClick={() => openDiffTarget({ path: d.path })} title="打开此文件">
+                      <span className="review-item-name">{d.path.split(/[\\/]/).pop()}</span>
+                      <span className="review-item-stat"><span className="review-add">+{d.additions}</span> <span className="review-del">-{d.deletions}</span></span>
+                    </button>
+                    <button className="queued-item-btn" onClick={() => void handleReviewReject(d.id)} title="拒绝此文件"><X size={13} /></button>
+                    <button className="queued-item-btn ok" onClick={() => void handleReviewAccept(d.id)} title="接受此文件"><Check size={13} /></button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
         <div className="agent-input-toolbar">
           {/* ★ C3（M7 第七轮反馈#13）：原「附加文件 📎 + 附加图片 🖼」两按钮收敛成一个「加号小窗」（参考 Codex）。
               点开弹小菜单：上传附件（合并文件+图片，accept 放宽）/ 提及@（打开 @ 引用面板）/ 选择工作流（直进工作流二级）。
@@ -2913,7 +3073,7 @@ export function AgentPanel() {
           ) : (
             <button
               className="agent-send-btn"
-              onClick={handleSend}
+              onClick={() => handleSend()}
               disabled={(!canSend && pendingAttachments.filter(att => att.status === 'ready').length === 0) || !hasApiKey || !hasModel}
               title="发送"
             >

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import type { RootState } from '@/store';
-import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter, setSendKeyMode, setAttachUserMsgToBoundary, setUserAvatar, setUserName, setAiAvatar, setAiName } from '@/store/slices/settings';
+import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter, setSendKeyMode, setRuntimeEnterAction, setAttachUserMsgToBoundary, setUserAvatar, setUserName, setAiAvatar, setAiName } from '@/store/slices/settings';
 import { clearConversation } from '@/store/slices/conversation';
 import { setConversations, setSelectedId } from '@/store/slices/conversationHistory';
 import { deleteConversationSnapshot, exportConversationSnapshot, listConversationSummaries } from '@/services/conversationPersistence';
@@ -1120,6 +1120,18 @@ export function SettingsPanel() {
                 <option value="ctrlEnter">Ctrl+Enter 发送 / Enter 换行</option>
               </select>
               <span className="setting-hint">输入框回车行为：默认 Enter 直接发送（Shift+Enter 换行）；切到 Ctrl+Enter 模式后 Enter 改为换行、Ctrl 或 Cmd+Enter 才发送。</span>
+            </div>
+            {/* ★ Plan_7 #6：生成中发送键主键动作（排队 / 插队）。 */}
+            <div className="setting-item">
+              <label>生成中发送键</label>
+              <select
+                value={settings.runtimeEnterAction === 'interrupt' ? 'interrupt' : 'queue'}
+                onChange={e => dispatch(setRuntimeEnterAction(e.target.value === 'interrupt' ? 'interrupt' : 'queue'))}
+              >
+                <option value="queue">主键→排队 / Ctrl·Cmd+Enter→插队（默认）</option>
+                <option value="interrupt">主键→插队 / Ctrl·Cmd+Enter→排队</option>
+              </select>
+              <span className="setting-hint">AI 生成中你再发消息时：「排队」= 等本轮回复结束后自动发；「插队」= 在 AI 下一步操作前就插入这条消息让它看到。此项决定主发送键（Enter 或 Ctrl+Enter，依上面的发送键模式）走哪种，另一组合键自动取相反；Shift+Enter 始终换行。</span>
             </div>
             {/* ★ H4-1（M7 第七轮反馈）：用户消息是否归入当前任务边界卡片。 */}
             <div className="setting-item">

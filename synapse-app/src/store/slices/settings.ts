@@ -21,6 +21,13 @@ interface PromptInjectionSettings {
 //   'ctrlEnter' = Ctrl 或 Cmd+Enter 发送 / Enter 换行（编辑器习惯，旧默认行为）。
 export type SendKeyMode = 'enter' | 'ctrlEnter';
 
+// ★ Plan_7 #6：生成中（isStreaming）发送键的【主键动作】——决定生成中“主发送键（Enter / Ctrl+Enter，依 sendKeyMode）”
+//   按下时是入【排队】还是【插队】队列，另一组合键自动取相反语义。Shift+Enter 永远换行（不在此列）。
+//   'queue'     = 主键→排队（本轮结束自动发），修饰键(Ctrl/Cmd+Enter)→插队（默认，最稳妥）。
+//   'interrupt' = 主键→插队（下个空闲轮间插入），修饰键→排队。
+//   非生成中不受此影响，维持 C1 的 sendKeyMode（正常发送）。
+export type RuntimeEnterAction = 'queue' | 'interrupt';
+
 interface SettingsState {
   language: 'zh-CN' | 'en';
   fontSize: number;
@@ -29,6 +36,9 @@ interface SettingsState {
   wordWrap: boolean;
   // ★ C1：底部主输入框发送键模式（界面交互偏好，随 settings 持久化）。
   sendKeyMode: SendKeyMode;
+  // ★ Plan_7 #6：生成中发送键主键动作（'queue' 默认 / 'interrupt'）。随 settings 持久化。
+  //   读取处按「=== 'interrupt' 才 interrupt，否则 queue」兜底（旧持久化缺此字段=undefined → 视为 'queue'）。
+  runtimeEnterAction: RuntimeEnterAction;
   // ★ H4-1（M8 第七轮反馈）：用户消息是否归入当前 active task_boundary 卡片（默认 true=维持现状）。
   //   false 时 handleSend 发送前先收口 active 边界（endTaskBoundary），新消息落在卡片外。
   //   读取处一律按「!== false」兜底（旧 localStorage 整体替换 settings 时缺此字段会是 undefined → 视为 true）。
@@ -56,6 +66,7 @@ const initialState: SettingsState = {
   showLineNumbers: true,
   wordWrap: true,
   sendKeyMode: 'enter', // ★ C1：默认 Enter 发送 / Shift+Enter 换行
+  runtimeEnterAction: 'queue', // ★ Plan_7 #6：默认生成中主键→排队、Ctrl/Cmd+Enter→插队
   attachUserMsgToBoundary: true, // ★ H4-1：默认用户消息归入当前任务边界卡片（维持现状）
   // ★ #19 个性化：默认全空——头像走图标色块兜底、昵称走「你」/「Synapse AI」兜底。
   userAvatar: undefined,
@@ -101,6 +112,10 @@ export const settingsSlice = createSlice({
     // ★ C1：切换发送键模式（'enter' / 'ctrlEnter'）。
     setSendKeyMode(state, action: PayloadAction<SendKeyMode>) {
       state.sendKeyMode = action.payload;
+    },
+    // ★ Plan_7 #6：切换生成中发送键主键动作（'queue' / 'interrupt'）。
+    setRuntimeEnterAction(state, action: PayloadAction<RuntimeEnterAction>) {
+      state.runtimeEnterAction = action.payload;
     },
     // ★ H4-1：切换「用户消息归入当前任务边界」开关。
     setAttachUserMsgToBoundary(state, action: PayloadAction<boolean>) {
@@ -172,7 +187,7 @@ export const settingsSlice = createSlice({
 });
 
 export const {
-  setLanguage, setFontSize, setAutoSave, setSendKeyMode, setAttachUserMsgToBoundary,
+  setLanguage, setFontSize, setAutoSave, setSendKeyMode, setRuntimeEnterAction, setAttachUserMsgToBoundary,
   setUserAvatar, setUserName, setAiAvatar, setAiName,
   setApiKey, setApiEndpoint, loadSettings,
   setSafety, setPromptInjection,
