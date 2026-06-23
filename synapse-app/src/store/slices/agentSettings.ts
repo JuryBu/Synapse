@@ -59,6 +59,23 @@ export interface RecordLayeringConfig {
   foldThreshold: number;
   /** R-L4 每次折叠把最老 K 批合成 1 个元批。 */
   foldBatchK: number;
+  /**
+   * ★ #14 动态分级总开关（默认 true=开）：开则在【压缩点】按「hit 命中强度 × 距离当前轮远近」给各批算固化档位
+   *   renderLevel（full/summary/brief），渲染时按档位升降级（叠加在静态位置分层上）；关则回退纯静态位置分层。
+   *   ★ 渲染只读固化的 renderLevel、不读 hit/距离/当前轮号 → else 分支每轮前缀稳定，prompt cache 不破（方案①）。
+   */
+  dynamicLevelEnabled: boolean;
+  /** ★ #14 动态分级：hit 命中强度权重（每次 hit 给命中批的强度增量）。默认 0.6。 */
+  hitWeight: number;
+  /** ★ #14 动态分级：距离衰减权重（dist 每加 1，距离因子按 1/(1+dist×distWeight) 衰减）。默认 0.2。 */
+  distWeight: number;
+  /** ★ #14 动态分级：hit 强度基线（无 hit 批也有的最小命中项，保证 score 不被乘积归零、仍按距离区分远近）。默认 0.4。 */
+  hitBase: number;
+  /** ★ #14 动态分级：升 full 的 score 阈值（score >= 此值 → 全文）。默认 0.6。 */
+  fullThreshold: number;
+  /** ★ #14 动态分级：升 summary 的 score 阈值（fullThreshold > score >= 此值 → 骨架；否则 brief 仅标题）。默认 0.3。
+   *  默认梯度：未标记批近批（dist≤1）落 summary（同改造前骨架水平）、dist≥2 才降 brief；被 hit 标记的批近批升 full。 */
+  summaryThreshold: number;
 }
 
 /**
@@ -181,6 +198,13 @@ const initialState: AgentSettingsState = {
     maxRatio: 0.4,
     foldThreshold: 30,
     foldBatchK: 10,
+    // ★ #14 动态分级（默认开）：默认值需与 store/index.ts sanitize 兜底 + agentLoop.DEFAULT_LAYERING 三处同步。
+    dynamicLevelEnabled: true,
+    hitWeight: 0.6,
+    distWeight: 0.2,
+    hitBase: 0.4,
+    fullThreshold: 0.6,
+    summaryThreshold: 0.3,
   },
   bpc: { ...DEFAULT_BPC_CONFIG },
 };

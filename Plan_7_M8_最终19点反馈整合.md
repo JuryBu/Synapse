@@ -84,11 +84,12 @@
 ## 六、施工进展（实时）
 - ✅ 批1 `c6cac69`：#2 设置中止（流式中缓存 client 不重建）/ #8 md 公式图（MarkdownViewer KaTeX+图片）/ #16 Exa 框架（npx exa-mcp-server, enabled:false 待主人填 EXA_API_KEY）/ #17 SKILL.md 正文注入
 - ✅ 批2 `eff9325`：#7 H5 语义修正（按 task_boundary 状态注入「开/切 task」）/ #13 压缩阻塞 UI（isCompacting + banner + 发送守卫；崩溃恢复已有）
-- ⬜ A 类剩：#9 编辑消息框对齐加号小窗 / #12 / 命令彩色 chip + 压缩点可见 / 消息导航 UI 补丁（透明度+滚动条）
-- ⬜ B 类：#6 双队列(interrupt+queue)+#11 三框（大，运行时键位 Enter/Shift/Ctrl 可设置）/ #19 个性化（头像+昵称+裁剪上传）
-- ⬜ C 类：#14 record 动态分级（大，hit+距离）/ #18 记忆收敛（systemPrompt 引导原生）/ #4 mcpBridge 剥空字段 / #3 对话级设置持久化验证
-- ⏸ #15 压缩后卡片更新：主人不确定 + headline 概念上不随压缩变，暂记小本本待主人明确指哪个卡片、期望显示什么
-- 🔬 批1/批2 待重启真机验证：#2 设置中止、#8 md公式、#13 压缩 banner、#7 reminder
+- ✅ 批3 `5b3951c`：#18 记忆引导 / #4 剥空字段 / #9 编辑框加号 / #16 Exa 走 HTTP Broker（手搓 transport）
+- ✅ 批4 `302ea74`：#19 个性化头像昵称 / #12a /命令彩色 chip / #12b 压缩点可见+导航UI修
+- ✅ 批5 `9ddb96f`：#6 双队列(interrupt+queue) / #11 三框 / 运行时键位（drainInterruptMessages 轮间插入）
+- ✅ 批6：#14 record 动态分级（hit×距离→brief/summary/full）——方案①只在压缩点重算+固化 renderLevel，渲染只读固化值不读动态量→prompt cache 不破；mark_record_hit 工具记账 + 新鲜度衰减；子代理 1820 组穷举验证关闭/旧 record 退回逐字一致。**Plan_7 代码全部完成（批1-6）**
+- ⏸ #15 压缩后卡片更新：主人不确定 + headline 概念上不随压缩变，暂记小本本待主人明确指哪个卡片
+- 🔬 全部待主人重启统一真机验证；整体 adversarial review（Workflow 多 lens：#6 interrupt 语义 / #14 cache 不变式 / #11 三框 / #19 个性化）；Exa 需 Broker 在跑(127.0.0.1:14588)
 
 ## 五、待评估 / 小本本（承接 Plan_6）
 - queue 附件 release / run_command 副作用入账本 / 队列上限连点 / subtitle 并发节流（Plan_6 遗留）

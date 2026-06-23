@@ -16,7 +16,7 @@ import {
 import { setConnectionStatus, type RecordLayeringConfig } from '../store/slices/agentSettings';
 import { addNotification } from '../store/slices/notifications';
 import { promptBuilder, renderOpenFilesSection, compressContext, COMPRESSION_THRESHOLD, estimateTokens, countConversationTokens } from './systemPrompt';
-import { getRecord, appendBatch, getRecordSkeleton, extractSkeletonTitle, foldOldBatches, type RecordBatch, type SynapseRecord } from './recordStore';
+import { getRecord, appendBatch, getRecordSkeleton, extractSkeletonTitle, foldOldBatches, computeRenderLevels, type RecordBatch, type SynapseRecord } from './recordStore';
 import { identifyRounds, floorStepToRoundStart } from './roundBoundary';
 import { generateBatch } from './recordGenerator';
 import { runSystemModelOnce } from './systemModelClient';
@@ -395,6 +395,8 @@ const BATCH_JOIN = '\n\n---\n\n';
 //   layering 参缺失 / 旧持久化无此字段时按此兜底，保证渲染不崩，且未配置时行为与改造前一致（headFull=2）。
 const DEFAULT_LAYERING: RecordLayeringConfig = {
   headFull: 2, tailFull: 1, titleThreshold: 20, maxRatio: 0.4, foldThreshold: 30, foldBatchK: 10,
+  // ★ #14 动态分级默认（默认开）：与 agentSettings.initialState / store/index.ts sanitize 三处同步。
+  dynamicLevelEnabled: true, hitWeight: 0.6, distWeight: 0.2, hitBase: 0.4, fullThreshold: 0.6, summaryThreshold: 0.3,
 };
 
 /**
@@ -412,6 +414,19 @@ function renderSkeletonBatch(batch: RecordBatch, titleOnly = false): string {
   const kind = titleOnly ? '标题' : '骨架';
   const header = `[批次${batch.index} ${kind}，可用 record_read(batchIndex=${batch.index}) 展开全文]`;
   return skeleton ? `${header}\n${skeleton}` : header;
+}
+
+/**
+ * ★ #14 渲染形态枚举（统一三层优先级的中间表示）：
+ *   'full' = 全文 contentMd；'summary' = 骨架（renderSkeletonBatch titleOnly=false）；'brief' = 仅标题（titleOnly=true）。
+ *   静态位置分层、动态 renderLevel 升降级、R-L5 force 强制降级都先归约成这个枚举，再统一渲染，杜绝三处散落的渲染分支漂移。
+ */
+type RenderForm = 'full' | 'summary' | 'brief';
+
+/** ★ #14：把渲染形态枚举落成字符串（单批）。 */
+function renderForm(batch: RecordBatch, form: RenderForm): string {
+  if (form === 'full') return batch.contentMd;
+  return renderSkeletonBatch(batch, form === 'brief');
 }
 
 /**
@@ -447,10 +462,20 @@ function injectionViewBatches(record: SynapseRecord): RecordBatch[] {
 }
 
 /**
- * ★ R-L2/R-L4/R-L5 共用渲染核心：三级分层渲染注入前缀。
- *   forceTitleOnlyCount = R-L5 token 硬闸的【强制降级游标】：从中段最老批起，额外强制把这么多批降 titleOnly
- *   （叠加在档3 的自然 titleThreshold 降级之上，取 max）。默认 0 = 纯三级分层（buildStableRecordPrefix 行为）。
- *   ★ forceTitleOnlyCount=0 时输出与改造前逐字一致（prompt cache 稳定路径，绝不引入 token/窗口依赖）。
+ * ★ R-L2/R-L4/R-L5/#14 共用渲染核心：三层优先级合成每批渲染形态后拼接注入前缀。
+ *
+ * 三层优先级（从低到高合成单批最终 RenderForm，杜绝散落分支漂移）：
+ *   ① 静态位置基础档（R-L2，只依赖批序位 i 与总批数 N）：头 H 批/尾 T 批 → full；中段 → summary；
+ *      中段批数 > titleThreshold 时最老一段 → brief。force=0 且无动态分级时与改造前逐字一致 → prompt cache 确定性。
+ *   ② 动态分级升降级（#14，仅 dynamicLevelEnabled 且批有固化 renderLevel 时）：用批的 renderLevel【覆盖】基础档
+ *      （full/summary/brief 三选一）。renderLevel 由 computeRenderLevels 在【压缩点】按「hit×距离」算好固化进批，
+ *      渲染只【读取】不重算 → else 分支每轮前缀仍只依赖批集合（renderLevel 两次压缩间不变）→ prompt cache 不破（方案①）。
+ *      ★ 关键：本层【绝不读 hit/距离/当前轮号】，只读已固化的 renderLevel 字段，逐轮变量被隔离在压缩点。
+ *   ③ R-L5 force 强制降 brief（最高，token 硬闸危险态）：被 forceTitleOnlyCount 游标命中的批强制 brief，
+ *      覆盖①②（保正确性优先于 cache）。force=0 时本层 no-op。
+ *
+ * forceTitleOnlyCount = R-L5 强制降级游标：从中段最老批起额外强制降 brief；极端时连尾/头也降。默认 0。
+ * ★ forceTitleOnlyCount=0 且（dynamicLevelEnabled=false 或所有批无 renderLevel）时输出与改造前逐字一致。
  */
 function renderRecordPrefix(
   record: SynapseRecord,
@@ -460,58 +485,63 @@ function renderRecordPrefix(
   const cfg = { ...DEFAULT_LAYERING, ...(layering ?? {}) };
   const H = Math.max(0, Math.floor(cfg.headFull));
   const T = Math.max(0, Math.floor(cfg.tailFull));
+  const dyn = cfg.dynamicLevelEnabled !== false; // 缺省视作开（默认开）
 
   const batches = injectionViewBatches(record);
   if (batches.length === 0) return record.contentMd ?? '';
-  if (batches.length === 1) {
-    // 单批：R-L5 极端兜底允许把唯一批也降 titleOnly（forceTitleOnlyCount>0 时），否则全文。
-    return forceTitleOnlyCount > 0
-      ? renderSkeletonBatch(batches[0], true)
-      : batches[0].contentMd;
-  }
 
   const N = batches.length;
   const force = Math.max(0, Math.floor(forceTitleOnlyCount));
 
-  // 边界：头尾全文区间已覆盖全部（N <= H+T）→ 全批全文（无 force 时）；force>0 时把最老 force 批降 titleOnly。
-  if (N <= H + T) {
-    if (force <= 0) return batches.map(b => b.contentMd).filter(Boolean).join(BATCH_JOIN);
-    return batches
-      .map((b, i) => (i < force ? renderSkeletonBatch(b, true) : b.contentMd))
-      .filter(Boolean)
-      .join(BATCH_JOIN);
+  // —— 第①层：静态位置基础档（每批一个 RenderForm，仅依赖 i/N，cache 确定性）——
+  //   单批 / N<=H+T：头尾全文区已覆盖全部 → 全 full。其余按 R-L2 三级位置分层。
+  const baseForms: RenderForm[] = (() => {
+    if (N === 1 || N <= H + T) return batches.map(() => 'full' as RenderForm);
+    const midCount = N - H - T;
+    const naturalTitleOnly = midCount > cfg.titleThreshold ? midCount - cfg.titleThreshold : 0;
+    const titleOnlyEnd = H + Math.min(midCount, naturalTitleOnly);
+    return batches.map((_b, i) => {
+      if (i < H) return 'full';            // 头全文区
+      if (i >= N - T) return 'full';       // 尾全文区
+      return i < titleOnlyEnd ? 'brief' : 'summary'; // 中段：最老段 brief，其余 summary
+    });
+  })();
+
+  // —— 第②层：动态分级 renderLevel 覆盖（仅开关开 + 批有固化档位时；否则保留基础档，向后兼容逐字一致）——
+  const dynForms: RenderForm[] = baseForms.map((base, i) => {
+    if (!dyn) return base;
+    const lvl = batches[i].renderLevel;
+    return (lvl === 'full' || lvl === 'summary' || lvl === 'brief') ? lvl : base;
+  });
+
+  // —— 第③层：R-L5 force 强制 brief（token 硬闸危险态，覆盖①②）。force=0 → no-op，dynForms 原样输出 ——
+  let finalForms = dynForms;
+  if (force > 0) {
+    // force 命中顺序（与改造前 R-L5 一致）：先中段最老 → 尾批最老 → 头批最老（保正确性优先于 cache）。
+    //   构造一个「按降级优先级排序的批下标列表」，取前 force 个强制降 brief。
+    const midIdx: number[] = [];
+    const tailIdx: number[] = [];
+    const headIdx: number[] = [];
+    for (let i = 0; i < N; i++) {
+      if (i >= H && i < N - T) midIdx.push(i);      // 中段（i 升序 = 最老在前）
+      else if (i >= N - T) tailIdx.push(i);          // 尾区（i 升序 = 最老尾批在前）
+      else headIdx.push(i);                          // 头区（i 升序 = 最老在前）
+    }
+    const order = N === 1 || N <= H + T
+      ? batches.map((_b, i) => i)                    // 边界态：从最老起降（与改造前 i<force 一致）
+      : [...midIdx, ...tailIdx, ...headIdx];
+    const forceSet = new Set(order.slice(0, Math.min(force, N)));
+    finalForms = dynForms.map((f, i) => (forceSet.has(i) ? 'brief' : f));
   }
 
-  // ★ R-L2 三级分层（仅依赖批序位 i 与总批数 N，force=0 时绝不读 contextWindow/token → prompt cache 确定性）：
-  //   档1 序位 i<H：头全文（最老背景/关键决策）。
-  //   档2 序位 i>=N-T：尾全文（最近上下文，主人拍板 T=1）。
-  //   档3 中间批骨架；中间批数 > titleThreshold 时，把最老一段 [H, titleOnlyEnd) 降 titleOnly（仅标题）。
-  const midCount = N - H - T;
-  const naturalTitleOnly = midCount > cfg.titleThreshold ? midCount - cfg.titleThreshold : 0;
-  // ★ R-L5：强制降级游标叠加——从档3 最老起额外降 force 批，与自然降级取 max；clamp 到中段不越过尾全文区。
-  const titleOnlyCount = Math.min(midCount, Math.max(naturalTitleOnly, force));
-  const titleOnlyEnd = H + titleOnlyCount;
-  // ★ R-L5 极端兜底：若中段全降仍不够（force 超过中段批数），允许把尾全文批也降 titleOnly（保正确性优先于 cache）。
-  const tailForce = Math.max(0, force - midCount); // 还需多降几批尾批
-  const tailTitleOnlyStart = N - T + 0; // 尾全文区起点
-  // 头全文区也可被极端 force 吃掉：force 超过「中段+尾」后连头也降（最后防线，几乎不会触达）。
-  const headExtraForce = Math.max(0, force - midCount - T);
-
   return batches
-    .map((b, i) => {
-      // 头全文区：极端 force 下从最老起降 headExtraForce 批
-      if (i < H) return i < headExtraForce ? renderSkeletonBatch(b, true) : b.contentMd;
-      // 尾全文区：极端 force 下从最老尾批起降 tailForce 批
-      if (i >= N - T) return (i - tailTitleOnlyStart) < tailForce ? renderSkeletonBatch(b, true) : b.contentMd;
-      // 中段：[H, titleOnlyEnd) 降 titleOnly，其余骨架
-      return renderSkeletonBatch(b, i < titleOnlyEnd);
-    })
+    .map((b, i) => renderForm(b, finalForms[i]))
     .filter(Boolean)
     .join(BATCH_JOIN);
 }
 
 function buildStableRecordPrefix(record: SynapseRecord, layering?: Partial<RecordLayeringConfig>): string {
-  // ★ prompt cache 稳定路径：forceTitleOnlyCount=0，输出仅依赖批集合（与改造前逐字一致）。
+  // ★ prompt cache 稳定路径：forceTitleOnlyCount=0，输出仅依赖批集合（含各批固化 renderLevel，两次压缩间不变）。
   return renderRecordPrefix(record, layering, 0);
 }
 
@@ -1894,7 +1924,22 @@ export class AgentLoop {
                 foldBatchK: layeringForFold?.foldBatchK ?? DEFAULT_LAYERING.foldBatchK,
               }) || updated; // 折叠失败（返回 null）退回未折叠 updated，不破坏注入
             }
-            // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性（用折叠后 record）。
+            // ★ #14 动态分级（压缩点重算，方案①核心）：折叠后、算注入前缀前，按「hit 命中强度 × 距离当前轮远近」
+            //   给各批算固化档位 renderLevel 落库。这是【唯一】重算 renderLevel 的点——把"当前轮号 + 累计 hit"快照成
+            //   固化值，两次压缩间 renderRecordPrefix 只读它（不读 hit/距离/轮号）→ else 分支每轮前缀稳定、prompt cache 不破。
+            //   当前轮号取 folded.totalRounds（落库后水位轮号 = 本压缩点最新轮）。enabled=false 时内部清固化值回退静态分层。
+            //   全程吞异常返回 null（record 是加速层）；失败/no-op 退回折叠后的 folded，绝不破坏注入。
+            const dynEnabled = layeringForFold?.dynamicLevelEnabled ?? DEFAULT_LAYERING.dynamicLevelEnabled;
+            const leveled = await computeRenderLevels(conversationId, folded.totalRounds, {
+              enabled: dynEnabled,
+              hitWeight: layeringForFold?.hitWeight ?? DEFAULT_LAYERING.hitWeight,
+              distWeight: layeringForFold?.distWeight ?? DEFAULT_LAYERING.distWeight,
+              hitBase: layeringForFold?.hitBase ?? DEFAULT_LAYERING.hitBase,
+              fullThreshold: layeringForFold?.fullThreshold ?? DEFAULT_LAYERING.fullThreshold,
+              summaryThreshold: layeringForFold?.summaryThreshold ?? DEFAULT_LAYERING.summaryThreshold,
+            });
+            folded = leveled || folded; // 重算失败/no-op 退回 folded，不破坏注入
+            // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性（用折叠 + 动态分级后 record）。
             recordMd = buildStableRecordPrefix(folded, layeringForFold);
             // ★ M5-BPC-2：落库后真实派生水位（供 BPC 算 targetReplaceStep；折叠不改水位，用 updated 口径即可）。
             totalSteps = updated.totalSteps;

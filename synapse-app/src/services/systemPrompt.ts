@@ -157,6 +157,7 @@ ${context.userRules}
    - ⚠️ 两套记忆工具的分工（务必分清，别混用）：① 记录与检索记忆【默认且首选用原生工具】——memory_write / memory_query / memory_list / memory_read（它们读写的是 Synapse 内部记忆库，是你日常沉淀与回忆的标准通道）。② mcp__memory-store__* 里的【记忆类】工具（memory_write / memory_query / memory_read / memory_list / memory_update / memory_delete / memory_batch / memory_stats）【仅当需要读写「其它 AI 宿主源」（Claude Code / Windsurf / Codex 等）的共享记忆时】才用——日常本地记忆【不要】走它，否则会把本应留在 Synapse 内部的记忆错写到外部共享库、并造成两套记忆来回错乱。
    - 记忆类之外的 memory-store 工具【不受上面约束】，按需正常使用：conversation_read_original（跨源读取其它宿主的对话原文）、record_manage（过程记录）、stage_guard（阶段守卫）等——它们不属于「本地记忆」范畴，需要时直接调用即可。
 9. 历史摘要：对话历史摘要（record）里标注为「骨架」的批次只给了标题与要点，需要该批次完整细节时用 record_read(batchIndex) 按需展开全文（batchIndex 取自骨架标注里的「批次N」）。
+   - hit 反馈（mark_record_hit）：读 record 摘要时，若发现某段历史（某个批次 / 某一轮）正是当前任务需要反复参考的关键上下文，调 mark_record_hit(batchIndex 或 roundHit) 标记它——系统会在后续压缩时优先为这段历史保留更完整的内容（全文而非仅标题），省得你反复 record_read 展开。这只是给系统的提示、不会立刻改变摘要，放心标记你确实需要的那几段即可。
 10. 任务边界（task_boundary，让用户直观看到你在干什么）：开始一个有多个步骤的任务时调 begin_task_boundary(headline, summary) 开一张任务卡；每进入一个新的子阶段/小标题就调 set_task_headline(headline, summary) 更新当前大标题与概述（系统会自动记入「标题变迁历史」）；每完成一个关键动作调 update_task_progress(step) 追加一条进度；整个任务做完时调 end_task_boundary() 收口。让 headline 始终反映你「此刻正在做什么」。${context.taskBoundaryEnabled === false ? '（本对话已关闭任务边界，无需调用这些工具。）' : ''}
    - 使用时机：task_boundary 的目的是把多步骤的干活过程结构化地收纳起来、防止中间过程刷屏占用界面。【只有当工作包含多个步骤时】才在开始时调 begin_task_boundary 把整个过程包起来；单步就能答完的问题不必开任务卡。
    - 何时收口：一旦【当前阶段干完 / 要向用户汇报结果 / 要切换到一个新主题】，就【立刻】调 end_task_boundary() 收口，不要让任务卡一直挂着——挂着会让界面始终停留在「正在干活」的状态。收口之后再向用户汇报，或者另开一张新的 boundary 继续下一阶段。

@@ -1326,6 +1326,52 @@ export function SettingsPanel() {
                 onChange={e => dispatch(setRecordLayering({ foldBatchK: Number(e.target.value) }))} />
               <span className="setting-hint">每次折叠把最老 K 批合成 1 个元批</span>
             </div>
+
+            {/* ★ #14 动态分级（hit×距离）：AI 用 mark_record_hit 标记需要的历史 + 批距离当前轮远近，综合算渲染档位。
+                只在压缩点重算固化，渲染只读固化档位 → 不破 prompt cache。 */}
+            <h4 style={{ marginTop: 20, marginBottom: 8 }}>动态分级（hit × 距离）</h4>
+            <ToggleItem
+              label="启用动态分级"
+              checked={agentSettings.recordLayering?.dynamicLevelEnabled ?? true}
+              onChange={v => dispatch(setRecordLayering({ dynamicLevelEnabled: v }))} />
+            <div className="setting-item">
+              <span className="setting-hint">开：按「mark_record_hit 命中强度 × 批距当前轮远近」在压缩点给各批算渲染档位（full/骨架/仅标题），渲染只读固化档位、不破 cache；关：回退纯静态位置分层</span>
+            </div>
+            <div className="setting-item">
+              <label>hit 权重</label>
+              <input type="number" min="0" max="5" step="0.1" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.hitWeight ?? 0.6}
+                onChange={e => dispatch(setRecordLayering({ hitWeight: Number(e.target.value) }))} />
+              <span className="setting-hint">每次 hit 给命中批的命中强度增量（越大越易升全文）</span>
+            </div>
+            <div className="setting-item">
+              <label>距离权重</label>
+              <input type="number" min="0" max="5" step="0.05" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.distWeight ?? 0.2}
+                onChange={e => dispatch(setRecordLayering({ distWeight: Number(e.target.value) }))} />
+              <span className="setting-hint">距离衰减强度：越大则远批掉档越快（距离因子 = 1/(1+距离×权重)）</span>
+            </div>
+            <div className="setting-item">
+              <label>hit 基线</label>
+              <input type="number" min="0" max="2" step="0.05" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.hitBase ?? 0.4}
+                onChange={e => dispatch(setRecordLayering({ hitBase: Number(e.target.value) }))} />
+              <span className="setting-hint">无 hit 批的命中强度基线（保证仍能按距离区分远近、不被乘积归零）</span>
+            </div>
+            <div className="setting-item">
+              <label>full 阈值</label>
+              <input type="number" min="0" max="5" step="0.05" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.fullThreshold ?? 0.6}
+                onChange={e => dispatch(setRecordLayering({ fullThreshold: Number(e.target.value) }))} />
+              <span className="setting-hint">综合得分 ≥ 此值 → 渲染全文</span>
+            </div>
+            <div className="setting-item">
+              <label>summary 阈值</label>
+              <input type="number" min="0" max="5" step="0.05" style={{ width: 100 }}
+                value={agentSettings.recordLayering?.summaryThreshold ?? 0.3}
+                onChange={e => dispatch(setRecordLayering({ summaryThreshold: Number(e.target.value) }))} />
+              <span className="setting-hint">得分 ≥ 此值（且 &lt; full 阈值）→ 渲染骨架；更低 → 仅标题</span>
+            </div>
           </div>
         )}
 

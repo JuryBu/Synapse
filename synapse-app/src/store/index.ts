@@ -103,6 +103,8 @@ function sanitizePersistedAgentSettings(agentSettings: any) {
     //   运行时字段级兜底，此处保证 store.recordLayering 永远完整，供 SettingsPanel UI 与 setRecordLayering 用。
     recordLayering: {
       headFull: 2, tailFull: 1, titleThreshold: 20, maxRatio: 0.4, foldThreshold: 30, foldBatchK: 10,
+      // ★ #14 动态分级默认（默认开）：与 agentSettings.initialState / agentLoop.DEFAULT_LAYERING 三处同步。
+      dynamicLevelEnabled: true, hitWeight: 0.6, distWeight: 0.2, hitBase: 0.4, fullThreshold: 0.6, summaryThreshold: 0.3,
       ...(agentSettings.recordLayering ?? {}),
     },
     // ★ M5-BPC：后台预压缩配置兜底——旧持久化无此字段时补全（默认值收敛在 DEFAULT_BPC_CONFIG 单一真相源）。

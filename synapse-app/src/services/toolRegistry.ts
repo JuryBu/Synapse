@@ -773,6 +773,58 @@ toolRegistry.register({
   return `📜 批次 ${batchIndex} 完整过程日志:\n\n${contentMd}`;
 }, 'custom', 'auto', 'read');
 
+// ★ #14 动态分级（hit 反馈）：AI 读 record 摘要时，发现某批/某轮历史正是当前需要的上下文 → 调本工具标记它，
+//   系统会在下次压缩点据此把该段保留更完整内容（升 full）。标记只记账、不立即改注入，故不影响 prompt cache。
+toolRegistry.register({
+  type: 'function',
+  function: {
+    name: 'mark_record_hit',
+    description:
+      '标记当前对话 record 历史摘要里的某个批次/某一轮【正是你当前需要的上下文】（hit 反馈）。'
+      + '当你读 record 摘要（含被折叠为「骨架/标题」的批次）时，若发现某段历史正是解决当前问题需要的关键上下文，'
+      + '调用本工具标记它——系统会在后续压缩时优先把这段历史保留更完整的内容（全文而非仅标题），方便你后续随时取用。'
+      + 'batchIndex 用骨架标注里的「批次N」精确标记一个批；或用 roundHit 标记某一轮号所在的批（二者传其一，batchIndex 优先）。'
+      + '默认作用于当前对话，一般无需传 conversationId。本标记只记账、不立即改变摘要内容，可放心多次调用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        batchIndex: { type: 'number', description: '要标记的批次序号（取自骨架标注里的「批次N」）' },
+        roundHit: { type: 'number', description: '要标记的轮号（命中该轮号所在的批；batchIndex 已传时忽略）' },
+        conversationId: { type: 'string', description: '对话 ID（可选，缺省当前对话）' },
+      },
+      required: [],
+    },
+  },
+}, async (args) => {
+  const hasBatch = Number.isFinite(Number(args.batchIndex));
+  const hasRound = Number.isFinite(Number(args.roundHit));
+  if (!hasBatch && !hasRound) {
+    return '⚠️ mark_record_hit 需要 batchIndex（骨架标注里的「批次N」）或 roundHit（轮号）至少其一。';
+  }
+  const { markRecordHit } = await import('./recordStore');
+  const { identifyRounds } = await import('./roundBoundary');
+  const { store } = await import('@/store');
+  const { AUTOSAVE_ID } = await import('./conversationPersistence');
+  const conversationId =
+    (typeof args.conversationId === 'string' && args.conversationId.trim())
+      ? args.conversationId.trim()
+      : (((store.getState() as any)?.conversation?.id as string | null) || AUTOSAVE_ID);
+  // 当前对话轮号（过滤 tool 后真轮识别，与 record 轮口径一致）——computeRenderLevels 据此算「命中是否新近」。
+  const liveMessages = ((store.getState() as any)?.conversation?.messages ?? [])
+    .filter((m: any) => m?.role !== 'tool');
+  const currentRound = identifyRounds(liveMessages).totalRounds;
+  const target = hasBatch
+    ? { batchIndex: Math.floor(Number(args.batchIndex)) }
+    : { roundHit: Math.floor(Number(args.roundHit)) };
+  const updated = await markRecordHit(conversationId, target, currentRound);
+  if (!updated) {
+    const desc = hasBatch ? `批次 ${target.batchIndex}` : `第 ${target.roundHit} 轮`;
+    return `未能标记 ${desc}（该批可能不存在、已被回溯裁剪/折叠归档，或当前对话无 record）。`;
+  }
+  const desc = hasBatch ? `批次 ${Math.floor(Number(args.batchIndex))}` : `第 ${Math.floor(Number(args.roundHit))} 轮所在批`;
+  return `✅ 已标记 ${desc} 为当前需要的上下文（hit 反馈已记账）。系统将在后续压缩时优先为这段历史保留更完整内容。`;
+}, 'custom', 'auto', 'read');
+
 // --- Web Tools ---
 
 toolRegistry.register({

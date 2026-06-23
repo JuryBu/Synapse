@@ -69,6 +69,27 @@ export interface RecordBatch {
    *   仅供 UI（CompactDivider 分隔线，BPC-7）按来源区分三态渲染，不参与水位/边界逻辑。
    */
   source?: 'auto' | 'manual' | 'bpc';
+  /**
+   * ★ #14 动态分级（hit 反馈）：本批被 mark_record_hit 标记「正是当前需要的上下文」的累计次数。缺省 0。
+   *   随 batch 进 batches_json 整 JSON blob 落库（零迁移，旧批缺省读回 0）。
+   *   ★ cache 关键：hitCount【不进 renderRecordPrefix 渲染】——它只在【压缩点】computeRenderLevels 算 renderLevel 时被读，
+   *     故 mark_record_hit 写库改 hitCount 绝不破 else 分支（每轮 run）的 prompt cache 稳定性（渲染只看 renderLevel）。
+   */
+  hitCount?: number;
+  /**
+   * ★ #14 动态分级（hit 反馈）：本批最近一次被 mark_record_hit 标记时的【当前对话轮号】。缺省 0（从未命中）。
+   *   computeRenderLevels 据此判「命中是否新近」（近期命中 + 距离近 → 更可能升 full）。同样【不进渲染】，只在压缩点算分时用。
+   */
+  lastHitRound?: number;
+  /**
+   * ★ #14 动态分级（固化决策）：本批在【上一个压缩点】算出的渲染档位——'full'（全文 contentMd）/
+   *   'summary'（骨架 skeleton）/ 'brief'（仅标题 titleOnly）。缺省 undefined = 未算过动态分级（旧批 / 开关关）→
+   *   renderRecordPrefix 回退纯静态位置分层（与改造前逐字一致，向后兼容）。
+   *   ★ cache 关键（方案①）：renderLevel 只在【压缩点】computeRenderLevels 写一次（依据当时轮号 + hit），两次压缩间不变 →
+   *     renderRecordPrefix 只读 renderLevel（不读 hit/距离/当前轮号）→ 同一批集合每轮输出逐字相同 → prompt cache 稳定。
+   *     动态量（距离当前轮、实时 hit）被隔离在压缩点重算，绝不进每轮的渲染路径。随 batch 进 JSON blob 落库（零迁移）。
+   */
+  renderLevel?: 'full' | 'summary' | 'brief';
 }
 
 /** record 数据模型（多批次架构，运行态 / 持久化对等结构，camelCase） */
@@ -247,7 +268,16 @@ function normalizeBatch(raw: unknown, fallbackIndex: number): RecordBatch | null
     foldedFrom,
     // ★ M5-BPC：来源随 JSON blob 读回，旧批（无此字段）缺省 'auto'。
     source: normalizeSource(b.source),
+    // ★ #14 动态分级：hit 反馈 + 固化档位随 JSON blob 读回，旧批（无此字段）缺省 0/0/undefined（→ 回退静态分层）。
+    hitCount: Math.max(0, toNumber(b.hitCount ?? b.hit_count, 0)),
+    lastHitRound: Math.max(0, toNumber(b.lastHitRound ?? b.last_hit_round, 0)),
+    renderLevel: normalizeRenderLevel(b.renderLevel ?? b.render_level),
   };
+}
+
+/** ★ #14：把任意原始值规范成合法 renderLevel 枚举（非法/缺省 → undefined = 未算动态分级，回退静态分层）。 */
+function normalizeRenderLevel(raw: unknown): 'full' | 'summary' | 'brief' | undefined {
+  return raw === 'full' || raw === 'summary' || raw === 'brief' ? raw : undefined;
 }
 
 /**
@@ -656,6 +686,173 @@ function unfoldBatches(batches: RecordBatch[]): RecordBatch[] {
     //   0..n-1 连续，恢复 RecordBatch「index 连续递增」契约。仅回溯/分支场景（本就重建上下文）调用，
     //   重排不影响任何跨调用持久化的 index 引用。
     .map((b, i) => (b.index === i ? b : { ...b, index: i }));
+}
+
+/**
+ * ★ #14 动态分级（hit 反馈写入）：把某批（或某轮号所在批）标记为「被 AI 主动认定为当前需要的上下文」。
+ *
+ * 触发：AI 读 record 摘要、发现某批/某轮正是它需要的细节时调 mark_record_hit 工具（见 toolRegistry）。
+ * 行为（纯本地、零 LLM）：给命中批 hitCount++、lastHitRound = 传入的 currentRound，整体 upsert 落库。
+ *   - 按 batchIndex 精确命中一个批；或按 roundHit（轮号）命中「roundStart<=roundHit<=roundEnd」的那个批。
+ *   - hit 只记账，【不立即改 renderLevel / 不改注入前缀】——下次压缩点 computeRenderLevels 才据 hit 重算档位。
+ *     故本写入【绝不破 else 分支每轮的 prompt cache】（renderRecordPrefix 渲染不读 hitCount，只读 renderLevel）。
+ *
+ * ★ 走 upsertRecord（整条覆盖），只改命中批的 hit 字段，不碰 step/round 边界与水位（buildRecord 不读 hit）→
+ *   与 appendBatch「已有批永不重写水位」契约不冲突（这里改的是非水位的弱语义字段）。
+ *
+ * @param conversationId 目标对话 id。
+ * @param target.batchIndex 精确命中的批 index；或 target.roundHit 命中该轮号所在批（二者传一个，batchIndex 优先）。
+ * @param currentRound 命中时的当前对话轮号（调用方算好传入，recordStore 不依赖 round 识别服务）。
+ * @returns 命中并落库后的最新 record；找不到对话 / 找不到目标批 / 失败 → null（不抛，record 是加速层）。
+ */
+export async function markRecordHit(
+  conversationId: string,
+  target: { batchIndex?: number; roundHit?: number },
+  currentRound: number,
+): Promise<SynapseRecord | null> {
+  if (!conversationId) return null;
+  try {
+    const record = await getRecord(conversationId);
+    if (!record || record.batches.length === 0) return null;
+
+    const round = Math.max(0, toNumber(currentRound, 0));
+    // 命中批定位：batchIndex 优先（精确）；否则按 roundHit 落在 [roundStart, roundEnd] 的批。
+    let hitIdx = -1;
+    if (Number.isFinite(target.batchIndex)) {
+      // ★ 排除 archived 原批——它已被元批代表、不进注入视图，computeRenderLevels 也跳过它打档，
+      //   标在它上面纯空转（hit 不会生效）。命中失败（返回 null）让工具如实回提示，不误报「已标记」。
+      hitIdx = record.batches.findIndex(b => b.index === Math.floor(target.batchIndex!) && !b.archived);
+    } else if (Number.isFinite(target.roundHit)) {
+      const rh = Math.floor(target.roundHit!);
+      // 命中真实可见批（不命中 archived 原批——它已被元批代表、不进注入视图；命中元批可代表那段折叠历史）。
+      hitIdx = record.batches.findIndex(
+        b => !b.archived && b.roundStart <= rh && rh <= b.roundEnd,
+      );
+    }
+    if (hitIdx < 0) return null; // 找不到目标批 → 不写库
+
+    const nextBatches = record.batches.map((b, i) =>
+      i === hitIdx
+        ? { ...b, hitCount: Math.max(0, (b.hitCount || 0)) + 1, lastHitRound: round }
+        : b,
+    );
+    return await upsertRecord({ conversationId, batches: nextBatches });
+  } catch (err) {
+    console.warn('[recordStore] markRecordHit failed:', err);
+    return null;
+  }
+}
+
+/**
+ * ★ #14 动态分级（评分参数）。与 agentSettings.RecordLayeringConfig 的动态分级字段同义、同默认值。
+ *   computeRenderLevels 由调用方（agentLoop 压缩点）从 store.agentSettings.recordLayering 传入快照；缺省按本兜底。
+ *   ★ 不在 recordStore 顶层 import store —— 保持 recordStore 对 redux 零依赖（与 FoldOptions 同款约束）。
+ */
+export interface DynamicLevelOptions {
+  /** 是否启用动态分级（关 → computeRenderLevels no-op，清除已固化的 renderLevel 回退静态分层）。 */
+  enabled?: boolean;
+  /** hit 命中强度权重：每次 hit 给命中项的强度增量。 */
+  hitWeight?: number;
+  /** 距离衰减权重：dist 每加 1，距离因子按 1/(1+dist×distWeight) 衰减。 */
+  distWeight?: number;
+  /** hit 强度基线（无 hit 批也有的最小命中项，保证 score 不被乘积归零、仍能按距离区分远近）。 */
+  hitBase?: number;
+  /** 升 full 的 score 阈值（score >= 此值 → full）。 */
+  fullThreshold?: number;
+  /** 升 summary 的 score 阈值（fullThreshold > score >= 此值 → summary；否则 brief）。 */
+  summaryThreshold?: number;
+}
+const DYNAMIC_LEVEL_DEFAULTS: Required<DynamicLevelOptions> = {
+  enabled: true,
+  hitWeight: 0.6,
+  distWeight: 0.2,
+  hitBase: 0.4,
+  fullThreshold: 0.6,
+  summaryThreshold: 0.3,
+};
+
+/**
+ * ★ #14 动态分级（评分 + 固化）：在【压缩点】给 record 各可见批算出渲染档位 renderLevel，落库固化。
+ *
+ * 算法（任务 #14：① hit 命中强度 × ② 距离当前轮远近，两指标【综合相乘】→ 三级 full/summary/brief）：
+ *   对每个可见批（非 archived；含 meta 元批）：
+ *     - freshness = 1 / (1 + hitAge × distWeight/2)        —— 命中新鲜度（hitAge = currentRound - lastHitRound，越新近越接近 1）。
+ *     - hitTerm  = hitBase + hitCount × hitWeight × freshness —— 命中强度（hitBase>0 让无 hit 批也有基线，不被乘积归零；新近命中更强）。
+ *     - dist     = max(0, currentRound - roundEnd)         —— 批末轮到当前轮的距离（越近越小）。
+ *     - distTerm = 1 / (1 + dist × distWeight)             —— 距离因子，dist=0→1，越远越趋 0。
+ *     - score    = hitTerm × distTerm                       —— 综合相乘。
+ *     - score >= fullThreshold    → 'full'（全文）
+ *       score >= summaryThreshold → 'summary'（骨架）
+ *       否则                       → 'brief'（仅标题）
+ *   效果：近 + 有 hit → full；远 + 无 hit → brief；中间 → summary。符合 #14「hit 高+距离近→full，hit 低+距离远→brief」。
+ *
+ * ★ cache 权衡（方案①，务必维持）：本函数【只在压缩点调用一次】，把"当时轮号 + hit"快照成固化 renderLevel 落库；
+ *   两次压缩间 renderRecordPrefix 只读固化的 renderLevel（不读 hit/距离/当前轮号）→ else 分支前缀逐字稳定 → prompt cache 不破。
+ *   压缩点本就因 append 新批而失效 cache，顺势重算 renderLevel 零额外失效代价。距离这个"逐轮变量"被隔离在压缩点，绝不进每轮渲染。
+ *
+ * ★ enabled=false：清除所有批已固化的 renderLevel（置 undefined），renderRecordPrefix 回退纯静态位置分层（与改造前逐字一致）。
+ * ★ 走 upsertRecord（整条覆盖）只改 renderLevel（弱语义、不入水位派生），不碰 step/round 边界，不破水位/幂等契约。
+ * record 是加速层，任何异常吞掉返回当前/null，绝不阻塞主对话。
+ *
+ * @param currentRound 压缩点的当前对话轮号（= 落库后 record.totalRounds，调用方传入）。
+ * @param opts 评分权重/阈值/开关（agentLoop 从 store.agentSettings.recordLayering 传快照；缺省按 DYNAMIC_LEVEL_DEFAULTS）。
+ * @returns 写入固化 renderLevel 后的最新 record；无 record / no-op（值未变） / 失败 → 原 record 或 null。
+ */
+export async function computeRenderLevels(
+  conversationId: string,
+  currentRound: number,
+  opts?: DynamicLevelOptions,
+): Promise<SynapseRecord | null> {
+  if (!conversationId) return null;
+  try {
+    const record = await getRecord(conversationId);
+    if (!record || record.batches.length === 0) return record;
+
+    const cfg = { ...DYNAMIC_LEVEL_DEFAULTS, ...(opts ?? {}) };
+    const round = Math.max(0, toNumber(currentRound, 0));
+
+    // —— enabled=false：清空已固化档位，回退静态分层（仅在确有固化值时才写库，避免无谓覆盖）——
+    if (!cfg.enabled) {
+      const hasLevel = record.batches.some(b => b.renderLevel !== undefined);
+      if (!hasLevel) return record; // no-op
+      const cleared = record.batches.map(b =>
+        b.renderLevel === undefined ? b : (() => { const { renderLevel: _r, ...rest } = b; return rest as RecordBatch; })(),
+      );
+      return await upsertRecord({ conversationId, batches: cleared });
+    }
+
+    const hitWeight = Math.max(0, cfg.hitWeight);
+    const distWeight = Math.max(0, cfg.distWeight);
+    const hitBase = Math.max(0, cfg.hitBase);
+    const fullThreshold = cfg.fullThreshold;
+    const summaryThreshold = Math.min(cfg.summaryThreshold, fullThreshold); // summary 阈值不得高于 full 阈值
+
+    let changed = false;
+    const nextBatches = record.batches.map(b => {
+      // archived 原批不进注入视图（被元批代表）→ 不打档位（保留原值，通常 undefined）。
+      if (b.archived) return b;
+      const hitCount = Math.max(0, b.hitCount || 0);
+      // ★ 命中新鲜度（消费 lastHitRound）：命中越新近（lastHitRound 越接近当前轮）→ 命中强度保留越多。
+      //   freshness ∈ (0,1]，age=0（本轮刚标）→ 1，越久远越衰减。用 distWeight 的一半作衰减系数（比距离温和），
+      //   无 hit（hitCount=0 / lastHitRound 缺省 0）→ freshness 不参与（hitTerm 退化为 hitBase 基线）。
+      const hitAge = hitCount > 0 ? Math.max(0, round - (b.lastHitRound || 0)) : 0;
+      const freshness = 1 / (1 + hitAge * (distWeight * 0.5));
+      const hitTerm = hitBase + hitCount * hitWeight * freshness;
+      const dist = Math.max(0, round - (b.roundEnd || 0));
+      const distTerm = 1 / (1 + dist * distWeight);
+      const score = hitTerm * distTerm;
+      const level: 'full' | 'summary' | 'brief' =
+        score >= fullThreshold ? 'full' : score >= summaryThreshold ? 'summary' : 'brief';
+      if (b.renderLevel !== level) changed = true;
+      return b.renderLevel === level ? b : { ...b, renderLevel: level };
+    });
+
+    if (!changed) return record; // 档位无变化 → no-op，不写库（省一次 IO，且不破已稳定的前缀）
+    return await upsertRecord({ conversationId, batches: nextBatches });
+  } catch (err) {
+    console.warn('[recordStore] computeRenderLevels failed:', err);
+    return null;
+  }
 }
 
 /**
