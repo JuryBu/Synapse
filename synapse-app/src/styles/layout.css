@@ -460,6 +460,8 @@ html[data-wallpaper="enabled"] .settings-panel {
   flex-direction: column;
   border-left: 1px solid var(--syn-border);
   border-radius: 0;
+  /* ★ review MEDIUM 兜底：面板自身裁掉溢出，防三框/输入区在极矮面板下整体冲出边界。 */
+  overflow: hidden;
 }
 
 .agent-panel-restore {
@@ -894,6 +896,17 @@ html[data-wallpaper="enabled"] .settings-panel {
 .agent-input-area {
   padding: 12px;
   border-top: 1px solid var(--syn-border);
+  /* ★ review MEDIUM 修复：输入区永不被压缩，由上方消息区让位——保证输入控件在矮面板下恒可见可点。 */
+  flex-shrink: 0;
+}
+
+/* ★ review MEDIUM 修复：输入框上方的 banner + 排队/插队/审查三框统一限高滚动容器。
+   三框各自最多 132px 叠加 + banner 可达 ~500px，矮面板下会把输入控件顶出视口；
+   这里整体封顶 40vh，超出在容器内滚动，输入区仍稳在最底部。 */
+.agent-input-extras {
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .agent-input-toolbar {

@@ -528,13 +528,36 @@ export function AgentPanel() {
     // ★ #12b：item 带原始消息下标 idx，供导航浮层在压缩点边界处插入「— 压缩点 —」分隔行。
     const items: Array<{ id: string; subtitle: string; seq: number; timestamp?: number; idx: number }> = [];
     let seq = 0;
+    // ★ 主人反馈#1：导航按【轮】生成, 不再每条 user 各一项——
+    //   ① 一轮（连续多条 user 消息 + 随后 AI 回复）只出一项, 定位到该轮【第一条】user;
+    //   ② 「模型开始回复才生成本轮导航」: 仅当该轮已出现【非空 / 流式中的 assistant】(AI 真的开始回复) 才收录,
+    //      杜绝「连发一堆 user 还没回复就冒一堆导航项」与「发不出的孤立 user 也生成导航」。
+    //   轮首判定: 一条 user, 其前一条【非 tool】消息不是 user(是 assistant 或序列开头)→ 本条是轮首。
+    const prevNonToolIsUser = (idx: number) => {
+      for (let j = idx - 1; j >= 0; j--) {
+        const r = (messages[j] as any).role;
+        if (r !== 'tool') return r === 'user';
+      }
+      return false; // 序列开头 → 本条是轮首
+    };
+    let roundFirstUserIdx = -1;
+    let roundCollected = false;
     messages.forEach((m: any, i: number) => {
-      if (m.role !== 'user') return;
-      const subtitle = m.subtitle as string | undefined;
-      if (!subtitle) return;          // 无小标题（未生成/纯附件）→ 不收录
-      if (coveredIdx.has(i)) return;  // 在 task_boundary 区间内 → 不收录
-      seq += 1;
-      items.push({ id: m.id, subtitle, seq, timestamp: m.timestamp, idx: i });
+      if (m.role === 'user') {
+        if (!prevNonToolIsUser(i)) { roundFirstUserIdx = i; roundCollected = false; } // 轮首 user（连发的后续 user 不更新）
+        return;
+      }
+      // 本轮首条【非空 / 流式中】assistant 出现 = AI 已开始回复本轮 → 收录该轮首 user（仅一次）。
+      if (m.role === 'assistant' && !roundCollected && roundFirstUserIdx >= 0
+          && ((((m.content as string) || '').trim().length > 0) || m.isStreaming)) {
+        roundCollected = true;
+        const fu: any = messages[roundFirstUserIdx];
+        const subtitle = fu.subtitle as string | undefined;
+        if (!subtitle) return;                          // 轮首无小标题（纯附件/未生成）→ 不收录
+        if (coveredIdx.has(roundFirstUserIdx)) return;  // 轮首落在 task_boundary 区间内（已折叠）→ 不收录
+        seq += 1;
+        items.push({ id: fu.id, subtitle, seq, timestamp: fu.timestamp, idx: roundFirstUserIdx });
+      }
     });
     return items;
   }, [conversation.taskBoundaries, messages]);
@@ -2103,8 +2126,30 @@ export function AgentPanel() {
     }));
   }, [dispatch]);
 
-  const openDiffTarget = useCallback((diff: { path: string }) => {
+  const openDiffTarget = useCallback((diff: { path: string; id?: string }) => {
     const fileName = diff.path.split(/[\\/]/).pop() || diff.path;
+    // ★ 反馈#2：点 review 文件——若该文件仍有【未处理（pending/mixed）】的 diff，打开行内红绿 diff 视图
+    //   （SingleDiffView，按 diffId 定位），让用户看到红绿改动 + 文件/块/段级 accept/reject；
+    //   否则（已全部 accept/reject、或本就无 diff 记录）按扩展名打开普通文件查看器，正常显示最终内容。
+    //   优先用传入的 diff.id 精确匹配（review 框/消息 chip 都带 id）；缺省时退化为按 path 找该文件未处理的 diff。
+    const pending = (conversationRef.current.pendingDiffs as FileDiffSummary[]) ?? [];
+    const target = diff.id
+      ? pending.find(d => d.id === diff.id)
+      : pending.find(d => d.path === diff.path && (d.status === 'pending' || d.status === 'mixed'));
+    if (target && (target.status === 'pending' || target.status === 'mixed')) {
+      dispatch(openTab({
+        id: `diff:${target.id}`,
+        // ★ 用 diff:// 协议路径做稳定去重键，既不与普通文件 tab 撞 filePath（同文件可同时有普通 tab 与 diff tab），
+        //   又能在重复点同一文件时复用同一个 diffview tab。
+        filePath: `diff://${target.id}`,
+        fileName,
+        isDirty: false,
+        isPreview: false,
+        type: 'diffview',
+        diffId: target.id,
+      }));
+      return;
+    }
     dispatch(openTab({
       id: `tab-${Date.now()}`,
       filePath: diff.path,
@@ -2924,6 +2969,12 @@ export function AgentPanel() {
       </div>
 
       <div className="agent-input-area">
+        {/* ★ review MEDIUM 修复：输入框上方的 banner + 三框（排队/插队/审查）统一包进一个限高滚动容器。
+            根因：原先 banner + 三框各自独立渲染在 .agent-input-area 内、无总高约束，三框各自最多 132px
+            叠加可达 ~500px，面板较矮（分屏/小窗）时把消息区压到 0、输入控件被顶出视口够不到。
+            修复：外层 .agent-input-extras 限 max-height:40vh + 溢出滚动，让这堆「附加内容」整体封顶、
+            内部滚动，配合 .agent-input-area flex-shrink:0（输入区永不被压缩）保证输入框恒可见。 */}
+        <div className="agent-input-extras">
         {/* ★ #13：前台压缩阻塞态 banner——压缩期禁止发送，给用户明确反馈（区别于普通生成中）。 */}
         {isCompacting && (
           <div className="compacting-banner">⏳ 上下文压缩中，请稍候…</div>
@@ -2983,7 +3034,7 @@ export function AgentPanel() {
               <div className="queued-list">
                 {pendingReview.map((d) => (
                   <div key={d.id} className="queued-item review-item" title={d.path}>
-                    <button className="review-item-open" onClick={() => openDiffTarget({ path: d.path })} title="打开此文件">
+                    <button className="review-item-open" onClick={() => openDiffTarget({ path: d.path, id: d.id })} title="打开此文件（显示行内红绿 diff）">
                       <span className="review-item-name">{d.path.split(/[\\/]/).pop()}</span>
                       <span className="review-item-stat"><span className="review-add">+{d.additions}</span> <span className="review-del">-{d.deletions}</span></span>
                     </button>
@@ -2995,6 +3046,7 @@ export function AgentPanel() {
             </div>
           );
         })()}
+        </div>
         <div className="agent-input-toolbar">
           {/* ★ C3（M7 第七轮反馈#13）：原「附加文件 📎 + 附加图片 🖼」两按钮收敛成一个「加号小窗」（参考 Codex）。
               点开弹小菜单：上传附件（合并文件+图片，accept 放宽）/ 提及@（打开 @ 引用面板）/ 选择工作流（直进工作流二级）。

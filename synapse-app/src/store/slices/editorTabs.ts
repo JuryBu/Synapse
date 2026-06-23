@@ -6,7 +6,7 @@ interface EditorTab {
   fileName: string;
   isDirty: boolean;
   isPreview: boolean;
-  type: 'code' | 'pdf' | 'pptx' | 'docx' | 'office' | 'markdown' | 'html' | 'image' | 'video' | 'welcome' | 'showcase' | 'settings' | 'review' | 'workflow' | 'attachment' | 'unsupported';
+  type: 'code' | 'pdf' | 'pptx' | 'docx' | 'office' | 'markdown' | 'html' | 'image' | 'video' | 'welcome' | 'showcase' | 'settings' | 'review' | 'diffview' | 'workflow' | 'attachment' | 'unsupported';
   content?: string;
   savedContent?: string;
   /**
@@ -19,6 +19,12 @@ interface EditorTab {
    *   （multiAI.workflowRuns[runId]）。EditorArea 据此渲染 <WorkflowView runId=... />。其它类型 tab 无此字段。
    */
   workflowRunId?: string;
+  /**
+   * ★ 反馈#2：type==='diffview' 专属——指向 conversation.pendingDiffs 里某个文件改动的 diff id。
+   *   EditorArea 据此找出该 diff 渲染单文件行内红绿 diff（SingleDiffView）+ 文件级/hunk/段级 accept/reject；
+   *   该 diff 处理完（不再 pending / 已不存在）时自动降级回普通文件查看器。其它类型 tab 无此字段。
+   */
+  diffId?: string;
 }
 
 const welcomeTab: EditorTab = {

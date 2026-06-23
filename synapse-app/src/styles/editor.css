@@ -1250,6 +1250,95 @@
   color: var(--syn-text-primary);
 }
 
+/* ★ 反馈#2：单文件行内红绿 diff 视图（SingleDiffView）。复用 review-* 的行级红绿渲染样式，
+   只新增单文件容器/标题/操作区的布局。整体可滚动、贴 review 视图同款底色。 */
+.single-diff-view {
+  height: 100%;
+  overflow: auto;
+  padding: 16px 24px;
+  background: var(--syn-bg-base);
+  color: var(--syn-text-primary);
+}
+
+.single-diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--syn-border);
+  /* 标题/操作随内容滚动时仍贴顶，方便长 diff 下随时点接受/拒绝。 */
+  position: sticky;
+  top: -16px;
+  background: var(--syn-bg-base);
+  z-index: 1;
+}
+
+.single-diff-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.single-diff-title-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.single-diff-title-text strong {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.single-diff-title-text span {
+  font-size: 11px;
+  color: var(--syn-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.single-diff-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.single-diff-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--syn-border);
+  background: var(--syn-bg-elevated);
+  color: var(--syn-text-secondary);
+  cursor: pointer;
+}
+
+.single-diff-actions button:hover {
+  color: var(--syn-text-primary);
+  border-color: var(--syn-primary);
+}
+
+.single-diff-actions button.primary {
+  background: var(--syn-primary);
+  border-color: var(--syn-primary);
+  color: white;
+}
+
+.single-diff-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .review-header {
   display: flex;
   align-items: center;

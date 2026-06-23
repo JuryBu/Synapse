@@ -14,6 +14,7 @@ import { PptxViewer } from '@/components/editor/PptxViewer';
 import { OfficeViewer } from '@/components/editor/OfficeViewer';
 import { CodeEditor } from '@/components/editor/CodeEditor';
 import { ReviewChangesView } from '@/components/editor/ReviewChangesView';
+import { SingleDiffView } from '@/components/editor/SingleDiffView';
 import { WorkflowView } from '@/components/editor/WorkflowView';
 import { fileSystem } from '@/services/fileSystem';
 import { applyBlockReview, applyDiffReview, applyHunkReview } from '@/services/fileRollback';
@@ -282,6 +283,116 @@ export function EditorArea() {
             }}
           />
         );
+
+      // ★ 反馈#2：单文件行内红绿 diff 视图（点 review 框/消息 diff chip 里某个未处理文件打开）。
+      //   按 diffId 从 pendingDiffs 定位该文件的 diff：仍未处理（pending/mixed）→ 渲染 SingleDiffView
+      //   显示行内红绿改动 + 文件/块/段级 accept/reject（复用 review tab 同一套 applyDiffReview 链路）；
+      //   已全部处理（accepted/rejected/已不存在）→ 自动降级回普通文件查看器，显示文件最终内容。
+      case 'diffview': {
+        const diff = activeTab.diffId
+          ? conversation.pendingDiffs.find(item => item.id === activeTab.diffId)
+          : conversation.pendingDiffs.find(item => item.path === activeTab.filePath);
+        const stillPending = diff && (diff.status === 'pending' || diff.status === 'mixed');
+        if (diff && stillPending) {
+          const snapshot = diff.snapshotId ? conversation.fileSnapshots[diff.snapshotId] : undefined;
+          return (
+            <SingleDiffView
+              diff={diff}
+              snapshot={snapshot}
+              onAccept={async (diffId) => {
+                const d = conversation.pendingDiffs.find(item => item.id === diffId);
+                const snap = d?.snapshotId ? conversation.fileSnapshots[d.snapshotId] : undefined;
+                if (!d) return;
+                try {
+                  await applyDiffReview(d, snap, 'accepted');
+                  dispatch(updateDiffStatus({ diffId, status: 'accepted' }));
+                } catch (err: any) {
+                  dispatch(addNotification({ type: 'error', title: '接受失败', message: err?.message || d.path }));
+                }
+              }}
+              onReject={async (diffId) => {
+                const d = conversation.pendingDiffs.find(item => item.id === diffId);
+                const snap = d?.snapshotId ? conversation.fileSnapshots[d.snapshotId] : undefined;
+                if (!d) return;
+                try {
+                  await applyDiffReview(d, snap, 'rejected');
+                  dispatch(updateDiffStatus({ diffId, status: 'rejected' }));
+                } catch (err: any) {
+                  dispatch(addNotification({ type: 'error', title: '回退失败', message: err?.message || d.path }));
+                }
+              }}
+              onAcceptHunk={async (diffId, hunkId) => {
+                const d = conversation.pendingDiffs.find(item => item.id === diffId);
+                const snap = d?.snapshotId ? conversation.fileSnapshots[d.snapshotId] : undefined;
+                if (!d) return;
+                try {
+                  await applyHunkReview(d, snap, hunkId, 'accepted');
+                  dispatch(updateHunkStatus({ diffId, hunkId, status: 'accepted' }));
+                } catch (err: any) {
+                  dispatch(addNotification({ type: 'error', title: '局部接受失败', message: err?.message || d.path }));
+                }
+              }}
+              onRejectHunk={async (diffId, hunkId) => {
+                const d = conversation.pendingDiffs.find(item => item.id === diffId);
+                const snap = d?.snapshotId ? conversation.fileSnapshots[d.snapshotId] : undefined;
+                if (!d) return;
+                try {
+                  await applyHunkReview(d, snap, hunkId, 'rejected');
+                  dispatch(updateHunkStatus({ diffId, hunkId, status: 'rejected' }));
+                } catch (err: any) {
+                  dispatch(addNotification({ type: 'error', title: '局部回退失败', message: err?.message || d.path }));
+                }
+              }}
+              onAcceptBlock={async (diffId, hunkId, blockId) => {
+                const d = conversation.pendingDiffs.find(item => item.id === diffId);
+                const snap = d?.snapshotId ? conversation.fileSnapshots[d.snapshotId] : undefined;
+                if (!d) return;
+                try {
+                  await applyBlockReview(d, snap, hunkId, blockId, 'accepted');
+                  dispatch(updateDiffBlockStatus({ diffId, hunkId, blockId, status: 'accepted' }));
+                } catch (err: any) {
+                  dispatch(addNotification({ type: 'error', title: 'inline 接受失败', message: err?.message || d.path }));
+                }
+              }}
+              onRejectBlock={async (diffId, hunkId, blockId) => {
+                const d = conversation.pendingDiffs.find(item => item.id === diffId);
+                const snap = d?.snapshotId ? conversation.fileSnapshots[d.snapshotId] : undefined;
+                if (!d) return;
+                try {
+                  await applyBlockReview(d, snap, hunkId, blockId, 'rejected');
+                  dispatch(updateDiffBlockStatus({ diffId, hunkId, blockId, status: 'rejected' }));
+                } catch (err: any) {
+                  dispatch(addNotification({ type: 'error', title: 'inline 回退失败', message: err?.message || d.path }));
+                }
+              }}
+            />
+          );
+        }
+        // diff 记录已彻底消失（如对话被清空）→ filePath 是 diff:// 虚拟路径，无真实文件可读，给占位提示。
+        if (!diff) {
+          return (
+            <div className="editor-placeholder">
+              <div className="placeholder-content">
+                <span style={{ fontSize: 32, opacity: 0.3 }}>✓</span>
+                <p>{activeTab.fileName}</p>
+                <p className="placeholder-hint">该改动的审查记录已不存在（可能对话已切换或清空）。</p>
+              </div>
+            </div>
+          );
+        }
+        // 已无未处理 diff（已 accept/reject）→ 用真实路径显示文件最终内容。
+        return (
+          <CodeFileViewer
+            tabId={activeTab.id}
+            filePath={diff.path}
+            fileName={activeTab.fileName}
+            tabContent={activeTab.content}
+            savedContent={activeTab.savedContent}
+            dirty={activeTab.isDirty}
+            dispatch={dispatch}
+          />
+        );
+      }
 
       // ★ M3-3b：子代理中间视图（点击对话流 WorkflowCard 打开的 tab）。
       case 'workflow':
