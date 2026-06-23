@@ -230,6 +230,21 @@ export interface Message {
   workflowRunId?: string;
 }
 
+/**
+ * ★ H4-2（M8 第七轮反馈）：生成中插话的【排队消息】。运行态——绝不落库（刷新/重开自然清空，
+ *   不进 sanitizeMessagesForPersistence、不进任何持久化快照）。
+ *   生成中用户发消息不再被静默丢弃，而是入队，本轮 agent loop 结束（isStreaming true→false 下降沿）
+ *   时由 AgentPanel 取队首走正常发送逻辑发出去（自然继承 H4-1 归属开关、@/斜杠命令分流等全部链路）。
+ */
+export interface QueuedMessage {
+  id: string;                          // 队列项稳定 id（React key + 按 id 单独取消）
+  text: string;                        // 入队时刻输入框纯文本（extract().plainText）
+  contentParts?: MessageContentPart[]; // 入队时刻已组装的 content parts（含图片引用）
+  attachments?: AttachmentRef[];       // 入队时刻就绪附件（status='ready'，发送时转 'sent'）
+  richTokens?: ExtractedToken[];       // 富文本 atomic token 锚点（编辑历史无损还原；不进 LLM 上下文）
+  enqueuedAt: number;                  // 入队时间戳（ms）
+}
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -257,6 +272,8 @@ interface ConversationState {
   pendingDiffs: FileDiffSummary[];
   isStreaming: boolean;
   streamingContent: string;
+  // ★ H4-2：生成中插话的排队消息（运行态，绝不落库；刷新/重开自然清空）。本轮结束自动发队首。
+  queuedMessages: QueuedMessage[];
   model: string;
   tokenCount: number;
   tokenUsage: TokenUsage | null;
@@ -426,6 +443,7 @@ const initialState: ConversationState = {
   pendingDiffs: [],
   isStreaming: false,
   streamingContent: '',
+  queuedMessages: [], // ★ H4-2：排队消息初始为空（运行态）
   model: '',
   tokenCount: 0,
   tokenUsage: null,
@@ -478,6 +496,8 @@ export const conversationSlice = createSlice({
       state.assistantRuns = action.payload.assistantRuns ?? {};
       state.fileSnapshots = action.payload.fileSnapshots ?? {};
       state.pendingDiffs = (action.payload.pendingDiffs ?? []).map(normalizeDiff);
+      // ★ H4-2：换对话身份（切换/加载/分支） → 清空排队队列（运行态，绝不跨对话带过去）。
+      state.queuedMessages = [];
       state.model = action.payload.model ?? state.model;
       if ('parentId' in action.payload) state.parentId = action.payload.parentId ?? null;
       if ('branchedFromMessageId' in action.payload) {
@@ -798,6 +818,27 @@ export const conversationSlice = createSlice({
     setStreaming(state, action: PayloadAction<boolean>) {
       state.isStreaming = action.payload;
     },
+    // ★ H4-2：把一条消息加入排队队列（生成中插话）。上限护栏在调用方（AgentPanel）拦——满了不 dispatch、给提示。
+    enqueueMessage(state, action: PayloadAction<QueuedMessage>) {
+      state.queuedMessages.push(action.payload);
+    },
+    // ★ H4-2：从队列移除一条。不传 index → 删队首（本轮结束自动发后调）；传 index/id → 用户单独取消某条。
+    //   ⚠️ Redux 单向流：reducer 不返回值。调用方需在 dispatch 前自行读 queuedMessages[0] 取内容，再 dequeue 移除。
+    dequeueMessage(state, action: PayloadAction<{ index?: number; id?: string } | undefined>) {
+      const p = action.payload ?? {};
+      if (p.id !== undefined) {
+        state.queuedMessages = state.queuedMessages.filter(m => m.id !== p.id);
+        return;
+      }
+      const idx = typeof p.index === 'number' ? p.index : 0;
+      if (idx >= 0 && idx < state.queuedMessages.length) {
+        state.queuedMessages.splice(idx, 1);
+      }
+    },
+    // ★ H4-2：清空整个排队队列。Stop / 切换对话 / 新建 / 分支 入口调用（防中止后乱发、防串台）。
+    clearQueue(state) {
+      state.queuedMessages = [];
+    },
     appendStreamingContent(state, action: PayloadAction<string>) {
       state.streamingContent += action.payload;
     },
@@ -823,6 +864,8 @@ export const conversationSlice = createSlice({
       state.pendingDiffs = [];
       state.isStreaming = false;
       state.streamingContent = '';
+      // ★ H4-2：换对话身份 → 清空排队队列（防上条对话残留排队消息串台进新对话）。
+      state.queuedMessages = [];
       state.tokenCount = 0;
       state.tokenUsage = null;
       // M2-3：新对话无分支来源。
@@ -917,6 +960,7 @@ export const {
   appendMessageThinking, setMessageStreamState, setMessageReconnect,
   addMessageDiff, addMessageArtifact, updateDiffStatus, updateHunkStatus, updateDiffBlockStatus, addAssistantRun, addRunEvent, recordFileSnapshot,
   setStreaming, appendStreamingContent, clearStreamingContent,
+  enqueueMessage, dequeueMessage, clearQueue,
   setModel, setTokenUsage, setPendingMessage, clearConversation, setTitle,
   editMessage, truncateAt, deleteMessage, clearMessages, updateToolCallStatus,
 } = conversationSlice.actions;

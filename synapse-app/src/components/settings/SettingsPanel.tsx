@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import type { RootState } from '@/store';
-import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter, setSendKeyMode } from '@/store/slices/settings';
+import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter, setSendKeyMode, setAttachUserMsgToBoundary } from '@/store/slices/settings';
 import { clearConversation } from '@/store/slices/conversation';
 import { setConversations, setSelectedId } from '@/store/slices/conversationHistory';
 import { deleteConversationSnapshot, exportConversationSnapshot, listConversationSummaries } from '@/services/conversationPersistence';
@@ -1075,6 +1075,18 @@ export function SettingsPanel() {
                 <option value="ctrlEnter">Ctrl+Enter 发送 / Enter 换行</option>
               </select>
               <span className="setting-hint">输入框回车行为：默认 Enter 直接发送（Shift+Enter 换行）；切到 Ctrl+Enter 模式后 Enter 改为换行、Ctrl 或 Cmd+Enter 才发送。</span>
+            </div>
+            {/* ★ H4-1（M7 第七轮反馈）：用户消息是否归入当前任务边界卡片。 */}
+            <div className="setting-item">
+              <label>用户消息归入任务边界</label>
+              <select
+                value={settings.attachUserMsgToBoundary === false ? 'no' : 'yes'}
+                onChange={e => dispatch(setAttachUserMsgToBoundary(e.target.value === 'yes'))}
+              >
+                <option value="yes">归入（消息收进当前任务卡片）</option>
+                <option value="no">不归入（发送前先收口当前任务）</option>
+              </select>
+              <span className="setting-hint">默认「归入」：AI 干活期间你发的消息会被收进当前任务边界卡片。切「不归入」后，发消息前会自动收口当前任务边界，新消息显示在卡片外。</span>
             </div>
             <div className="setting-item">
               <label>Top P</label>

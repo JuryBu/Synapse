@@ -34,7 +34,7 @@ import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
 import { mcpBridge } from '@/services/mcpBridge';
 import { addNotification } from '@/store/slices/notifications';
-import { addMessage, clearConversation, clearMessages, editMessage, truncateAt, deleteMessage, endTaskBoundary, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setPendingMessage, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { addMessage, clearConversation, clearMessages, editMessage, truncateAt, deleteMessage, endTaskBoundary, enqueueMessage, dequeueMessage, clearQueue, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setPendingMessage, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart, type QueuedMessage } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
 // ★ M3-3a：generateWorkflowRunId 预生成稳定 runId，跑前先建占位 assistant 消息 + 关联卡片实时显示。
 import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@/services/multiAITrigger';
@@ -172,6 +172,8 @@ export function AgentPanel() {
   //   导致的重复 LLM 压缩 + 通知竞态 + record 水位竞争。compactNow 进入置 true、finally 置 false。
   const isCompactingRef = useRef(false);
   const isStreaming = useAppSelector((s: RootState) => (s as any).conversation.isStreaming);
+  // ★ H4-2：排队消息（生成中插话入队，本轮结束自动发）。运行态、不落库。
+  const queuedMessages = useAppSelector((s: RootState) => (s as any).conversation.queuedMessages as QueuedMessage[]);
   const settings = useAppSelector((s: RootState) => (s as any).settings);
   const agentSettings = useAppSelector((s: RootState) => (s as any).agentSettings);
   // M2-6：handleBranch 等异步回调（useCallback 依赖窄）需读当前 mode / reasoningEffort 落库，
@@ -1210,59 +1212,71 @@ export function AgentPanel() {
     return blocks.join('\n\n');
   }, [buildInjectedContext]);
 
-  const handleSend = useCallback(() => {
-    // ★ M6：数据源从受控 input → richRef.extract()（DOM 唯一真值）。plainText 已内建 token 占位语义（P10），
-    //   下游 parseAndDispatch/parseMultiAITrigger 直接吃 plainText 即命中；tokens 供 buildContextFromTokens 注入。
-    const extracted = richRef.current?.extract() ?? { plainText: '', tokens: [] };
-    const text = extracted.plainText.trim();
-    const tokens = extracted.tokens;
-    const readyAttachments = pendingAttachments.filter(att => att.status === 'ready');
-    if ((!text && readyAttachments.length === 0) || isStreaming) return;
+  // ★ H4-2：释放一批排队消息持有的附件 sha256（refCount 守恒）。排队项的 attachments 结构与 message 兼容，
+  //   直接复用 releaseMessageAttachments。仅在「排队项被丢弃且其引用不再被任何消息持有」时调（取消单条 / 清队列）。
+  const releaseQueuedAttachments = useCallback((items: QueuedMessage[]) => {
+    const withAtts = items.filter(it => (it.attachments?.length ?? 0) > 0);
+    if (withAtts.length === 0) return;
+    void releaseMessageAttachments(withAtts as any).catch(() => undefined);
+  }, []);
 
-    if (!hasApiKey) {
-      dispatch(addNotification({ type: 'warning', title: '未配置 API', message: '请先在设置 → AI 中配置 API Key 和端点' }));
-      return;
-    }
-    if (!hasModel) {
-      dispatch(addNotification({ type: 'warning', title: '未选择模型', message: '请先在设置 → AI 中获取并选择模型' }));
-      return;
-    }
-    if (!agentLoopRef.current) {
-      dispatch(addNotification({ type: 'warning', title: 'AI 未就绪', message: '请确认 API Key、端点和模型均已配置' }));
-      return;
-    }
+  // ★ H4-2：带附件释放的「清空队列」——护栏①②用：Stop / 新建 / 切换 / 分支 调用，先 release 草稿附件再清队列，
+  //   避免被丢弃的排队消息泄漏 sha256（reducer 内 setConversation/clearConversation 也清 queue，但无法做 release 副作用，
+  //   故走身份切换 handler 时优先用本 helper；reducer 那层仅作防串台兜底，漏 release 只多占盘不致命）。
+  const clearQueueWithRelease = useCallback(() => {
+    const cur = (conversationRef.current.queuedMessages as QueuedMessage[]) ?? [];
+    if (cur.length > 0) releaseQueuedAttachments(cur);
+    dispatch(clearQueue());
+  }, [dispatch, releaseQueuedAttachments]);
+
+  // ★ H4-2：取消单条排队消息（× 按钮）。先 release 该项附件再从队列移除（refCount 守恒）。
+  const handleCancelQueued = useCallback((id: string) => {
+    const cur = (conversationRef.current.queuedMessages as QueuedMessage[]) ?? [];
+    const target = cur.find(it => it.id === id);
+    if (target) releaseQueuedAttachments([target]);
+    dispatch(dequeueMessage({ id }));
+  }, [dispatch, releaseQueuedAttachments]);
+
+  // ★ H4-2：发送核心——从「文本 + tokens + 就绪附件」执行一次用户发送（斜杠/@MultiAI 分流 + H4-1 收口 +
+  //   组装 contentParts + 调 agentLoop.run）。被两条路共用：① handleSend（从输入框 DOM extract 后调）；
+  //   ② 队列下降沿自动发（从 queuedMessages 队首取内容后调）。故所有「与 DOM 输入框耦合」的副作用（clear/
+  //   setCanSend/setPendingAttachments/setPreviewAttachment）由【调用方】各自处理，本函数只负责发送语义本身。
+  //   返回值：'sent'（真发了消息/工作流，下游会进 streaming）| 'handled'（斜杠命令就地处理，未发消息）。
+  const dispatchUserSend = useCallback((args: { text: string; tokens: ExtractedToken[]; readyAttachments: AttachmentRef[] }): 'sent' | 'handled' => {
+    const { text, tokens, readyAttachments } = args;
 
     // 斜杠命令分流（/命令场景无 token，plainText 即 /cmd args，命中正确；未知命令不误吞，照常发）。
     {
       const dispatchResult = parseAndDispatch(text, buildSlashHelpers());
       if (dispatchResult.handled) {
-        richRef.current?.clear(); setCanSend(false);
         closeMenu();
-        return;
+        return 'handled'; // 斜杠命令就地处理，不发消息 → 不收口任务边界（H4-1 只对真消息生效）。
       }
       if (dispatchResult.suggestion) {
         dispatch(addNotification({ type: 'info', title: '未知命令', message: `${dispatchResult.suggestion}，已作为普通消息发送` }));
       }
     }
 
-    // @MultiAI 工作流分流（workflow token 在最前时 plainText 形如 @MultiAI:modeName ...，命中，P10）。
-    if (parseMultiAITrigger(text)) {
-      richRef.current?.clear(); setCanSend(false);
-      // 工作流路径不转交附件给消息（runWorkflow 只收 string），清空前 release 带 sha256 草稿图（refCount 守恒）。
-      for (const att of pendingAttachments) {
-        if (att.sha256) void platform.attachment.delete(att.sha256).catch(() => undefined);
-      }
-      setPendingAttachments([]);
-      setPreviewAttachment(null);
-      closeMenu();
-      // ★ HIGH#1 修：把 tokens 透传给工作流路径，让 @MultiAI 消息编辑时能无损还原 atomic 块。
-      void runWorkflowFromInput(text, tokens);
-      return;
+    // ★ H4-1：用户消息归入当前任务边界开关。关闭（=== false）且存在 active 边界时，发送【前】先收口它
+    //   （endTaskBoundary 不传 aborted = 标记 done 收口），新消息就落在卡片外。默认 true（!== false）维持现状。
+    //   工作流路径同样适用（工作流的 user 消息也是「用户消息」）。endTaskBoundary 无 active 时内部 no-op，安全。
+    if (settings.attachUserMsgToBoundary === false) {
+      dispatch(endTaskBoundary({}));
     }
 
-    richRef.current?.clear(); setCanSend(false);
-    setPendingAttachments([]);
-    setPreviewAttachment(null);
+    // @MultiAI 工作流分流（workflow token 在最前时 plainText 形如 @MultiAI:modeName ...，命中，P10）。
+    if (parseMultiAITrigger(text)) {
+      closeMenu();
+      // 工作流路径不转交附件给消息（runWorkflow 只收 string），release 带 sha256 的就绪草稿图（refCount 守恒）。
+      //   ★ H4-2：调用方已先 setPendingAttachments([]) 清 UI；这些引用的实体 release 由本分支兜底（含队列自动发路径）。
+      for (const att of readyAttachments) {
+        if (att.sha256) void platform.attachment.delete(att.sha256).catch(() => undefined);
+      }
+      // ★ HIGH#1 修：把 tokens 透传给工作流路径，让 @MultiAI 消息编辑时能无损还原 atomic 块。
+      void runWorkflowFromInput(text, tokens);
+      return 'sent';
+    }
+
     closeMenu();
 
     const contentParts = buildUserContentParts(text, readyAttachments);
@@ -1279,12 +1293,102 @@ export function AgentPanel() {
           dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err?.message || '未知错误' }));
         }
       })();
-      return;
+      return 'sent';
     }
-    agentLoopRef.current.run(text, { contentParts, attachments: attachmentsForRun, richTokens: richTokensForRun }).catch((err: any) => {
+    agentLoopRef.current!.run(text, { contentParts, attachments: attachmentsForRun, richTokens: richTokensForRun }).catch((err: any) => {
       dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err.message || '未知错误' }));
     });
-  }, [pendingAttachments, isStreaming, hasApiKey, hasModel, buildUserContentParts, buildContextFromTokens, runWorkflowFromInput, buildSlashHelpers, closeMenu, dispatch]);
+    return 'sent';
+  }, [settings.attachUserMsgToBoundary, buildUserContentParts, buildContextFromTokens, runWorkflowFromInput, buildSlashHelpers, closeMenu, dispatch]);
+
+  const handleSend = useCallback(() => {
+    // ★ M6：数据源从受控 input → richRef.extract()（DOM 唯一真值）。plainText 已内建 token 占位语义（P10），
+    //   下游 parseAndDispatch/parseMultiAITrigger 直接吃 plainText 即命中；tokens 供 buildContextFromTokens 注入。
+    const extracted = richRef.current?.extract() ?? { plainText: '', tokens: [] };
+    const text = extracted.plainText.trim();
+    const tokens = extracted.tokens;
+    const readyAttachments = pendingAttachments.filter(att => att.status === 'ready');
+    if (!text && readyAttachments.length === 0) return;
+
+    if (!hasApiKey) {
+      dispatch(addNotification({ type: 'warning', title: '未配置 API', message: '请先在设置 → AI 中配置 API Key 和端点' }));
+      return;
+    }
+    if (!hasModel) {
+      dispatch(addNotification({ type: 'warning', title: '未选择模型', message: '请先在设置 → AI 中获取并选择模型' }));
+      return;
+    }
+    if (!agentLoopRef.current) {
+      dispatch(addNotification({ type: 'warning', title: 'AI 未就绪', message: '请确认 API Key、端点和模型均已配置' }));
+      return;
+    }
+
+    // ★ H4-2：生成中插话 → 不再静默丢弃，改为【排队】（本轮 agent loop 结束自动发，见 isStreaming 下降沿 effect）。
+    //   护栏③：队列上限 5 条，满了提示并拒绝入队。入队成功后清空输入框 + 草稿附件（与正常发送同款 UI 收尾），
+    //   但【不 release 附件 sha256】——这些引用要随排队消息留到自动发时使用（release 会令实体被删，自动发时图丢失）。
+    if (isStreaming) {
+      if (queuedMessages.length >= 5) {
+        dispatch(addNotification({ type: 'warning', title: '排队已满', message: '最多排队 5 条消息，请等当前回复结束后再发' }));
+        return;
+      }
+      const contentPartsForQueue = buildUserContentParts(text, readyAttachments);
+      dispatch(enqueueMessage({
+        id: generateMessageId('queued'),
+        text,
+        contentParts: contentPartsForQueue.length > 0 ? contentPartsForQueue : undefined,
+        attachments: readyAttachments.length > 0 ? readyAttachments : undefined,
+        richTokens: tokens.length > 0 ? tokens : undefined,
+        enqueuedAt: Date.now(),
+      }));
+      richRef.current?.clear(); setCanSend(false);
+      setPendingAttachments([]); // ★ 注意：不 release sha256（引用转移给排队项，自动发时复用）
+      setPreviewAttachment(null);
+      closeMenu();
+      dispatch(addNotification({ type: 'info', title: '已排队', message: '当前回复结束后将自动发送这条消息' }));
+      return;
+    }
+
+    // 非生成中 → 正常立即发送。先收尾输入框 UI（clear/草稿清空），再走发送核心。
+    //   斜杠命令（dispatchUserSend 返回 'handled'）也要 clear 输入框，故无论结果都先 clear。
+    richRef.current?.clear(); setCanSend(false);
+    setPendingAttachments([]);
+    setPreviewAttachment(null);
+    dispatchUserSend({ text, tokens, readyAttachments });
+  }, [pendingAttachments, isStreaming, queuedMessages.length, hasApiKey, hasModel, buildUserContentParts, dispatchUserSend, closeMenu, dispatch]);
+
+  // ★ H4-2：isStreaming 由 true→false 下降沿 = 本轮 agent loop 结束 → 若有排队消息且条件满足，自动发队首。
+  //   护栏：
+  //   ① 「不是被用户中止的」：handleStop 已 dispatch(clearQueue)，用户 Stop 后队列即空 → 这里 length===0 自然不发，
+  //      无需额外「aborted」标志位（中止路径靠清空队列闭环）。
+  //   ② 切换/新建/分支对话：reducer + handleStop/handler 已清队列 + 换对话身份重建 conversationRef → 不会串台发到别的对话。
+  //   ④ 竞态再确认：用 conversationRef.current 读最新 isStreaming（!== false 直接放弃，防下一轮已重新开始流式时重入）。
+  //      取队首后【同步先 dequeue】再发，避免 effect 重跑/StrictMode 双调导致同一条被发两次。
+  const prevIsStreamingRef = useRef(isStreaming);
+  useEffect(() => {
+    const prev = prevIsStreamingRef.current;
+    prevIsStreamingRef.current = isStreaming;
+    // 仅在 true→false 的下降沿处理（流式刚结束）。
+    if (!(prev === true && isStreaming === false)) return;
+    if (queuedMessages.length === 0) return;
+    // 护栏④：再确认当前确实空闲（conversationRef 持最新；若已被下一轮占用则放弃，等下个下降沿）。
+    if (conversationRef.current.isStreaming) return;
+    if (!hasApiKey || !hasModel || !agentLoopRef.current) return;
+
+    const head = queuedMessages[0];
+    // 先移除队首（同步 dispatch，防重复发送）。
+    dispatch(dequeueMessage(undefined));
+    // 还原排队项为「就绪草稿附件」（status 置 ready，发送时 dispatchUserSend 内部转 'sent'；剥内存预览，落库只留 sha256）。
+    const readyAttachments: AttachmentRef[] = (head.attachments ?? []).map(att => ({
+      ...att,
+      previewUrl: undefined,
+      payloadUrl: undefined,
+      status: 'ready' as const,
+      error: undefined,
+    }));
+    // 空内容防御（理论不会入队空消息，双保险）。
+    if (!head.text && readyAttachments.length === 0) return;
+    dispatchUserSend({ text: head.text, tokens: head.richTokens ?? [], readyAttachments });
+  }, [isStreaming, queuedMessages, hasApiKey, hasModel, dispatchUserSend, dispatch]);
 
   const handleStop = useCallback(() => {
     // ★ M3-2b 修复（high）：Stop 按钮要同时管「普通对话」与「@MultiAI 工作流」两条路。
@@ -1305,10 +1409,13 @@ export function AgentPanel() {
     //   非 agentLoop 驱动的中止路径（agentLoop 自身的 abort/error 已在 agentLoop 收尾兜底收口）。
     //   endTaskBoundary 无 active 时内部 no-op，安全。
     dispatch(endTaskBoundary({ aborted: true }));
+    // ★ H4-2 护栏①：用户中止 → 清空排队队列（绝不自动发排队消息）。先 release 草稿附件再清（refCount 守恒）。
+    //   这是「不是被用户中止的才自动发」的闭环实现：Stop 后队列空 → 下降沿 effect 自然 length===0 不发。
+    clearQueueWithRelease();
     // ★ 六轮 #154：中止后把焦点拉回输入框——Stop 按钮点击后会变回 Send 按钮(焦点随之丢失)，
     //   用户直接打字无反应、误以为"输入框无法输入"。rAF 等按钮切换+isStreaming 复位后再聚焦。
     requestAnimationFrame(() => richRef.current?.focus());
-  }, [dispatch]);
+  }, [dispatch, clearQueueWithRelease]);
 
   // Plan_4 M2-1：编辑/重试/回溯会截断后续消息。把 record 水位线 clamp 到保留范围（替代此前的整条删）：
   // 覆盖区在保留范围内则不动；否则 clamp totalRounds/totalSteps/lastUpdatedRound，保住 M 之前已生成的摘要、
@@ -2440,6 +2547,21 @@ export function AgentPanel() {
       </div>
 
       <div className="agent-input-area">
+        {/* ★ H4-2：插话排队区（参考 Codex）——生成中发的消息进队列、本轮结束自动发；这里列出待发条目，可单条取消 / 一键清空。 */}
+        {queuedMessages.length > 0 && (
+          <div className="queued-messages">
+            <div className="queued-messages-header">
+              <span className="queued-messages-count">{queuedMessages.length} 条排队中 · 当前回复结束后自动发送</span>
+              <button className="queued-clear-btn" onClick={clearQueueWithRelease} title="清空全部排队">清空</button>
+            </div>
+            {queuedMessages.map((q) => (
+              <div key={q.id} className="queued-item" title={q.text || '(附件)'}>
+                <span className="queued-item-text">{q.text || (q.attachments?.length ? `📎 ${q.attachments.length} 个附件` : '(空)')}</span>
+                <button className="queued-item-cancel" onClick={() => handleCancelQueued(q.id)} title="取消这条排队">×</button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="agent-input-toolbar">
           {/* ★ C3（M7 第七轮反馈#13）：原「附加文件 📎 + 附加图片 🖼」两按钮收敛成一个「加号小窗」（参考 Codex）。
               点开弹小菜单：上传附件（合并文件+图片，accept 放宽）/ 提及@（打开 @ 引用面板）/ 选择工作流（直进工作流二级）。

@@ -29,6 +29,10 @@ interface SettingsState {
   wordWrap: boolean;
   // ★ C1：底部主输入框发送键模式（界面交互偏好，随 settings 持久化）。
   sendKeyMode: SendKeyMode;
+  // ★ H4-1（M8 第七轮反馈）：用户消息是否归入当前 active task_boundary 卡片（默认 true=维持现状）。
+  //   false 时 handleSend 发送前先收口 active 边界（endTaskBoundary），新消息落在卡片外。
+  //   读取处一律按「!== false」兜底（旧 localStorage 整体替换 settings 时缺此字段会是 undefined → 视为 true）。
+  attachUserMsgToBoundary: boolean;
   apiKeys: Record<string, string>;
   apiEndpoints: Record<string, string>;
   // New settings
@@ -45,6 +49,7 @@ const initialState: SettingsState = {
   showLineNumbers: true,
   wordWrap: true,
   sendKeyMode: 'enter', // ★ C1：默认 Enter 发送 / Shift+Enter 换行
+  attachUserMsgToBoundary: true, // ★ H4-1：默认用户消息归入当前任务边界卡片（维持现状）
   apiKeys: {},
   apiEndpoints: {
     openai: 'https://api.openai.com/v1',
@@ -84,6 +89,10 @@ export const settingsSlice = createSlice({
     // ★ C1：切换发送键模式（'enter' / 'ctrlEnter'）。
     setSendKeyMode(state, action: PayloadAction<SendKeyMode>) {
       state.sendKeyMode = action.payload;
+    },
+    // ★ H4-1：切换「用户消息归入当前任务边界」开关。
+    setAttachUserMsgToBoundary(state, action: PayloadAction<boolean>) {
+      state.attachUserMsgToBoundary = action.payload;
     },
     setApiKey(state, action: PayloadAction<{ provider: string; key: string }>) {
       state.apiKeys[action.payload.provider] = action.payload.key;
@@ -138,7 +147,7 @@ export const settingsSlice = createSlice({
 });
 
 export const {
-  setLanguage, setFontSize, setAutoSave, setSendKeyMode,
+  setLanguage, setFontSize, setAutoSave, setSendKeyMode, setAttachUserMsgToBoundary,
   setApiKey, setApiEndpoint, loadSettings,
   setSafety, setPromptInjection,
   setMaxConversationHistory, setAutoArchiveAfter,
