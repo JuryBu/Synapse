@@ -29,6 +29,19 @@ function statusLabel(status: string) {
   return '待处理';
 }
 
+// ★ #1：把 unified diff 的 @@ -a,b +c,d @@ / 段 -a,b +c,d 翻成人话（主人反馈 @@ 太黑话、看不懂）。
+//   只用新文件行号区间表达「改哪几行」，纯增/纯删/改动分别给措辞；不再暴露 @@ 原始语法。
+function formatRangeHeader(oldStart: number, oldLines: number, newStart: number, newLines: number): string {
+  if (oldLines === 0 && newLines > 0) {
+    return newLines === 1 ? `新增第 ${newStart} 行` : `新增第 ${newStart}–${newStart + newLines - 1} 行`;
+  }
+  if (newLines === 0 && oldLines > 0) {
+    return oldLines === 1 ? `删除原第 ${oldStart} 行` : `删除原第 ${oldStart}–${oldStart + oldLines - 1} 行`;
+  }
+  const end = newStart + Math.max(newLines, 1) - 1;
+  return newStart === end ? `第 ${newStart} 行改动` : `第 ${newStart}–${end} 行改动`;
+}
+
 function buildInlineBlocks(hunk: FileDiffHunk, hunkId: string): FileDiffBlock[] {
   const blocks: FileDiffBlock[] = [];
   let startIndex: number | null = null;
@@ -159,7 +172,7 @@ export function ReviewChangesView({
                     return (
                     <div className="review-diff-hunk" key={`${diff.id}-${hunkIndex}`}>
                       <div className="review-diff-header">
-                        <span>@@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@</span>
+                        <span>{formatRangeHeader(hunk.oldStart, hunk.oldLines, hunk.newStart, hunk.newLines)}</span>
                         <div className="review-hunk-actions">
                           <span className={`review-hunk-status status-${hunkStatus}`}>{statusLabel(hunkStatus)}</span>
                           <button onClick={() => setCollapsedHunks(current => ({ ...current, [hunkId]: !collapsed }))}>
@@ -187,7 +200,7 @@ export function ReviewChangesView({
                             {block && (
                               <div className="review-inline-block-bar">
                                 <span>
-                                  段 -{block.oldStart || 0},{block.oldLines} +{block.newStart || 0},{block.newLines}
+                                  {formatRangeHeader(block.oldStart || 0, block.oldLines, block.newStart || 0, block.newLines)}
                                 </span>
                                 <div className="review-hunk-actions">
                                   <span className={`review-hunk-status status-${blockStatus}`}>{statusLabel(blockStatus)}</span>
