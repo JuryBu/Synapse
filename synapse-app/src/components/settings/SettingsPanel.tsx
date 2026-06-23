@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import type { RootState } from '@/store';
-import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter, setSendKeyMode, setRuntimeEnterAction, setAttachUserMsgToBoundary, setUserAvatar, setUserName, setAiAvatar, setAiName } from '@/store/slices/settings';
+import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter, setSendKeyMode, setRuntimeEnterAction, setAttachUserMsgToBoundary, setUserAvatar, setUserName, setAiAvatar, setAiName, setFileTreeMaxDepth } from '@/store/slices/settings';
 import { clearConversation } from '@/store/slices/conversation';
 import { setConversations, setSelectedId } from '@/store/slices/conversationHistory';
 import { deleteConversationSnapshot, exportConversationSnapshot, listConversationSummaries } from '@/services/conversationPersistence';
@@ -785,6 +785,12 @@ export function SettingsPanel() {
             <div className="setting-item">
               <label>强调色</label>
               <input type="color" value={theme.accentColor} onChange={e => dispatch(setAccentColor(e.target.value))} />
+            </div>
+            <div className="setting-item">
+              <label>文件树最大深度</label>
+              <input type="range" min="3" max="20" step="1" value={settings.fileTreeMaxDepth ?? 8}
+                onChange={e => dispatch(setFileTreeMaxDepth(Number(e.target.value)))} />
+              <span>{settings.fileTreeMaxDepth ?? 8} 层</span>
             </div>
 
             <h3 style={{ marginTop: 24 }}>🖼️ 壁纸与磨砂</h3>

@@ -654,13 +654,13 @@ class FileSystemService {
    *   - 传值（M2-5 list_dir 在本上下文有活动 worktree 时传 worktree 根）：仅取该根下的树并直接返回，
    *     【不】污染 this.fileTree / workspaceTrees 缓存——避免把 worktree 树写进 UI 主工作区文件树面板。
    */
-  async getWorkspaceTree(rootOverride?: string): Promise<FileNode> {
+  async getWorkspaceTree(rootOverride?: string, maxDepth?: number): Promise<FileNode> {
     if (isElectron && window.synapse?.workspace) {
       if (rootOverride) {
         // worktree 根专用：取树即返回，不写主工作区缓存（list_dir 用，UI 面板不受影响）。
-        return await window.synapse.workspace.tree(rootOverride);
+        return await window.synapse.workspace.tree(rootOverride, maxDepth);
       }
-      const tree = await window.synapse.workspace.tree(this.getCurrentWorkspacePath());
+      const tree = await window.synapse.workspace.tree(this.getCurrentWorkspacePath(), maxDepth);
       this.fileTree = tree;
       this.workspaceTrees.set(this.currentWorkspace, tree);
       return tree;

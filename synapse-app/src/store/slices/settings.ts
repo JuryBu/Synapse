@@ -57,6 +57,8 @@ interface SettingsState {
   promptInjection: PromptInjectionSettings;
   maxConversationHistory: number;
   autoArchiveAfter: number; // days, 0 = disabled
+  // ★ 文件树最大展开深度（IPC workspace:tree 的 maxDepth）。默认 8；旧硬编码 3 会让第 4 层及更深目录显示为空。
+  fileTreeMaxDepth: number;
 }
 
 const initialState: SettingsState = {
@@ -94,6 +96,7 @@ const initialState: SettingsState = {
   },
   maxConversationHistory: 100,
   autoArchiveAfter: 30,
+  fileTreeMaxDepth: 8,
 };
 
 export const settingsSlice = createSlice({
@@ -183,6 +186,10 @@ export const settingsSlice = createSlice({
     setAutoArchiveAfter(state, action: PayloadAction<number>) {
       state.autoArchiveAfter = action.payload;
     },
+    // ★ 文件树最大展开深度（修 maxDepth=3 硬编码致深层目录显示空的 bug；可调，下限 1）。
+    setFileTreeMaxDepth(state, action: PayloadAction<number>) {
+      state.fileTreeMaxDepth = Math.max(1, Math.floor(action.payload));
+    },
   },
 });
 
@@ -191,5 +198,5 @@ export const {
   setUserAvatar, setUserName, setAiAvatar, setAiName,
   setApiKey, setApiEndpoint, loadSettings,
   setSafety, setPromptInjection,
-  setMaxConversationHistory, setAutoArchiveAfter,
+  setMaxConversationHistory, setAutoArchiveAfter, setFileTreeMaxDepth,
 } = settingsSlice.actions;

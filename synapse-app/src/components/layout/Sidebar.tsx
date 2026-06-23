@@ -23,6 +23,8 @@ export function Sidebar({ activeView }: SidebarProps) {
   const dispatch = useAppDispatch();
   const workspace = useAppSelector((s: RootState) => s.workspace) as any;
   const tabs = useAppSelector((s: RootState) => s.editorTabs.tabs);
+  // ★ 文件树最大展开深度（可调；改了会重新取树，深层目录立即生效——修 maxDepth=3 硬编码致深层空的 bug）。
+  const fileTreeMaxDepth = useAppSelector((s: RootState) => ((s as any).settings?.fileTreeMaxDepth ?? 8) as number);
   const [fileTree, setFileTree] = useState<FileNode | null>(null);
   const demoWorkspaceLoadedRef = useRef(false);
   const workspaceClearedRef = useRef(false);
@@ -32,8 +34,8 @@ export function Sidebar({ activeView }: SidebarProps) {
       setFileTree(null);
       return;
     }
-    fileSystem.getWorkspaceTree().then(setFileTree);
-  }, []);
+    fileSystem.getWorkspaceTree(undefined, fileTreeMaxDepth).then(setFileTree);
+  }, [fileTreeMaxDepth]);
 
   const handleOpenWorkspace = useCallback(async () => {
     try {
@@ -103,7 +105,7 @@ export function Sidebar({ activeView }: SidebarProps) {
       if (isElectron) {
         fileSystem.openExternalWorkspace({ id: workspace.currentPath, name: workspace.name || '工作区', path: workspace.currentPath, lastOpened: Date.now() });
       }
-      fileSystem.getWorkspaceTree().then(setFileTree);
+      fileSystem.getWorkspaceTree(undefined, fileTreeMaxDepth).then(setFileTree);
       return;
     }
     // demo 兜底（从未打开过任何真实工作区）。
@@ -111,12 +113,12 @@ export function Sidebar({ activeView }: SidebarProps) {
     //   （第一分支不进）又非空（旧条件 !currentPath 也不进），示例文件树永久消失。把它一并视同未打开。
     if (!workspace.currentPath || workspace.currentPath === '/workspace') {
       demoWorkspaceLoadedRef.current = true;
-      fileSystem.getWorkspaceTree().then(tree => {
+      fileSystem.getWorkspaceTree(undefined, fileTreeMaxDepth).then(tree => {
         setFileTree(tree);
         dispatch(openWorkspace({ path: '/workspace', name: '示例工作区' }));
       });
     }
-  }, [activeView, workspace.currentPath, workspace.name, dispatch]);
+  }, [activeView, workspace.currentPath, workspace.name, dispatch, fileTreeMaxDepth]);
 
   // Also load tree when workspace changes
   useEffect(() => {

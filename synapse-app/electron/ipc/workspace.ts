@@ -58,7 +58,9 @@ export function registerWorkspaceHandlers(): void {
     });
 
     // 获取工作区文件树
-    ipcMain.handle('workspace:tree', (_e, wsPath: string, maxDepth = 3) => {
+    // ★ 文件树深度：默认 8（旧值 3 会让第 4 层及更深目录 children 恒空、深层展开看着像 bug）。
+    //   渲染层 fileSystem.getWorkspaceTree 会按 settings.fileTreeMaxDepth 显式传值覆盖；此默认是兜底。
+    ipcMain.handle('workspace:tree', (_e, wsPath: string, maxDepth = 8) => {
         function scanDir(dirPath: string, depth: number): unknown {
             if (depth > maxDepth) return null;
             try {
