@@ -91,6 +91,23 @@
 - ⏸ #15 压缩后卡片更新：主人不确定 + headline 概念上不随压缩变，暂记小本本待主人明确指哪个卡片
 - 🔬 全部待主人重启统一真机验证；整体 adversarial review（Workflow 多 lens：#6 interrupt 语义 / #14 cache 不变式 / #11 三框 / #19 个性化）；Exa 需 Broker 在跑(127.0.0.1:14588)
 
+## 七、真机反馈第二批（2026-06-23）
+
+### 已完成（真机 + review 驱动，3 commit，双编译 R=0/E=0）
+- `3697cc3` P0 发消息无回复根因（isStreaming 工具轮间假性归零→aiClient 重建→cleanup stop 正在跑的 loop；加 isRunning getter + aiClient/cleanup 守卫；CDP 真机验证 AI 回「收到」）
+- `7943aa3` review 3 interrupt HIGH(闸门改 isStreaming‖isRunning) + 主人#3 task吞消息(done 不延伸) + 主人#4 用户型号(只挂AI气泡) + review 4 bug(record hit地板/freshness同轴/头像onerror/MCP重连)
+- `7a49d9c` 主人#1 导航按轮(navItems 按轮聚合+AI回复才收录) + 主人#2 review changes 行内红绿diff(SingleDiffView+diffview tab) + 三框限高
+
+### 待做（主人补充第8点完整 + #3，分批）
+- **A. 对话状态色（厘清「四色」）**：对话列表项 + 顶部对话栏 用色+【闪烁】表状态——绿=做完未查看 / 蓝=生成中 / 红=出错 / 黄=retry异常未失败；闪烁非常驻(避免主题色撞色)。需 conversation 加 status 字段(或派生) + 列表/顶部栏渲染状态点 + CSS 闪烁动画 + 与「标记未完成」联动。
+- **B. #3 真并发隔离（主人选 A 后台继续）**：A 生成中切 B→A 后台继续写 A、切回看到完整。需 run 所有 dispatch 按 execContextId 路由到对应对话(中等重构；现状 conversation 单对话 slice，切对话不停 run→A 写入落空+状态串 B)。最硬一块。
+- **C. 对话 ID 直接注入**：图九模型仍调 read_conversation 查 ID。#8a 已在 systemPrompt 注入 conversationId，需查为何模型没用到/没生效。
+- **D. 顶部对话栏右键菜单**(图九紧凑切换器)：右键展开功能列表(学图十一 Codex)，对齐左侧列表 + 借鉴：复制ID / 复制工作目录 / 复制深度链接 / 置顶 / 重命名(已做) / 归档 / 标记未读 / 标记未完成 / 新窗口打开 / 派生本地(fork) / 派生新工作树。
+
+### 待澄清/小本本
+- #2 四色已厘清=对话状态色(本批 A)；#15 压缩后卡片更新仍待主人明确
+- B 真并发隔离的 run 多对话写入路由细节(可能需要 conversation 多实例或 run 写持久化而非当前 slice)
+
 ## 五、待评估 / 小本本（承接 Plan_6）
 - queue 附件 release / run_command 副作用入账本 / 队列上限连点 / subtitle 并发节流（Plan_6 遗留）
 - #17 缺陷 B：WORKFLOW 注入 BUILT_IN 静态 vs commandRegistry 实际，可能漂移
