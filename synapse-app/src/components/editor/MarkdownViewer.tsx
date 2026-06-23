@@ -7,6 +7,7 @@ import 'katex/dist/katex.min.css';
 import { Eye, Columns2, Pencil } from 'lucide-react';
 import { useAppDispatch } from '@/store/hooks';
 import { CodeEditor } from '@/components/editor/CodeEditor';
+import { MermaidDiagram } from '@/components/chat/MermaidDiagram';
 import { fileSystem } from '@/services/fileSystem';
 import { markTabSaved, setTabContent } from '@/store/slices/editorTabs';
 import { addNotification } from '@/store/slices/notifications';
@@ -164,6 +165,17 @@ function MarkdownPreview({ content, filePath }: { content: string; filePath: str
           img({ src, alt, ...props }) {
             const resolved = typeof src === 'string' ? resolveImgSrc(src) : src;
             return <img src={resolved} alt={alt ?? ''} {...props} />;
+          },
+          // ★ #7：补 code 映射——```mermaid 代码块渲染成流程图（复用聊天侧 MermaidDiagram，样式在 components.css 全局）。
+          //   MarkdownViewer 无流式概念，块永远闭合 → pending 恒 false；其余 code 走默认（react-markdown 自动 <pre> 包裹）。
+          code({ className, children, ...props }) {
+            const match = /language-(\w+)/.exec(className || '');
+            const lang = match?.[1];
+            const childStr = String(children).replace(/\n$/, '');
+            if (lang === 'mermaid') {
+              return <MermaidDiagram code={childStr} pending={false} />;
+            }
+            return <code className={className} {...props}>{children}</code>;
           },
         }}
       >
