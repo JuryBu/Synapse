@@ -455,7 +455,15 @@ export function AgentPanel() {
       // active（无 endAnchor）或 endAnchor 被截断不在 → 延伸到当前末尾；done 边界用 endAnchor 本身——
       //   若 endAnchor < startIdx 表示 begin→end 间无过程的空任务，交由下方 startIdx>endIdx 跳过，不误延伸吞后文。
       let endIdx = b.endAnchorMessageId != null ? msgIdToIdx.get(b.endAnchorMessageId) : undefined;
-      if (b.endAnchorMessageId == null || endIdx === undefined) endIdx = messages.length - 1;
+      // ★ 主人反馈#3：只有【active】(进行中、本就该随新消息延伸) 才延伸到当前末尾；done/aborted 已收口的边界，
+      //   即便 endAnchor 缺失（旧数据未记 / 被截断清空 / 异常收口未设）也【绝不延伸吞后文】——否则收口后用户
+      //   新发的消息被并进已完成卡片（CDP 实测：done 边界 endAnchor=null → 卡片从 startIdx 吞到 messages 末尾）。
+      //   缺失时退化为空区间（endIdx<startIdx），下方 startIdx>endIdx 跳过该卡片、消息照常单独渲染（不折叠胜过误吞）。
+      if (b.status === 'active') {
+        if (b.endAnchorMessageId == null || endIdx === undefined) endIdx = messages.length - 1;
+      } else if (endIdx === undefined) {
+        endIdx = startIdx - 1;
+      }
       ranges.push({ b, startIdx, endIdx });
     }
     // 防区间重叠（理论不重叠：begin 会收口前一个 active；保险按 startIdx 升序裁剪）。
@@ -508,7 +516,13 @@ export function AgentPanel() {
       const startIdx = b.anchorMessageId != null ? msgIdToIdx.get(b.anchorMessageId) : undefined;
       if (startIdx === undefined) continue; // anchor 已不在消息里（被截断）→ 该边界不参与覆盖判断
       let endIdx = b.endAnchorMessageId != null ? msgIdToIdx.get(b.endAnchorMessageId) : undefined;
-      if (b.endAnchorMessageId == null || endIdx === undefined) endIdx = messages.length - 1; // active/截断 → 延伸到末尾
+      // ★ 主人反馈#3 一致性：done/aborted 已收口边界即便 endAnchor 缺失也不延伸到末尾（否则收口后 user 消息被
+      //   误判落在覆盖区间、从导航里漏掉）。仅 active 才延伸。
+      if (b.status === 'active') {
+        if (b.endAnchorMessageId == null || endIdx === undefined) endIdx = messages.length - 1;
+      } else if (endIdx === undefined) {
+        endIdx = startIdx - 1;
+      }
       for (let i = startIdx; i <= endIdx && i < messages.length; i++) coveredIdx.add(i);
     }
     // ★ #12b：item 带原始消息下标 idx，供导航浮层在压缩点边界处插入「— 压缩点 —」分隔行。
@@ -1540,7 +1554,11 @@ export function AgentPanel() {
     //   - interrupt（插队）：下个空闲轮间由 agentLoop 插入 messages，AI 当前 run 下一轮就看到。
     //   分流：主键（plain Enter / 点发送钮，withModifier=false）→ runtimeEnterAction；修饰键（Ctrl·Cmd+Enter）→ 相反。
     //   每队列各自上限 5。入队成功后清输入框 + 草稿附件，但【不 release sha256】（引用随队列项留到发送时复用）。
-    if (isStreaming) {
+    // ★ P0 同源修复（review HIGH：轮间窗口丢消息）：闸门用「真实运行态」而非仅 isStreaming——
+    //   agentLoop 工具轮间会 setStreaming(false) 让 isStreaming【假性归零】，此时若按 isStreaming 走下方「立即发送」
+    //   分支，会先清空输入再 run()，而 run() 命中重入闸（this.running 仍 true）只弹通知就 return → 用户输入静默丢失。
+    //   改用 isStreaming||isRunning：run 全程（含工具轮间）都走双队列，绝不静默丢消息。
+    if (isStreaming || agentLoopRef.current?.isRunning) {
       const withModifier = opts?.withModifier === true;
       const target: 'queue' | 'interrupt' = withModifier
         ? (runtimeEnterAction === 'queue' ? 'interrupt' : 'queue')
@@ -1600,6 +1618,12 @@ export function AgentPanel() {
     //   会残留，agentLoop 已结束不再消费它。此处 run 结束后把残留 interrupt 也当队首发出（queue 优先、
     //   queue 空再发 interrupt），避免插话永久滞留。语义合理：没赶上本轮 → 结束后立即发。
     if (isStreaming) return;
+    // ★ P0 同源修复（review HIGH：effect 在轮间窗口抢发队列/插话致丢失或重复消费）：除 isStreaming 外再确认
+    //   agentLoop 真已空闲——工具轮间 isStreaming 假性归零时 isRunning 仍为 true，此处必须放弃：
+    //   队列(queue)由 run 彻底结束后发、插话(interrupt)由 agentLoop.drainInterruptMessages 在轮间消费；
+    //   若 effect 在窗口内抢先 dequeue→dispatchUserSend→run() 被重入闸拒（消息已出队却没发）→永久丢失，
+    //   且与 drain 争抢同一 interruptMessages[0] 造成重复消费竞态。isRunning 闸门从源头杜绝。
+    if (agentLoopRef.current?.isRunning) return;
     // 护栏④：再确认当前确实空闲（conversationRef 持最新；若已被下一轮占用则放弃，等下次 effect）。
     if (conversationRef.current.isStreaming) return;
     if (!hasApiKey || !hasModel || !agentLoopRef.current) return;

@@ -76,6 +76,11 @@ export interface RecordLayeringConfig {
   /** ★ #14 动态分级：升 summary 的 score 阈值（fullThreshold > score >= 此值 → 骨架；否则 brief 仅标题）。默认 0.3。
    *  默认梯度：未标记批近批（dist≤1）落 summary（同改造前骨架水平）、dist≥2 才降 brief；被 hit 标记的批近批升 full。 */
   summaryThreshold: number;
+  /**
+   * ★ #14 动态分级：hit 距离地板（仅对 hitCount>0 的批生效）。被 mark_record_hit 标记过的批，距离因子 distTerm 不再
+   *   低于此地板，防折叠老历史元批 dist 极大把 hit 加成乘没（保证 1 次 hit≥summary、2~3 次 full）。默认 0.5。
+   *   ★ 可选字段：computeRenderLevels 内部有同名默认 0.5 兜底，缺省/未透传时仍生效（无 hit 批不受影响）。 */
+  distFloor?: number;
 }
 
 /**
@@ -205,6 +210,7 @@ const initialState: AgentSettingsState = {
     hitBase: 0.4,
     fullThreshold: 0.6,
     summaryThreshold: 0.3,
+    distFloor: 0.5,
   },
   bpc: { ...DEFAULT_BPC_CONFIG },
 };

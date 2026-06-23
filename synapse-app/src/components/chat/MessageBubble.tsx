@@ -380,7 +380,8 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
               {new Date(timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
             </span>
           )}
-          {model && <span className="message-model">{model}</span>}
+          {/* ★ 主人反馈#4：模型型号只挂 AI 气泡——user 消息虽也带 model 字段（agentLoop 落库时记录当时模型），但显示在用户气泡上无意义且突兀。 */}
+          {!isUser && model && <span className="message-model">{model}</span>}
           {!isUser && (live || durationMs !== undefined || streamState === 'aborted') && (
             <span
               className={`message-stream-state state-${streamState ?? (live ? 'streaming' : 'complete')} mode-${streamMode ?? 'unknown'}`}

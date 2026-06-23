@@ -809,7 +809,10 @@ toolRegistry.register({
     (typeof args.conversationId === 'string' && args.conversationId.trim())
       ? args.conversationId.trim()
       : (((store.getState() as any)?.conversation?.id as string | null) || AUTOSAVE_ID);
-  // 当前对话轮号（过滤 tool 后真轮识别，与 record 轮口径一致）——computeRenderLevels 据此算「命中是否新近」。
+  // 当前对话轮号（过滤 tool 后真轮识别）——传给 markRecordHit 作 lastHitRound 候选。
+  // ⚠️ 口径注意：这是 live 真轮（含未压缩的最近几轮），与 record 水位轮（恒 ≤ live 真轮）只是「计数方法相同」、
+  //    数值并不同轴。markRecordHit 内部会把它钳到 min(liveRound, record.totalRounds) 再写库，使 lastHitRound 与
+  //    computeRenderLevels 的 freshness 消费轴（record 水位轮）对齐——否则 hitAge 恒被夹成 0、freshness 不衰减。
   const liveMessages = ((store.getState() as any)?.conversation?.messages ?? [])
     .filter((m: any) => m?.role !== 'tool');
   const currentRound = identifyRounds(liveMessages).totalRounds;

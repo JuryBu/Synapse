@@ -702,7 +702,9 @@ function unfoldBatches(batches: RecordBatch[]): RecordBatch[] {
  *
  * @param conversationId 目标对话 id。
  * @param target.batchIndex 精确命中的批 index；或 target.roundHit 命中该轮号所在批（二者传一个，batchIndex 优先）。
- * @param currentRound 命中时的当前对话轮号（调用方算好传入，recordStore 不依赖 round 识别服务）。
+ * @param currentRound 命中时的 live 当前对话轮号（调用方算好传入，recordStore 不依赖 round 识别服务）。
+ *   ★ 内部会钳到 record 水位轮 min(currentRound, record.totalRounds) 再写 lastHitRound，与 computeRenderLevels
+ *   的 freshness 消费轴（record 水位轮）同轴——见函数体注释。
  * @returns 命中并落库后的最新 record；找不到对话 / 找不到目标批 / 失败 → null（不抛，record 是加速层）。
  */
 export async function markRecordHit(
@@ -715,7 +717,13 @@ export async function markRecordHit(
     const record = await getRecord(conversationId);
     if (!record || record.batches.length === 0) return null;
 
-    const round = Math.max(0, toNumber(currentRound, 0));
+    // ★ #14 Bug 修复：lastHitRound 必须与消费侧（computeRenderLevels 的 freshness）同轴。
+    //   调用方传入的 currentRound 是 live 真轮（identifyRounds(liveMessages).totalRounds，含未压缩的最近几轮）；
+    //   而 computeRenderLevels 用 record 水位轮 folded.totalRounds（恒 ≤ live 真轮）算 hitAge = round - lastHitRound。
+    //   若原样写 live 真轮，打 hit 后的若干次压缩里 hitAge 恒被 Math.max(0, ...) 夹成 0 → freshness=1（满血不衰减）。
+    //   故在写入侧把 lastHitRound 钳到 record 水位（min(liveRound, record.totalRounds)），与消费轴对齐，freshness 才正常衰减。
+    const liveRound = Math.max(0, toNumber(currentRound, 0));
+    const round = Math.min(liveRound, Math.max(0, toNumber(record.totalRounds, 0)));
     // 命中批定位：batchIndex 优先（精确）；否则按 roundHit 落在 [roundStart, roundEnd] 的批。
     let hitIdx = -1;
     if (Number.isFinite(target.batchIndex)) {
@@ -761,6 +769,14 @@ export interface DynamicLevelOptions {
   fullThreshold?: number;
   /** 升 summary 的 score 阈值（fullThreshold > score >= 此值 → summary；否则 brief）。 */
   summaryThreshold?: number;
+  /**
+   * ★ #14 hit 距离地板（仅 hitCount>0 时生效）：被 mark_record_hit 标记过的批，distTerm 不再低于此地板。
+   *   背景：折叠老历史的元批 roundEnd 远低于当前轮 → dist 极大 → distTerm 趋 0 → 把 hit 加成乘没（dist≥15 时
+   *   1 次 hit 连 brief 都跳不出），与「标记→保留全文」承诺冲突——而折叠老历史恰是唯一真正依赖 hit 救回的对象。
+   *   设地板后保证：1 次 hit 至少到 summary、2~3 次到 full。无 hit 批不受影响（地板仅 hitCount>0 生效），
+   *   不破 prompt cache（仍只在压缩点固化重算）。默认 0.5。
+   */
+  distFloor?: number;
 }
 const DYNAMIC_LEVEL_DEFAULTS: Required<DynamicLevelOptions> = {
   enabled: true,
@@ -769,6 +785,7 @@ const DYNAMIC_LEVEL_DEFAULTS: Required<DynamicLevelOptions> = {
   hitBase: 0.4,
   fullThreshold: 0.6,
   summaryThreshold: 0.3,
+  distFloor: 0.5,
 };
 
 /**
@@ -777,9 +794,13 @@ const DYNAMIC_LEVEL_DEFAULTS: Required<DynamicLevelOptions> = {
  * 算法（任务 #14：① hit 命中强度 × ② 距离当前轮远近，两指标【综合相乘】→ 三级 full/summary/brief）：
  *   对每个可见批（非 archived；含 meta 元批）：
  *     - freshness = 1 / (1 + hitAge × distWeight/2)        —— 命中新鲜度（hitAge = currentRound - lastHitRound，越新近越接近 1）。
+ *                  ★ 同轴前提：lastHitRound 在 markRecordHit 写入时已钳到 record 水位轮（min(liveRound, totalRounds)），
+ *                  与此处 currentRound（= folded.totalRounds 水位轮）同轴；否则 hitAge 恒被夹 0、freshness 永不衰减。
  *     - hitTerm  = hitBase + hitCount × hitWeight × freshness —— 命中强度（hitBase>0 让无 hit 批也有基线，不被乘积归零；新近命中更强）。
  *     - dist     = max(0, currentRound - roundEnd)         —— 批末轮到当前轮的距离（越近越小）。
  *     - distTerm = 1 / (1 + dist × distWeight)             —— 距离因子，dist=0→1，越远越趋 0。
+ *                  ★ 但 hitCount>0 时给 distTerm 设地板 distFloor（默认 0.5）——防折叠老历史元批 dist 极大把 hit
+ *                  加成乘没（详见 DynamicLevelOptions.distFloor）；无 hit 批不设地板，远批照常衰减到 brief。
  *     - score    = hitTerm × distTerm                       —— 综合相乘。
  *     - score >= fullThreshold    → 'full'（全文）
  *       score >= summaryThreshold → 'summary'（骨架）
@@ -826,6 +847,7 @@ export async function computeRenderLevels(
     const hitBase = Math.max(0, cfg.hitBase);
     const fullThreshold = cfg.fullThreshold;
     const summaryThreshold = Math.min(cfg.summaryThreshold, fullThreshold); // summary 阈值不得高于 full 阈值
+    const distFloor = Math.min(1, Math.max(0, cfg.distFloor)); // hit 距离地板，钳到 [0,1]（distTerm 本就 ∈(0,1]）
 
     let changed = false;
     const nextBatches = record.batches.map(b => {
@@ -839,7 +861,10 @@ export async function computeRenderLevels(
       const freshness = 1 / (1 + hitAge * (distWeight * 0.5));
       const hitTerm = hitBase + hitCount * hitWeight * freshness;
       const dist = Math.max(0, round - (b.roundEnd || 0));
-      const distTerm = 1 / (1 + dist * distWeight);
+      // ★ #14 hit 距离地板：被标记过的批（hitCount>0）distTerm 不低于 distFloor，防折叠老历史元批 dist 极大把 hit 乘没；
+      //   无 hit 批（hitCount=0）走原始衰减，远批照常降到 brief（地板仅 hitCount>0 生效，无 hit 远批行为完全不变）。
+      const rawDistTerm = 1 / (1 + dist * distWeight);
+      const distTerm = hitCount > 0 ? Math.max(distFloor, rawDistTerm) : rawDistTerm;
       const score = hitTerm * distTerm;
       const level: 'full' | 'summary' | 'brief' =
         score >= fullThreshold ? 'full' : score >= summaryThreshold ? 'summary' : 'brief';

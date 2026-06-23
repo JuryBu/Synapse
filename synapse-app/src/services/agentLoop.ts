@@ -396,7 +396,7 @@ const BATCH_JOIN = '\n\n---\n\n';
 const DEFAULT_LAYERING: RecordLayeringConfig = {
   headFull: 2, tailFull: 1, titleThreshold: 20, maxRatio: 0.4, foldThreshold: 30, foldBatchK: 10,
   // ★ #14 动态分级默认（默认开）：与 agentSettings.initialState / store/index.ts sanitize 三处同步。
-  dynamicLevelEnabled: true, hitWeight: 0.6, distWeight: 0.2, hitBase: 0.4, fullThreshold: 0.6, summaryThreshold: 0.3,
+  dynamicLevelEnabled: true, hitWeight: 0.6, distWeight: 0.2, hitBase: 0.4, fullThreshold: 0.6, summaryThreshold: 0.3, distFloor: 0.5,
 };
 
 /**
@@ -1941,6 +1941,7 @@ export class AgentLoop {
               hitBase: layeringForFold?.hitBase ?? DEFAULT_LAYERING.hitBase,
               fullThreshold: layeringForFold?.fullThreshold ?? DEFAULT_LAYERING.fullThreshold,
               summaryThreshold: layeringForFold?.summaryThreshold ?? DEFAULT_LAYERING.summaryThreshold,
+              distFloor: layeringForFold?.distFloor ?? DEFAULT_LAYERING.distFloor, // ★ #14 Bug1：hit 命中后距离衰减地板，透传让 UI 可调链完整
             });
             folded = leveled || folded; // 重算失败/no-op 退回 folded，不破坏注入
             // ★ M4-5-S2：同样走稳定前缀，与上方分支口径一致，保证注入前缀确定性（用折叠 + 动态分级后 record）。

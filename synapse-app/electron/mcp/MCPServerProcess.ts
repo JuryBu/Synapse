@@ -288,12 +288,7 @@ export class MCPServerProcess extends EventEmitter {
         this._status = 'starting';
         this.sessionId = null;
         try {
-            await this.httpRequest('initialize', {
-                protocolVersion: '2024-11-05',
-                capabilities: { tools: {} },
-                clientInfo: { name: 'synapse', version: '0.1.0' },
-            });
-            await this.httpNotify('notifications/initialized');
+            await this.handshakeHttp();
             this._status = 'running';
             console.log(`[MCP:${this.name}] initialized (http @ ${this.httpUrl}, session=${this.sessionId ?? 'none'})`);
             // 与 stdio 分支一致：握手成功广播，触发渲染端 mcpBridge.refresh() 补注册 mcp__* 工具。
@@ -303,6 +298,35 @@ export class MCPServerProcess extends EventEmitter {
             this._status = 'error';
             console.error(`[MCP:${this.name}] http start failed:`, (err as Error)?.message);
             throw err;
+        }
+    }
+
+    /** 纯握手序列（initialize + initialized 通知）——startHttp 与「session 失效后重握手」共用，不碰 _status/running guard。 */
+    private async handshakeHttp(): Promise<void> {
+        await this.httpRequest('initialize', {
+            protocolVersion: '2024-11-05',
+            capabilities: { tools: {} },
+            clientInfo: { name: 'synapse', version: '0.1.0' },
+        });
+        await this.httpNotify('notifications/initialized');
+    }
+
+    /**
+     * ★ session 失效自愈：Broker（默认 127.0.0.1:14588，exa 等连它）重启后，旧 mcp-session-id 必失效（404 / 含 "session"
+     *   的 4xx）。原实现只 throw、不清 sessionId、不改 _status，且 startHttp 有 running guard 无法自愈 → exa 全部工具
+     *   调用永久失败而 status 仍报 running。此处绕过 running guard 重新握手一次，拿到新 session id。
+     *   只在 httpRequest 的失效分支调用、且只重试一轮（reHandshaking 防重入），重握手仍失败则上层置 error。
+     */
+    private reHandshaking = false;
+    private async reinitHttp(): Promise<void> {
+        if (this.reHandshaking) return;
+        this.reHandshaking = true;
+        this.sessionId = null;
+        try {
+            await this.handshakeHttp();
+            console.log(`[MCP:${this.name}] http session re-initialized (session=${this.sessionId ?? 'none'})`);
+        } finally {
+            this.reHandshaking = false;
         }
     }
 
@@ -316,8 +340,16 @@ export class MCPServerProcess extends EventEmitter {
         return headers;
     }
 
-    /** 发一条带 id 的 JSON-RPC 请求并等结果（HTTP POST + SSE 解析 + AbortController 超时）。 */
+    /**
+     * 发一条带 id 的 JSON-RPC 请求并等结果（HTTP POST + SSE 解析 + AbortController 超时）。
+     * ★ session 自愈：命中「session 失效」类 4xx（404，或 400/401 且响应含 "session"）时，清掉旧 session、
+     *   重握手一次再重试本请求（仅一轮，由 _retried 控制）。重握手仍失败 → 置 _status='error' 并广播。
+     */
     private async httpRequest(method: string, params?: unknown, timeout = 30000): Promise<unknown> {
+        return this.httpRequestOnce(method, params, timeout, false);
+    }
+
+    private async httpRequestOnce(method: string, params: unknown, timeout: number, _retried: boolean): Promise<unknown> {
         const id = ++this.requestId;
         const body = JSON.stringify({ jsonrpc: '2.0', id, method, params });
         const controller = new AbortController();
@@ -338,12 +370,29 @@ export class MCPServerProcess extends EventEmitter {
         } finally {
             clearTimeout(timer);
         }
-        // initialize 响应头带回 session id —— 存下供后续请求/通知回带。
+        // session id 续约：initialize 响应总是覆盖写入（重握手后拿新 id）；其它响应仅在当前无 session 时补写。
         const sid = res.headers.get('mcp-session-id');
-        if (sid && !this.sessionId) this.sessionId = sid;
+        if (sid && (method === 'initialize' || !this.sessionId)) this.sessionId = sid;
 
         if (!res.ok) {
             const errText = await res.text().catch(() => '');
+            // ★ session 失效自愈：Broker 重启后旧 session 必返 404（或 400/401 含 "session"）。
+            //   非 initialize 调用 + 尚未重试 + 未在重握手中 → 清旧 session、重握手、重试本请求一轮。
+            const sessionDead =
+                res.status === 404 ||
+                ((res.status === 400 || res.status === 401) && /session/i.test(errText));
+            if (sessionDead && method !== 'initialize' && !_retried && !this.reHandshaking) {
+                try {
+                    await this.reinitHttp();
+                } catch (reErr) {
+                    // 重握手都失败 → Broker 真挂了：如实置 error 并广播，别再谎报 running。
+                    this._status = 'error';
+                    this.emit('status-change', { name: this.name, status: 'error' });
+                    throw new Error(`MCP http ${res.status} ${method}: re-handshake failed: ${(reErr as Error)?.message ?? reErr}`);
+                }
+                // 重握手成功 → 用新 session 重试本请求一轮（_retried=true 防无限重试）。
+                return this.httpRequestOnce(method, params, timeout, true);
+            }
             throw new Error(`MCP http ${res.status} ${method}: ${errText.slice(0, 200)}`);
         }
 

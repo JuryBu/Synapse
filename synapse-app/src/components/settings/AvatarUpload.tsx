@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useDispatch } from 'react-redux';
 import { User, Bot, Upload, X, Check } from 'lucide-react';
+import { addNotification } from '@/store/slices/notifications';
 
 /**
  * ★ #19 个性化：头像上传 + 压缩 + 方框裁剪组件。
@@ -31,6 +33,7 @@ interface AvatarUploadProps {
 }
 
 export function AvatarUpload({ value, onChange, variant, label }: AvatarUploadProps) {
+  const dispatch = useDispatch();
   const fileInputRef = useRef<HTMLInputElement>(null);
   // 裁剪模态：null=未打开；否则存待裁剪原图 HTMLImageElement。
   const [cropImage, setCropImage] = useState<HTMLImageElement | null>(null);
@@ -39,19 +42,35 @@ export function AvatarUpload({ value, onChange, variant, label }: AvatarUploadPr
     fileInputRef.current?.click();
   }, []);
 
+  // 统一的失败反馈：弹通知，避免「选了图却毫无反应、裁剪框永远 null」的静默 no-op。
+  const reportFailure = useCallback((message: string) => {
+    dispatch(addNotification({ type: 'error', title: '头像读取失败', message }));
+  }, [dispatch]);
+
   const handleFile = useCallback((file: File | undefined) => {
     if (!file) return;
-    if (!file.type.startsWith('image/')) return;
+    // 仅按 MIME 过滤——改了扩展名的非图文件可能仍带 image/* MIME，故后续 img.onerror 还要兜一道（解码失败）。
+    if (!file.type.startsWith('image/')) {
+      reportFailure(`「${file.name}」不是受支持的图片格式，请选择 PNG / JPEG / WebP 等图片。`);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const url = String(reader.result ?? '');
-      if (!url) return;
+      if (!url) {
+        reportFailure('图片内容为空或无法读取，请换一张图片试试。');
+        return;
+      }
       const img = new Image();
       img.onload = () => setCropImage(img);
+      // 改扩展名的非图文件 / 损坏图：MIME 蒙混过关但解码失败 → 这里兜底反馈，不再静默卡死。
+      img.onerror = () => reportFailure('图片解码失败（文件可能已损坏或并非真正的图片），请换一张图片试试。');
       img.src = url;
     };
+    // FileReader 自身读取失败（权限/IO 异常）：补 onerror，否则 onload 不触发、用户毫无反馈。
+    reader.onerror = () => reportFailure('读取文件失败，请检查文件后重试。');
     reader.readAsDataURL(file);
-  }, []);
+  }, [reportFailure]);
 
   const Placeholder = variant === 'user' ? User : Bot;
 
