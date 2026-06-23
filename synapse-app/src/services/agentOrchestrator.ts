@@ -500,7 +500,12 @@ export class AgentOrchestrator {
           //   medium#3/#5 根治后账本按 contextId 分桶——子代理工具用 contextId=subagentId 入桶，这里 consume
           //   自己桶丢弃即可（子代理对话只读回看、不渲染 diff 卡片）。即便后续 spawnMultiple 并发，各子代理
           //   与主 agentLoop 各操作独立桶，不再相互 splice 串台。consume 后清空本桶（也防 Map 增长）。
-          consumeTrackedFileChanges(subagentId);
+          // ★ #4：子代理改文件后，刷新「正打开这些文件」的 editor tab（即便子代理 diff 不渲染卡片，
+          //   用户已打开的该文件 tab 仍应实时同步）；clean 自动同步 / dirty 提示不覆盖。
+          const subFileChanges = consumeTrackedFileChanges(subagentId);
+          if (subFileChanges.length > 0) {
+            void import('./openTabSync').then(m => m.refreshOpenTabsForChanges(subFileChanges)).catch(() => { /* 刷新失败静默 */ });
+          }
           messages.push({
             role: 'tool',
             content: toolResult,

@@ -1633,6 +1633,11 @@ export class AgentLoop {
                 diffId: change.diff.id,
               }));
             }
+            // ★ #4：本批文件改动落地后，刷新「正打开这些文件」的 editor tab（clean 自动重读盘同步 / dirty 提示不覆盖）。
+            //   dynamic import 局部化（与本文件 import('./extensionManager') 同范式）；内部自带 try/catch，失败不影响主流程。
+            if (fileChanges.length > 0) {
+              void import('./openTabSync').then(m => m.refreshOpenTabsForChanges(fileChanges)).catch(() => { /* 刷新失败静默 */ });
+            }
             // ★ show_artifact：与文件改动同口径——按 execContextId 消费自己桶的产物卡片，挂到当前 assistant 消息上。
             //   artifact 只是「打开已存在文件」的入口（无 diff/snapshot/审阅），故只 addMessageArtifact，不发 file_change 事件。
             const artifacts = consumeTrackedArtifacts(execContextId);
