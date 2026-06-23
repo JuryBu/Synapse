@@ -1053,6 +1053,8 @@ export class AgentLoop {
     // 只挂在【最终完成消息】那一条上（finalCompletedAssistantId），不在每条 run 上重复（Plan_5 风险四）。
     // 逐条 run 计时仍走各自 runStartedAt → durationMs，互不干扰。
     const loopStartedAt = Date.now();
+    // ★ H5（反馈）：同轮干太久提醒——只在跨过阈值那一轮注入一次（防重复刷屏 + 防 prompt cache 每轮前缀漂移）。
+    let reminderInjected = false;
     // 最终给出答复的 assistant 消息 id：每次「成功完成」分支更新；正常结束（无工具调用 break）时它就是最终答复。
     // 中止 / 错误 / 空响应分支不更新它（那几种结束态已有 Stopped / 错误态，不挂端到端徽标）。
     let finalCompletedAssistantId: string | null = null;
@@ -1071,6 +1073,15 @@ export class AgentLoop {
 
     while (this.running && round < maxRounds) {
       round++;
+      // ★ H5：本轮已连续跑较多步(≥10)或耗时过长(>2min) → 注入一条 system 提醒，促 AI 主动 end_task_boundary
+      //   汇报进展、别闷头一直干。只注入一次（reminderInjected）；push 到 apiMessages 末尾，不破坏前缀 prompt cache。
+      if (!reminderInjected && (round >= 10 || Date.now() - loopStartedAt > 120_000)) {
+        reminderInjected = true;
+        apiMessages.push({
+          role: 'system',
+          content: '【系统提醒】你已在本轮连续执行较多步骤或较长时间。若已有阶段性成果，请考虑调用 end_task_boundary 收口并向用户汇报进展，或把剩余工作分解后告知用户，避免长时间闷头执行不反馈。',
+        });
+      }
       store.dispatch(setStreaming(true));
       store.dispatch(clearStreamingContent());
 
