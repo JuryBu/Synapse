@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { History, ChevronDown, ChevronRight, Clock, FileText, FilePlus, FileMinus } from 'lucide-react';
+import { History, ChevronDown, ChevronRight, Clock, FileText, FilePlus, FileMinus, Check } from 'lucide-react';
 import type { TaskBoundary } from '@/store/slices/conversation';
 
 /** 卡片聚合展示的「已编辑文件」（由 AgentPanel 从区间消息的 diffs / artifacts 聚合后传入）。 */
@@ -36,6 +36,7 @@ interface TaskBoundaryCardProps {
   onOpenFile?: (file: BoundaryFile) => void;
   children?: ReactNode;                               // 区间内的过程消息（MessageBubble 们）
   childCount?: number;                                // 过程消息条数（折叠态显示「展开完整过程 (N条)」）
+  onEnd?: () => void;                                 // ★ H1：手动收口当前 active 边界（用户兜底，防卡住）
 }
 
 /** 状态 → 强调色 + 文案（active 主色 / done 绿 / aborted 红）。 */
@@ -131,7 +132,7 @@ function HistoryOverlay({ history, now, onClose }: {
   );
 }
 
-export function TaskBoundaryCard({ boundary, files = [], onOpenFile, children, childCount = 0 }: TaskBoundaryCardProps) {
+export function TaskBoundaryCard({ boundary, files = [], onOpenFile, children, childCount = 0, onEnd }: TaskBoundaryCardProps) {
   const isActive = boundary.status === 'active';
   // ★ 过程消息：active 默认展开（实时看 AI 在做什么）；done/aborted 默认收起（卡片干净，点开看细节）。
   const [bodyOpen, setBodyOpen] = useState(isActive);
@@ -176,6 +177,19 @@ export function TaskBoundaryCard({ boundary, files = [], onOpenFile, children, c
           <History size={14} />
           <span>历史</span>
         </button>
+        {/* ★ H1（tb 卡住）：active 边界给用户一个手动收口入口——万一 AI 漏调 end_task_boundary 卡住，
+            点此即标记完成收口，不必干等自动兜底。仅 active 显示。 */}
+        {isActive && onEnd && (
+          <button
+            type="button"
+            className="tb-card-history-btn"
+            onClick={onEnd}
+            title="手动结束当前任务（标记完成）"
+          >
+            <Check size={14} />
+            <span>结束</span>
+          </button>
+        )}
       </div>
 
       {boundary.summary && (

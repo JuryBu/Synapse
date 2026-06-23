@@ -1334,7 +1334,7 @@
 
 .review-file-title {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
 }
@@ -1369,17 +1369,80 @@
   color: var(--syn-text-muted);
 }
 
-.review-lines {
+/* ★ 变更类型胶囊：新建=绿、删除=红、编辑=主题色，深浅模式靠半透明底自适应 */
+.review-change-kind {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--syn-overlay-weak);
+}
+
+.review-change-kind.kind-created {
+  color: var(--syn-success);
+  background: color-mix(in srgb, var(--syn-success) 16%, transparent);
+}
+
+.review-change-kind.kind-deleted {
+  color: var(--syn-error);
+  background: color-mix(in srgb, var(--syn-error) 16%, transparent);
+}
+
+.review-change-kind.kind-edited {
+  color: var(--syn-primary-light);
+  background: color-mix(in srgb, var(--syn-primary) 18%, transparent);
+}
+
+/* ★ 文件级状态胶囊：接受=绿 / 拒绝=红 / 部分=橙 */
+.review-status {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--syn-overlay-weak);
+}
+
+.review-status.status-accepted {
+  color: var(--syn-success);
+  background: color-mix(in srgb, var(--syn-success) 16%, transparent);
+}
+
+.review-status.status-rejected {
+  color: var(--syn-error);
+  background: color-mix(in srgb, var(--syn-error) 16%, transparent);
+}
+
+.review-status.status-mixed {
+  color: var(--syn-warning);
+  background: color-mix(in srgb, var(--syn-warning) 16%, transparent);
+}
+
+/* ★ +N/-N 突出徽标：对齐 IDE diff 标题角标——加大字号 + 高对比红绿底 */
+.review-lines-badge {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0;
+  border-radius: 6px;
+  overflow: hidden;
   font-family: var(--syn-font-mono);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.review-lines {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
 }
 
 .review-lines.added {
-  color: var(--syn-success);
+  color: #3fb950;
+  background: color-mix(in srgb, #3fb950 22%, transparent);
 }
 
 .review-lines.removed {
-  color: var(--syn-error);
+  color: #f85149;
+  background: color-mix(in srgb, #f85149 22%, transparent);
 }
 
 .review-file-actions {
@@ -1465,6 +1528,10 @@
   color: var(--syn-error);
 }
 
+.review-hunk-status.status-mixed {
+  color: var(--syn-warning);
+}
+
 .review-inline-block-bar {
   display: flex;
   align-items: center;
@@ -1480,38 +1547,64 @@
   min-width: max-content;
 }
 
+/* ★ IDE 风格 diff 行：旧行号 | 新行号 | 符号 | 内容 四列 */
 .review-diff-line {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  gap: 6px;
-  padding: 2px 8px;
+  grid-template-columns: 44px 44px 16px minmax(0, 1fr);
+  gap: 0;
+  padding: 0 8px 0 0;
   font-family: var(--syn-font-mono);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.5;
   min-width: max-content;
   width: 100%;
 }
 
+/* ★ 行号列：右对齐、弱色、不可选，跟 IDE 行号槽一致 */
+.review-line-no {
+  display: inline-block;
+  width: 44px;
+  padding: 0 8px 0 0;
+  text-align: right;
+  color: var(--syn-text-muted);
+  opacity: 0.7;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.review-diff-sign {
+  display: inline-block;
+  text-align: center;
+  color: var(--syn-text-muted);
+}
+
 .review-diff-line code {
+  padding-left: 6px;
   overflow: visible;
   white-space: pre;
   text-overflow: clip;
 }
 
+/* ★ 新增行：绿底 + 左侧绿色竖条强化（对齐 IDE 增行视觉） */
 .review-diff-line.add {
-  background: rgba(34, 197, 94, 0.12);
+  background: color-mix(in srgb, #3fb950 14%, transparent);
+  box-shadow: inset 3px 0 0 #3fb950;
 }
 
+/* ★ 删除行：红底 + 左侧红色竖条强化 */
 .review-diff-line.delete {
-  background: rgba(239, 68, 68, 0.12);
+  background: color-mix(in srgb, #f85149 14%, transparent);
+  box-shadow: inset 3px 0 0 #f85149;
 }
 
-.review-diff-line.add span {
-  color: var(--syn-success);
+.review-diff-line.add .review-diff-sign {
+  color: #3fb950;
+  font-weight: 700;
 }
 
-.review-diff-line.delete span {
-  color: var(--syn-error);
+.review-diff-line.delete .review-diff-sign {
+  color: #f85149;
+  font-weight: 700;
 }
 
 @media (max-width: 900px) {

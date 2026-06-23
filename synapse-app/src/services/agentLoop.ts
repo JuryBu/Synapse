@@ -10,6 +10,7 @@ import {
   appendMessageThinking, setMessageStreamState, setMessageReconnect, setStreaming,
   clearStreamingContent, setTitle, setTokenUsage,
   addAssistantRun, addRunEvent, addMessageDiff, addMessageArtifact, recordFileSnapshot, updateToolCallStatus,
+  endTaskBoundary,
   type AttachmentRef, type MessageContentPart, type StreamModeUsed,
 } from '../store/slices/conversation';
 import { setConnectionStatus, type RecordLayeringConfig } from '../store/slices/agentSettings';
@@ -1316,6 +1317,9 @@ export class AgentLoop {
 
       if (wasAborted) {
         const abortedAt = Date.now();
+        // ★ H1（tb 卡住）：本轮被中止 → 收口未结束的 active task_boundary（aborted），否则边界永久 active、
+        //   卡片一直挂着把后续每条消息都吞进去（"莫名一直在 task_boundary 状态"根因之一）。无 active 时 no-op。
+        store.dispatch(endTaskBoundary({ aborted: true }));
         if (!fullContent) {
           store.dispatch(updateMessage({ id: assistantMessageId, content: '已停止生成' }));
         }
@@ -1400,6 +1404,9 @@ export class AgentLoop {
         //   循环结束后给它挂端到端总计时徽标。有工具调用则 continue 进下一轮，本变量被下一轮覆盖。
         finalCompletedAssistantId = assistantMessageId;
       } else if (lastError) {
+        // ★ H1（tb 卡住）：API 失败等异常 → 收口 active task_boundary（aborted）。这是「AI 没机会调 end、
+        //   用户也没点停止」时边界永久挂住的主因（图六 context canceled 场景）。无 active 时 no-op。
+        store.dispatch(endTaskBoundary({ aborted: true }));
         const errorMsg = `⚠️ AI 请求失败: ${lastError}`;
         const errorAt = Date.now();
         store.dispatch(updateMessage({ id: assistantMessageId, content: errorMsg }));

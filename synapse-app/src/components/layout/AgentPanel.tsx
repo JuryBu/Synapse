@@ -34,7 +34,7 @@ import { toolRegistry } from '@/services/toolRegistry';
 // ★ M4-7-S4：构建 AgentLoop 时把 MCP server 工具桥接进 toolRegistry（MCP 工具进工具循环）。
 import { mcpBridge } from '@/services/mcpBridge';
 import { addNotification } from '@/store/slices/notifications';
-import { addMessage, clearConversation, clearMessages, editMessage, truncateAt, deleteMessage, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setPendingMessage, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
+import { addMessage, clearConversation, clearMessages, editMessage, truncateAt, deleteMessage, endTaskBoundary, setConversation, setConversationWorkspace, setGoal, setModel as setConversationModel, setPendingMessage, setStreaming, updateDiffStatus, updateMessage, updateMessageMeta, type AttachmentRef, type MessageContentPart } from '@/store/slices/conversation';
 // ★ M3-2b：@MultiAI:模式名 触发固定工作流（解析 + 跑 runWorkflow + 汇总文本），见 services/multiAITrigger.ts。
 // ★ M3-3a：generateWorkflowRunId 预生成稳定 runId，跑前先建占位 assistant 消息 + 关联卡片实时显示。
 import { parseMultiAITrigger, runMultiAITrigger, generateWorkflowRunId } from '@/services/multiAITrigger';
@@ -1301,10 +1301,14 @@ export function AgentPanel() {
     // ★ M4-6-S5 /loop 中途 Stop：循环驱动器请求中断——置 aborted 后循环在下个检查点退出，
     //   正在跑的那一轮由上面 agentLoopRef.current.stop() 中止。无运行循环时 stop() 内部 no-op，安全。
     loopRunner.stop();
+    // ★ H1（tb 卡住）：收口未结束的 active task_boundary（标记 aborted/红），覆盖 workflow/loop 这类
+    //   非 agentLoop 驱动的中止路径（agentLoop 自身的 abort/error 已在 agentLoop 收尾兜底收口）。
+    //   endTaskBoundary 无 active 时内部 no-op，安全。
+    dispatch(endTaskBoundary({ aborted: true }));
     // ★ 六轮 #154：中止后把焦点拉回输入框——Stop 按钮点击后会变回 Send 按钮(焦点随之丢失)，
     //   用户直接打字无反应、误以为"输入框无法输入"。rAF 等按钮切换+isStreaming 复位后再聚焦。
     requestAnimationFrame(() => richRef.current?.focus());
-  }, []);
+  }, [dispatch]);
 
   // Plan_4 M2-1：编辑/重试/回溯会截断后续消息。把 record 水位线 clamp 到保留范围（替代此前的整条删）：
   // 覆盖区在保留范围内则不动；否则 clamp totalRounds/totalSteps/lastUpdatedRound，保住 M 之前已生成的摘要、
@@ -2326,6 +2330,7 @@ export function AgentPanel() {
                             files={filesByBoundaryId.get(r.b.id) ?? []}
                             onOpenFile={handleOpenBoundaryFile}
                             childCount={rangeMsgs.length}
+                            onEnd={() => dispatch(endTaskBoundary({ id: r.b.id }))}
                           >
                             {rangeMsgs.map((m) => renderBubble(m))}
                           </TaskBoundaryCard>
