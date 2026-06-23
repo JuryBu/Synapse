@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import type { RootState } from '@/store';
-import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter } from '@/store/slices/settings';
+import { setLanguage, setFontSize, setApiKey, setApiEndpoint, setSafety, setPromptInjection, setMaxConversationHistory, setAutoArchiveAfter, setSendKeyMode } from '@/store/slices/settings';
 import { clearConversation } from '@/store/slices/conversation';
 import { setConversations, setSelectedId } from '@/store/slices/conversationHistory';
 import { deleteConversationSnapshot, exportConversationSnapshot, listConversationSummaries } from '@/services/conversationPersistence';
@@ -1063,6 +1063,18 @@ export function SettingsPanel() {
                 checked={agentSettings.hideSystemToolCalls ?? true}
                 onChange={e => dispatch(setHideSystemToolCalls(e.target.checked))} />
               <span className="setting-hint">默认隐藏 show_artifact / 任务边界 / 工作区切换等元工具的调用卡片（它们已有专门卡片）。关掉看全部调用（调试用）。</span>
+            </div>
+            {/* ★ C1（M7 第七轮反馈#6）：输入框发送键模式可切换。 */}
+            <div className="setting-item">
+              <label>发送键模式</label>
+              <select
+                value={settings.sendKeyMode === 'ctrlEnter' ? 'ctrlEnter' : 'enter'}
+                onChange={e => dispatch(setSendKeyMode(e.target.value === 'ctrlEnter' ? 'ctrlEnter' : 'enter'))}
+              >
+                <option value="enter">Enter 发送 / Shift+Enter 换行</option>
+                <option value="ctrlEnter">Ctrl+Enter 发送 / Enter 换行</option>
+              </select>
+              <span className="setting-hint">输入框回车行为：默认 Enter 直接发送（Shift+Enter 换行）；切到 Ctrl+Enter 模式后 Enter 改为换行、Ctrl 或 Cmd+Enter 才发送。</span>
             </div>
             <div className="setting-item">
               <label>Top P</label>

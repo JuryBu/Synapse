@@ -16,12 +16,19 @@ interface PromptInjectionSettings {
   injectWorkflows: boolean;
 }
 
+// ★ C1（M7 第七轮反馈#6）：输入框发送键模式。
+//   'enter'     = Enter 发送 / Shift+Enter 换行（默认，IM 习惯）。
+//   'ctrlEnter' = Ctrl 或 Cmd+Enter 发送 / Enter 换行（编辑器习惯，旧默认行为）。
+export type SendKeyMode = 'enter' | 'ctrlEnter';
+
 interface SettingsState {
   language: 'zh-CN' | 'en';
   fontSize: number;
   autoSave: boolean;
   showLineNumbers: boolean;
   wordWrap: boolean;
+  // ★ C1：底部主输入框发送键模式（界面交互偏好，随 settings 持久化）。
+  sendKeyMode: SendKeyMode;
   apiKeys: Record<string, string>;
   apiEndpoints: Record<string, string>;
   // New settings
@@ -37,6 +44,7 @@ const initialState: SettingsState = {
   autoSave: true,
   showLineNumbers: true,
   wordWrap: true,
+  sendKeyMode: 'enter', // ★ C1：默认 Enter 发送 / Shift+Enter 换行
   apiKeys: {},
   apiEndpoints: {
     openai: 'https://api.openai.com/v1',
@@ -72,6 +80,10 @@ export const settingsSlice = createSlice({
     },
     setAutoSave(state, action: PayloadAction<boolean>) {
       state.autoSave = action.payload;
+    },
+    // ★ C1：切换发送键模式（'enter' / 'ctrlEnter'）。
+    setSendKeyMode(state, action: PayloadAction<SendKeyMode>) {
+      state.sendKeyMode = action.payload;
     },
     setApiKey(state, action: PayloadAction<{ provider: string; key: string }>) {
       state.apiKeys[action.payload.provider] = action.payload.key;
@@ -126,7 +138,7 @@ export const settingsSlice = createSlice({
 });
 
 export const {
-  setLanguage, setFontSize, setAutoSave,
+  setLanguage, setFontSize, setAutoSave, setSendKeyMode,
   setApiKey, setApiEndpoint, loadSettings,
   setSafety, setPromptInjection,
   setMaxConversationHistory, setAutoArchiveAfter,

@@ -1559,3 +1559,58 @@ html[data-wallpaper="enabled"] .settings-panel {
   min-height: 0;
   overflow: hidden;
 }
+
+/* ★ C3（M7 第七轮反馈#13）：输入区「加号小窗」——合并原文件/图片上传按钮，点开弹小菜单（上传附件/提及@/选择工作流）。 */
+.add-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.add-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.add-menu-trigger.active {
+  opacity: 1;
+  background: var(--syn-overlay-medium);
+}
+.add-menu {
+  position: absolute;
+  bottom: calc(100% + 6px); /* 向上弹出，避免被输入区底部裁剪 */
+  left: 0;
+  z-index: 60;
+  min-width: 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  box-shadow: var(--glass-shadow);
+  /* 近不透明玻璃底（同 .context-menu.glass-panel 口径，防半透明透出输入区文字重合）。 */
+  background: var(--glass-bg-solid);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+.add-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--syn-text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.add-menu-item:hover {
+  background: var(--syn-overlay-medium);
+}
+.add-menu-item svg {
+  flex-shrink: 0;
+  color: var(--syn-text-muted);
+}

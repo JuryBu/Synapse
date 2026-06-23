@@ -1,4 +1,4 @@
-import { SendHorizontal, Sparkles, Zap, StopCircle, Plus, Download, PanelRightClose, MessageSquare, ChevronDown, Search, Globe, FolderInput } from 'lucide-react';
+import { SendHorizontal, Sparkles, Zap, StopCircle, Plus, Download, PanelRightClose, MessageSquare, ChevronDown, Search, Globe, FolderInput, Paperclip, AtSign, Workflow } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import {
@@ -186,10 +186,13 @@ export function AgentPanel() {
   //   handleSend 在 hook 之后定义且用到 hook 的 closeMenu，故 onSubmit 经 ref 破环
   //   （hook 在前，提供 menuElement/handleEditorKeyDown/refreshMenu/closeMenu；handleSend 在后赋值给 ref）。
   const handleSendRef = useRef<() => void>(() => {});
-  const { menuElement, handleEditorKeyDown, refreshMenu, closeMenu } = useAtMention({
+  // ★ C1（M7 第七轮反馈#6）：底部输入框发送键模式（设置可切换，默认 'enter'=Enter 发送/Shift+Enter 换行）。
+  const sendKeyMode = (settings.sendKeyMode === 'ctrlEnter' ? 'ctrlEnter' : 'enter') as 'enter' | 'ctrlEnter';
+  const { menuElement, handleEditorKeyDown, refreshMenu, closeMenu, openAtMenu } = useAtMention({
     richRef,
     onSubmit: () => handleSendRef.current(),
     submitOnPlainEnter: false,
+    sendKeyMode, // ★ C1：底部输入框按设置切换发送键
     onAfterMutate: () => setCanSend(!richRef.current?.isEmpty()),
   });
   const [activeAgentTab, setActiveAgentTab] = useState<'chat' | 'plan' | 'context'>('chat');
@@ -198,6 +201,20 @@ export function AgentPanel() {
   // ★ C6/去重：atConvCache / atConvLoadingRef / 竞态守卫已移入 useAtMention hook。
   // ★ 验收补：footer 压缩环点击打开的本对话 BPC/硬压缩 override 浮层开关。
   const [bpcPopOpen, setBpcPopOpen] = useState(false);
+  // ★ C3（M7 第七轮反馈#13）：输入区「加号小窗」开合 + 点外/Esc 关闭。原「上传文件 📎 + 上传图片 🖼」两按钮收敛成一个加号，
+  //   点开弹小菜单：上传附件 / 提及@ / 选择工作流（参考 Codex 加号小窗）。
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const addMenuWrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (addMenuWrapRef.current && !addMenuWrapRef.current.contains(e.target as Node)) setAddMenuOpen(false);
+    };
+    const onEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') setAddMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onEsc);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onEsc); };
+  }, [addMenuOpen]);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -2419,31 +2436,48 @@ export function AgentPanel() {
 
       <div className="agent-input-area">
         <div className="agent-input-toolbar">
-          <button className="input-tool-btn" title="附加文件" onClick={() => {
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.multiple = true;
-            input.onchange = (ev: any) => {
-              const files = Array.from(ev.target?.files || []) as File[];
-              if (files.length > 0) {
-                void addPendingFiles(files, 'file');
-              }
-            };
-            input.click();
-          }}>📎</button>
-          <button className="input-tool-btn" title="附加图片" onClick={() => {
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.accept = 'image/*';
-            input.multiple = true;
-            input.onchange = (ev: any) => {
-              const files = Array.from(ev.target?.files || []) as File[];
-              if (files.length > 0) {
-                void addPendingFiles(files, 'image');
-              }
-            };
-            input.click();
-          }}>🖼</button>
+          {/* ★ C3（M7 第七轮反馈#13）：原「附加文件 📎 + 附加图片 🖼」两按钮收敛成一个「加号小窗」（参考 Codex）。
+              点开弹小菜单：上传附件（合并文件+图片，accept 放宽）/ 提及@（打开 @ 引用面板）/ 选择工作流（直进工作流二级）。
+              所有原上传/附件链路（addPendingFiles）保留，只收敛入口 UI。 */}
+          <div className="add-menu-wrap" ref={addMenuWrapRef}>
+            <button
+              className={`input-tool-btn add-menu-trigger${addMenuOpen ? ' active' : ''}`}
+              title="添加内容"
+              onClick={() => setAddMenuOpen(o => !o)}
+            >
+              <Plus size={16} />
+            </button>
+            {addMenuOpen && (
+              <div className="add-menu" role="menu">
+                <button className="add-menu-item" role="menuitem" onClick={() => {
+                  setAddMenuOpen(false);
+                  // 上传附件：合并原「文件 + 图片」入口，accept 放宽到全部；kind='file' 让 getAttachmentKind 自动识别图片/文档。
+                  const input = document.createElement('input');
+                  input.type = 'file';
+                  input.multiple = true;
+                  input.onchange = (ev: any) => {
+                    const files = Array.from(ev.target?.files || []) as File[];
+                    if (files.length > 0) void addPendingFiles(files, 'file');
+                  };
+                  input.click();
+                }}>
+                  <Paperclip size={14} /> <span>上传附件</span>
+                </button>
+                <button className="add-menu-item" role="menuitem" onClick={() => {
+                  setAddMenuOpen(false);
+                  openAtMenu(); // 打开一级 @ 引用面板（文件/对话/工作流/设置/MCP/终端）
+                }}>
+                  <AtSign size={14} /> <span>提及 @</span>
+                </button>
+                <button className="add-menu-item" role="menuitem" onClick={() => {
+                  setAddMenuOpen(false);
+                  openAtMenu('workflow'); // 直接进入工作流选择二级
+                }}>
+                  <Workflow size={14} /> <span>选择工作流</span>
+                </button>
+              </div>
+            )}
+          </div>
           <div style={{ flex: 1 }} />
           <button
             className={`mode-switch-btn ${mode === 'fast' ? 'fast' : 'planning'}`}
@@ -2501,7 +2535,7 @@ export function AgentPanel() {
           <RichTextInput
             ref={richRef}
             className="agent-input"
-            placeholder={!hasApiKey ? '请先配置 API Key...' : !hasModel ? '请先选择模型...' : '输入消息... (Ctrl+Enter 发送；@ 引用文件/对话/工作流/设置/MCP/终端，/ 命令)'}
+            placeholder={!hasApiKey ? '请先配置 API Key...' : !hasModel ? '请先选择模型...' : `输入消息... (${sendKeyMode === 'enter' ? 'Enter 发送 / Shift+Enter 换行' : 'Ctrl+Enter 发送 / Enter 换行'}；@ 引用文件/对话/工作流/设置/MCP/终端，/ 命令)`}
             onContentChange={() => { setCanSend(!richRef.current?.isEmpty()); refreshMenu(); }}
             onEditorKeyDown={handleEditorKeyDown}
             onPasteFiles={(files) => { void addPendingFiles(files, 'image'); }}

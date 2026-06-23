@@ -15,6 +15,7 @@ import { useAppDispatch } from '@/store/hooks';
 import { setSidebarVisible } from '@/store/slices/layout';
 import { setActiveView } from '@/store/slices/sidebar';
 import type { CompletionItem } from '@/services/inputCommands/types';
+import type { SendKeyMode } from '@/store/slices/settings';
 import type { RichTextInputHandle, AtType, AtTrigger } from '@/services/inputCommands/richInput/types';
 import { AT_TYPE_ENTRIES, fetchTypeItems } from '@/services/inputCommands/atProviders';
 import { detectSlashTrigger } from '@/services/inputCommands/richInput/atTrigger';
@@ -41,8 +42,15 @@ interface UseAtMentionOptions {
   richRef: RefObject<RichTextInputHandle | null>;
   /** Ctrl+Enter（底部）或 Enter（编辑框）触发的提交回调（发送 / 保存）。 */
   onSubmit: () => void;
-  /** true=单 Enter 提交（编辑框）；false（默认）=Ctrl+Enter 提交（底部，Enter 留作换行）。 */
+  /** true=单 Enter 提交（编辑框，恒 Enter 保存）；false（默认）=由 sendKeyMode 决定底部输入框提交键。 */
   submitOnPlainEnter?: boolean;
+  /**
+   * ★ C1（M7 第七轮反馈#6）：底部主输入框的发送键模式（仅当 submitOnPlainEnter 为 false 时生效）。
+   *   'enter'     = plain Enter 发送 / Shift+Enter 换行。
+   *   'ctrlEnter' = Ctrl 或 Cmd+Enter 发送 / Enter 换行（旧默认行为）。
+   *   不传时回退 'ctrlEnter'，与历史行为一致（向后兼容编辑框外的其它调用方）。
+   */
+  sendKeyMode?: SendKeyMode;
   /** 插/删 token 等程序化改动后回调（父组件据此更新 canSend 等派生态；onContentChange 不会被程序化改动触发）。 */
   onAfterMutate?: () => void;
 }
@@ -56,9 +64,11 @@ interface UseAtMentionResult {
   refreshMenu: () => void;
   /** 关闭菜单（统一收口）。 */
   closeMenu: () => void;
+  /** ★ C3：程序化打开 @ 菜单（加号小窗用）。省略 type=一级类型菜单；给 type=直接进该类型二级（如 'workflow'）。 */
+  openAtMenu: (type?: AtType) => void;
 }
 
-export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, onAfterMutate }: UseAtMentionOptions): UseAtMentionResult {
+export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, sendKeyMode = 'ctrlEnter', onAfterMutate }: UseAtMentionOptions): UseAtMentionResult {
   const dispatch = useAppDispatch();
   const [menu, setMenu] = useState<MenuState>(INITIAL_MENU);
   const atRequestSeqRef = useRef(0);
@@ -142,6 +152,39 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, on
     setMenu(m => ({ ...m, mode: 'at', level: 'item', selectedType: type, query: '', items: [], activeIndex: 0, loading: true }));
   }, []);
 
+  /**
+   * ★ C3（M7 第七轮反馈#13）：程序化打开 @ 菜单——供「加号小窗」的「提及@ / 选择工作流」菜单项调用。
+   *   做法：在输入框光标处插入一个真实 '@' 字符（execCommand insertText，与 RichTextInput 既有键入口径一致），
+   *   focus 后用 getAtTrigger() 探测该触发，直接把 menu.trigger 锚到这个 @，再按需进二级。
+   *   插真实 '@' 是关键——applyTokenCompletion 选候选时 getAtTrigger()/menu.trigger 才有锚点，能正确删 '@' 段并插 atomic token。
+   *   ① type 省略 → 停在一级类型菜单（等价手敲 @）；② type='workflow' 等 → 直接跳该类型二级（一步进工作流选择）。
+   */
+  const openAtMenu = useCallback((type?: AtType) => {
+    const el = richRef.current?.getElement();
+    if (!el) return;
+    el.focus();
+    // 与 RichTextInput.handlePaste 同口径：用 execCommand 在光标处插字符（保持 contenteditable 一致行为）。
+    document.execCommand('insertText', false, '@');
+    onAfterMutate?.();
+    // 探测刚插入的 @ 触发；探测不到（极端情况）就回退 refreshMenu 走常规路径。
+    const trigger = richRef.current?.getAtTrigger() ?? null;
+    if (!trigger) { refreshMenu(); return; }
+    if (atConvCacheRef.current === null && !atConvLoadingRef.current) {
+      atConvLoadingRef.current = true;
+      void listConversationSummaries({})
+        .then(list => setAtConvCache(list))
+        .catch(() => setAtConvCache([]))
+        .finally(() => { atConvLoadingRef.current = false; });
+    }
+    if (type) {
+      // 直接进指定类型二级（二级候选由「query/类型变化」effect 触发 fetchSecondLevel 加载）。
+      setMenu(m => ({ ...m, open: true, mode: 'at', level: 'item', selectedType: type, query: '', trigger, items: [], activeIndex: 0, loading: true }));
+    } else {
+      // 停在一级类型菜单。
+      setMenu(m => ({ ...m, open: true, mode: 'at', level: 'type', selectedType: null, query: '', trigger, items: [], activeIndex: 0, loading: false }));
+    }
+  }, [richRef, onAfterMutate, refreshMenu]);
+
   const applyTokenCompletion = useCallback((item: CompletionItem) => {
     const meta = (item.meta ?? {}) as Record<string, unknown>;
     if (menu.mode === 'slash') {
@@ -177,11 +220,16 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, on
   }, [menu.mode, menu.selectedType, menu.trigger, dispatch, closeMenu, richRef, onAfterMutate]);
 
   const handleEditorKeyDown = useCallback((e: KeyboardEvent): boolean => {
-    // 提交键：底部 Ctrl+Enter（即便菜单开也提交）；编辑框 Enter（仅菜单关时提交，菜单开让位选候选）。
-    const isSubmit = submitOnPlainEnter
-      ? (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey)
-      : (e.key === 'Enter' && e.ctrlKey);
-    if (isSubmit && (!submitOnPlainEnter || !menu.open)) {
+    // ★ C1（M7 第七轮反馈#6）：提交键判定分两类——
+    //   ① plain-Enter 提交：编辑框（submitOnPlainEnter）或底部 'enter' 模式。plain Enter（无修饰键）触发，
+    //      受菜单守卫——菜单开时让位给「选候选」，仅菜单关才提交。Shift+Enter 永远换行（不进此分支）。
+    //   ② ctrl/cmd-Enter 提交：底部 'ctrlEnter' 模式（默认）。Ctrl 或 Cmd+Enter 触发，即便菜单开也直接提交。
+    const plainEnterSends = submitOnPlainEnter || sendKeyMode === 'enter';
+    const ctrlEnterSends = !submitOnPlainEnter && sendKeyMode === 'ctrlEnter';
+    const isPlainEnterSubmit = plainEnterSends && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey;
+    const isCtrlEnterSubmit = ctrlEnterSends && e.key === 'Enter' && (e.ctrlKey || e.metaKey);
+    // plain-Enter 提交让位菜单（菜单开不提交）；ctrl/cmd-Enter 提交不受菜单影响。
+    if (isCtrlEnterSubmit || (isPlainEnterSubmit && !menu.open)) {
       e.preventDefault();
       onSubmit();
       return true;
@@ -220,7 +268,7 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, on
       return true;
     }
     return false;
-  }, [submitOnPlainEnter, menu.open, menu.mode, menu.level, menu.items, menu.activeIndex, applyTypeSelect, applyTokenCompletion, closeMenu, onSubmit]);
+  }, [submitOnPlainEnter, sendKeyMode, menu.open, menu.mode, menu.level, menu.items, menu.activeIndex, applyTypeSelect, applyTokenCompletion, closeMenu, onSubmit]);
 
   const menuElement = (
     <AtTypeMenu
@@ -238,5 +286,5 @@ export function useAtMention({ richRef, onSubmit, submitOnPlainEnter = false, on
     />
   );
 
-  return { menuElement, handleEditorKeyDown, refreshMenu, closeMenu };
+  return { menuElement, handleEditorKeyDown, refreshMenu, closeMenu, openAtMenu };
 }
