@@ -12,14 +12,14 @@
 | 3 | 标题变迁历史浮层太透、文字和底重合 | Stage B | ✅ 已修（0.97 不透+独立模糊+阴影） |
 | 4 | MCP web-fetcher/sandbox AI 看不到、无系统引导 | Stage A | 🔧 子代理修中（事件驱动注册+引导） |
 | 5 | AI 消息右下角也要操作按钮（长消息翻上去麻烦） | Stage B | ✅ 已修（底部按钮+handler 轮锚映射） |
-| 6 | Enter 发送 / Ctrl+Enter 换行 设置里可切换 | Stage C | ⬜ |
+| 6 | Enter 发送 / Ctrl+Enter 换行 设置里可切换 | Stage C | ✅ 已修（sendKeyMode 开关，待重启验证） |
 | 7 | 原生沙盒 + 子代理 worktree/分支机制 | Stage E | ⬜（worktree 有、子代理自动隔离+原生沙盒缺） |
 | 8 | 对话 ID 注入 + 顶部栏右键菜单 + 对话状态颜色 + 一批对话操作 | Stage C/D | ⬜（大功能） |
 | 9 | 原生 browser-use（仿 Codex Chrome 插件） | Stage G | ⬜ 不急 |
 | 10 | 切 Plan/Context 再切回 Chat 滚动位置丢失 | Stage B | ✅ 已修（scrollTop 记录/恢复） |
 | 11 | 用户长消息可展开收叠（仿 CC） | Stage B | ✅ 已修（折叠+mask 渐隐+展开） |
 | 12 | 预压缩（主人撤销，不成立） | — | ✅ 撤销 |
-| 13 | 上传文件/图片冗余 → 统一加号小工具窗（附件/提及/工作流） | Stage C | ⬜ |
+| 13 | 上传文件/图片冗余 → 统一加号小工具窗（附件/提及/工作流） | Stage C | ✅ 已修（加号 add-menu 三项，CDP 验证） |
 
 ## 二、Stage 划分与优先级
 
@@ -34,9 +34,9 @@
 - B4 #11 用户长消息可展开收叠【✅ 已修：scrollHeight>200 测超高 + max-height 折叠 + mask-image 渐隐 + 展开/收起】
 
 ### Stage C — 交互/设置增强（P1）
-- C1 #6 Enter/Ctrl+Enter 发送换行 设置开关（agentSettings + handleKeyDown 分支 + SettingsPanel）
+- C1 #6 Enter/Ctrl+Enter 发送换行 设置开关【✅ 已修：settings.sendKeyMode（enter/ctrlEnter）+ useAtMention 分支 + SettingsPanel 下拉；保留 IME 守卫；默认 enter（待主人定默认方向）】
 - C2 #8a 当前对话 ID 注入系统提示【✅ 已修：systemPrompt 加 conversation_meta 段 + agentLoop 传 conversationId，草稿态标注未持久化；对话内 ID 恒定不破坏 prompt cache】
-- C3 #13 上传入口统一：加号点击 → 小工具窗（上传附件 / 提及@ / 选择工作流），替代现冗余的上传文件+上传图片两按钮
+- C3 #13 上传入口统一：加号 add-menu 小窗（上传附件 / 提及@ / 选择工作流）【✅ 已修：替代上传文件+上传图片两按钮；CDP 验证三项齐全】
 
 ### Stage D — 对话管理大功能（P2，#8 核心）
 - D1 **对话状态颜色系统**：未查看完=绿 / 生成中=蓝 / 出错=红 / retry等异常未失败=黄；**闪烁**（非常驻，避免主题色撞色）。需 conversation slice 加 status 字段 + 左栏/顶部栏渲染状态点。
@@ -68,9 +68,11 @@
 - browser-use（Stage G）何时启动
 
 ## 四、当前进展（实时）
-- ✅ Stage A：A1 #4 MCP 事件驱动注册（待重启 CDP 验证 AI 能看到 mcp__*）、A2 #1 开场白归属
-- ✅ Stage B：B1 #3 浮层、B2 #10 切页滚动、B3 #5 AI 消息底部按钮、B4 #11 长消息折叠（双编译 EXIT 0）
-- ✅ Stage C：C2 #8a 对话 ID 注入（双编译 EXIT 0）
-- ⬜ Stage C：C1 #6 Enter/Ctrl+Enter 开关、C3 #13 上传统一加号小窗
-- ⬜ Stage D/E/F/G：待主人拍板范围
-- 🔬 下一步：重启 dev server（带 CDP 9222）真机验证 A1 MCP + B2/B3/B4 + C2
+- ✅ Stage A/B/C 确定项全部完成 + 双编译 EXIT 0 + 已 commit/push（批1 `168217d`、批2 `5604322`）
+  - A1 #4 MCP 事件驱动注册、A2 #1 开场白归属
+  - B1 #3 浮层、B2 #10 切页滚动、B3 #5 AI 消息底部按钮、B4 #11 长消息折叠
+  - C1 #6 发送键模式、C2 #8a 对话 ID 注入、C3 #13 加号小窗
+- 🔬 真机验证（CDP 连当前 electron，HMR 态）：
+  - ✅ 已验证生效：B3（73 处底部按钮）、B4（21 处折叠）、C3（加号 add-menu「上传附件/提及@/选择工作流」三项齐全）
+  - ⏳ 需重启 electron 验证（HMR 不重置 store state / 主进程）：A1 MCP 工具注册（主人最关心，之前踩过"伪成功"坑）、C1 sendKeyMode 默认值与 keydown、B2 切页滚动
+- ⬜ Stage D/E/F/G：待主人拍板范围（对话状态系统 / worktree+原生沙盒 / search_web / browser-use）
