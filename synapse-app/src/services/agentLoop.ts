@@ -605,6 +605,19 @@ function hardTruncateToTokens(text: string, maxTokens: number): string {
   return cut + marker;
 }
 
+/**
+ * ★ #5/#12 修复：全局【正在运行】的 AgentLoop 登记表。
+ * 背景：loop 工厂 useEffect 在 run 进行中若被重建（已知触发：settings.safety 变更），其 cleanup 故意不停
+ *   运行中的旧 loop（保 #3「发消息无回复」修复），旧 loop 失联但仍在写同一对话 =「幽灵 run」；而 handleStop
+ *   只 stop agentLoopRef.current（新 loop），停不到幽灵 → 表现为 #5 双流且中断不了 + #12 中止卡 UI。
+ * 用途：① run() 期间登记本实例、finally/stop 注销 → handleStop 遍历本表 stop【全部】running loop（含幽灵），
+ *       从根上杜绝「停不掉的并发 run」；② dev 下挂到 window.__SYNAPSE_AGENTLOOPS__ 供 CDP 数实例验证。
+ */
+export const runningAgentLoops = new Set<AgentLoop>();
+if (typeof window !== 'undefined') {
+  (window as any).__SYNAPSE_AGENTLOOPS__ = runningAgentLoops;
+}
+
 export class AgentLoop {
   private client: AIClient;
   private tools: ToolDefinition[] = [];
@@ -704,6 +717,8 @@ export class AgentLoop {
     // 而非傻等 60s timeout。遍历集合 abort 全部在途 controller 后整体 clear（已 abort 的不再复用）。
     for (const controller of this.compressControllers) controller.abort();
     this.compressControllers.clear();
+    // ★ #5/#12 修复：从全局 running 表注销（handleStop 遍历的是本表副本，stop 内 delete 安全）。
+    runningAgentLoops.delete(this);
   }
 
   async run(userMessage: string, opts?: {
@@ -739,6 +754,8 @@ export class AgentLoop {
       return;
     }
     this.running = true;
+    // ★ #5/#12 修复：登记进全局 running 表，让 handleStop 能遍历 stop【全部】running loop（含失联的幽灵 loop）。
+    runningAgentLoops.add(this);
     // ★ R5 修复（问题1）：进入即点亮 isStreaming，让 handleSend/autosave 的 isStreaming 闸门【覆盖整个压缩窗口】，
     // 不再留「压缩期 isStreaming=false 被当空闲」的重入缝隙。下方 while 循环每轮也会 dispatch(true)（幂等无害）。
     store.dispatch(setStreaming(true));
@@ -1694,6 +1711,8 @@ export class AgentLoop {
       store.dispatch(clearStreamingContent());
       store.dispatch(setStreaming(false));
       this.running = false;
+      // ★ #5/#12 修复：run 结束（正常/break/异常）从全局 running 表注销本实例。
+      runningAgentLoops.delete(this);
     }
   }
 

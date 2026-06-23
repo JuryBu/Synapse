@@ -25,7 +25,7 @@ import { TaskBoundaryCard, type BoundaryFile } from '@/components/chat/TaskBound
 import { resolveEditorType } from '@/services/editorFileTypes';
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fragment, type ReactNode } from 'react';
 import { AIClient } from '@/services/aiClient';
-import { AgentLoop } from '@/services/agentLoop';
+import { AgentLoop, runningAgentLoops } from '@/services/agentLoop';
 import { bpcScheduler } from '@/services/bpcScheduler';
 import { CompressionRing } from './CompressionRing';
 import { BpcOverridePopover } from './BpcOverridePopover';
@@ -731,7 +731,30 @@ export function AgentPanel() {
         setApprovalReq({ toolName, level, argsText, originLabel: origin, message });
       });
     });
-    // P1-3: 同步安全设置
+    // ★ #5/#12 修复：安全设置同步已抽到下方独立 useEffect([settings.safety])，本工厂不再依赖 settings.safety，
+    //   杜绝「run 进行中改安全设置 → 工厂重建 loop → 旧 running loop 失联成幽灵 run」（#5 双流 / #12 中止卡）。
+    agentLoopRef.current = loop;
+    // ★ M5-BPC-4：cleanup 时解绑（detachLoop 仅当传入的是当前持有 loop 才解绑 + 丢在途 BPC，防并发重建误伤新 loop）。
+    return () => {
+      cancelled = true;
+      // ★ P0 根因修复（发不出消息）：本 effect 现仅依赖 [aiClient]，若在 run 进行中触发重建，
+      //   cleanup 绝不能 stop 正在跑的 loop——否则把刚发起的 run 自我中止（this.running=false → while 跳过 →
+      //   加了 user 消息却无 AI 回复、不报错）。运行中的旧 loop 带发起时的 client 快照跑完（与 #2「设置变不打断
+      //   当前流」一致），新 loop 已接管 agentLoopRef、下一轮生效。仅空闲 loop 才 stop。
+      //   （aiClient useMemo 的 isRunning 守卫已从源头杜绝运行中重建；settings.safety 已移出依赖、不再触发重建。
+      //    #5/#12 双保险：即便仍冒出失联幽灵 loop，它已登记进 runningAgentLoops，handleStop 会遍历 stop 全部。）
+      if (!loop.isRunning) loop.stop();
+      bpcScheduler.detachLoop(loop);
+      // 权限弹窗：loop/组件重建时若有未决审批，拒绝并关闭，防 Promise 悬挂。
+      if (approvalResolveRef.current) { approvalResolveRef.current(false); approvalResolveRef.current = null; }
+      setApprovalReq(null);
+    };
+  }, [aiClient]);
+
+  // ★ #5/#12 修复：安全设置同步【独立 effect】，不再触发 AgentLoop 工厂重建。
+  //   AgentLoop 通过 toolRegistry 动态读 autoApprove（execute 时实时取），改安全设置只需热更新 toolRegistry，
+  //   无需重建 loop；这样 run 进行中改安全设置不会再产生失联的幽灵 run（#5 双流 / #12 中止卡的根因之一）。
+  useEffect(() => {
     const safety = settings.safety;
     if (safety) {
       toolRegistry.updateAutoApprove({
@@ -741,22 +764,7 @@ export function AgentPanel() {
         all: safety.autoApproveAll ?? false,
       });
     }
-    agentLoopRef.current = loop;
-    // ★ M5-BPC-4：cleanup 时解绑（detachLoop 仅当传入的是当前持有 loop 才解绑 + 丢在途 BPC，防并发重建误伤新 loop）。
-    return () => {
-      cancelled = true;
-      // ★ P0 根因修复（发不出消息）：本 effect 依赖 [aiClient, settings.safety]，若在 run 进行中触发重建，
-      //   cleanup 绝不能 stop 正在跑的 loop——否则把刚发起的 run 自我中止（this.running=false → while 跳过 →
-      //   加了 user 消息却无 AI 回复、不报错）。运行中的旧 loop 带发起时的 client 快照跑完（与 #2「设置变不打断
-      //   当前流」一致），新 loop 已接管 agentLoopRef、下一轮生效。仅空闲 loop 才 stop。
-      //   （上方 aiClient useMemo 的 isRunning 守卫已从源头杜绝运行中重建；此处为双保险，亦覆盖 settings.safety 变更路径。）
-      if (!loop.isRunning) loop.stop();
-      bpcScheduler.detachLoop(loop);
-      // 权限弹窗：loop/组件重建时若有未决审批，拒绝并关闭，防 Promise 悬挂。
-      if (approvalResolveRef.current) { approvalResolveRef.current(false); approvalResolveRef.current = null; }
-      setApprovalReq(null);
-    };
-  }, [aiClient, settings.safety]);
+  }, [settings.safety]);
 
   // ★ M6 验收 bug3：滚动容器监听——记录用户是否贴底（距底 < 60px 视为贴底）。用户主动上滚 → isAtBottom=false。
   const handleMessagesScroll = useCallback(() => {
@@ -1677,10 +1685,16 @@ export function AgentPanel() {
     //   - agentOrchestrator.abortAll()：abort workflowAbortController（让 runWorkflow 在下个节点前 return aborted）
     //       + 杀在途子代理；无运行工作流时 abortAll 内部全是 optional-chain/空集合遍历，安全 no-op。
     //   abortAll 后 runWorkflow 返回 aborted 结果，照常走 outcome.kind==='ran' 插「无法推进」汇总，闭环正常。
+    // ★ #5/#12 修复：停【所有】正在跑的 loop（含因工厂重建而失联的幽灵 loop），不只当前 ref。
+    //   遍历登记表的【副本】（stop() 内会从表中 delete，避免迭代时改集合漏停）；再兜底停一次当前 ref。
+    [...runningAgentLoops].forEach(loop => loop.stop());
     agentLoopRef.current?.stop();
     if (isWorkflowRunningRef.current) {
       agentOrchestrator.abortAll();
     }
+    // ★ #12 修复：立即幂等复位流式态——停掉所有 loop 后 UI 不必等各 loop 的 finally 才解卡（尤其有正在
+    //   await 长工具的 loop，其 finally 要等工具返回才跑；这里先复位让「中止中」UI 立刻恢复可用）。
+    dispatch(setStreaming(false));
     // ★ M4-6-S5 /loop 中途 Stop：循环驱动器请求中断——置 aborted 后循环在下个检查点退出，
     //   正在跑的那一轮由上面 agentLoopRef.current.stop() 中止。无运行循环时 stop() 内部 no-op，安全。
     loopRunner.stop();
