@@ -23,7 +23,7 @@ import { MessageBubble } from '@/components/chat/MessageBubble';
 import { ApprovalDialog, type ApprovalRequest } from '@/components/ui/ApprovalDialog';
 import { TaskBoundaryCard, type BoundaryFile } from '@/components/chat/TaskBoundaryCard';
 import { resolveEditorType } from '@/services/editorFileTypes';
-import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, Fragment } from 'react';
 import { AIClient } from '@/services/aiClient';
 import { AgentLoop } from '@/services/agentLoop';
 import { bpcScheduler } from '@/services/bpcScheduler';
@@ -100,6 +100,18 @@ function isEmptyAssistantMessage(msg: any, hideSystemTools: boolean): boolean {
   if (msg.artifacts?.length) return false;
   if (msg.attachments?.length) return false;
   return true;
+}
+
+// ★ B3（反馈#5）：AI 消息底部也挂重试/回溯按钮，但这俩按「轮」对齐、语义锚定在 user 消息上。
+//   传入 AI/tool 消息 id 时向前回看找最近的 user 消息 id 作为锚；user id 原样返回；找不到返回原 id（兜底）。
+function resolveRoundUserAnchor(msgs: any[], msgId: string): string {
+  const idx = msgs.findIndex((m) => m.id === msgId);
+  if (idx < 0) return msgId;
+  if (msgs[idx]?.role === 'user') return msgId;
+  for (let i = idx; i >= 0; i--) {
+    if (msgs[i]?.role === 'user') return msgs[i].id;
+  }
+  return msgId;
 }
 
 const MAX_IMAGE_PAYLOAD_BYTES = 8 * 1024 * 1024;
@@ -395,6 +407,8 @@ export function AgentPanel() {
   //   避免生成时用户上滚被强行拽回（滚动争抢）。初值 true（新对话/首次进入默认贴底）。
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
+  // ★ B2（反馈#10）：记录 chat tab 的滚动位置——切到 Plan/Context 再切回 chat 时恢复，避免回到顶部。
+  const chatScrollTopRef = useRef(0);
   // ★ M6：inputRef 移除（textarea→RichTextInput，命令式句柄用 richRef）。
   const agentLoopRef = useRef<AgentLoop | null>(null);
   // ★ 权限弹窗前端化（诊断#4）：审批浮层状态 + pending Promise resolve（替代原生 window.confirm）。
@@ -556,7 +570,9 @@ export function AgentPanel() {
     const el = messagesContainerRef.current;
     if (!el) return;
     isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-  }, []);
+    // ★ B2（反馈#10）：chat tab 滚动时持续记录位置，切走再切回时据此恢复。
+    if (activeAgentTab === 'chat') chatScrollTopRef.current = el.scrollTop;
+  }, [activeAgentTab]);
 
   // Auto-scroll to bottom：仅当用户已贴底才自动滚（不抢用户上滚）。
   // ★ M6 验收：直接设 scrollTop（而非 scrollIntoView）——后者会滚动所有可滚动祖先 + 触发 smooth 动画，
@@ -566,6 +582,16 @@ export function AgentPanel() {
     const el = messagesContainerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, isStreaming]);
+
+  // ★ B2（反馈#10）：切回 chat tab 时恢复上次滚动位置（从 Plan/Context 切回不再跳顶）。
+  //   贴底时优先滚到底（与自动滚底口径一致），否则恢复记录的 scrollTop。useLayoutEffect 同步设置避免闪一帧顶部。
+  useLayoutEffect(() => {
+    if (activeAgentTab !== 'chat') return;
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    if (isAtBottomRef.current) el.scrollTop = el.scrollHeight;
+    else el.scrollTop = chatScrollTopRef.current;
+  }, [activeAgentTab]);
 
   useEffect(() => {
     const focusInput = (event: Event) => {
@@ -1373,8 +1399,10 @@ export function AgentPanel() {
   const handleRetry = useCallback((msgId: string) => {
     if (isStreaming) return;
     const msgs = conversationRef.current.messages;  // ★ 性能 3-A1：读 ref 稳定回调引用
+    // ★ B3（反馈#5）：底部按钮可挂 AI/tool 消息——把锚映射到所在轮的 user 消息，重试=重新生成该轮回复。
+    const anchorId = resolveRoundUserAnchor(msgs, msgId);
     // ① 共享 helper 按轮截断（before-user 模式：保留到该 user 段为止、丢弃本轮 model 段）。
-    const cut: RoundTruncationResult = computeRoundTruncation(msgs, msgId, 'before-user');
+    const cut: RoundTruncationResult = computeRoundTruncation(msgs, anchorId, 'before-user');
     if (!cut.ok || cut.lastKeptIndex < 0) return;
 
     // ② 被丢弃的本轮 model 段里的文件变更按快照回退（与回溯一致；removedMessages 即本轮 model 段全部）。
@@ -1407,7 +1435,7 @@ export function AgentPanel() {
 
       // ⑥ 自动重发该 user（不填输入框）：skipUserMessage=true → 不新增 user 消息，直接用 store 现有历史发起请求。
       if (agentLoopRef.current) {
-        const retryUserMsg = msgs.find((m: any) => m.id === msgId);
+        const retryUserMsg = msgs.find((m: any) => m.id === anchorId);
         setTimeout(() => {
           agentLoopRef.current?.run((retryUserMsg as any)?.content ?? '', { skipUserMessage: true }).catch((err: any) => {
             dispatch(addNotification({ type: 'error', title: 'AI 请求失败', message: err.message }));
@@ -1431,9 +1459,11 @@ export function AgentPanel() {
   //   重试保留该 user 并自动重发。用 'undo' 截断模式（= branch-user 的截断口径，但原地裁剪当前对话）。
   const handleUndoToMessage = useCallback((msgId: string) => {
     const msgs = conversationRef.current.messages;  // ★ 性能 3-A1：读 ref 稳定回调引用
+    // ★ B3（反馈#5）：底部按钮可挂 AI/tool 消息——映射到所在轮的 user 消息，回溯=回到这条所在轮之前。
+    const anchorId = resolveRoundUserAnchor(msgs, msgId);
     void (async () => {
       // ① 共享 helper 按轮截断（undo 模式：点 user → 保留到该 user 所在轮之前、该轮起全部丢弃，绝不轮中间切）。
-      const cut: RoundTruncationResult = computeRoundTruncation(msgs, msgId, 'undo');
+      const cut: RoundTruncationResult = computeRoundTruncation(msgs, anchorId, 'undo');
       if (!cut.ok) return;
 
       // ② 被截掉范围内的文件变更按快照回退（与旧逻辑一致，但范围改为「轮取整后的 removedMessages」）。

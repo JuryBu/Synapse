@@ -741,10 +741,20 @@ export class AgentLoop {
       openFiles.push({ path: '', name: `…等 ${fileTabs.length - OPEN_FILES_LIMIT} 个文件未列出`, type: '' });
     }
 
+    // ★ 反馈#8a 当前对话 ID 注入：每轮从 store 取 conversation.id 注入 system prompt，让 AI 引用本对话 /
+    //   写记忆来源时无需先调工具探测。草稿态（id 为 null）回退 AUTOSAVE_ID 并标注「未持久化草稿」。
+    //   conversationId 同一对话内恒定，进 system prompt 不引入对话内 cache 前缀漂移（cache 友好）。
+    const rawConversationId = (rootState as any).conversation?.id as string | null;
+    const conversationId = rawConversationId || AUTOSAVE_ID;
+    const conversationIsDraft = !rawConversationId;
+
     const systemPrompt = promptBuilder.build({
       workspaceName: workspaceName || undefined,
       mode: currentMode,
       promptInjection,
+      // ★ 反馈#8a：当前对话 ID（草稿态走 AUTOSAVE_ID + draft 标注）。
+      conversationId,
+      conversationIsDraft,
       // ★ M4-6-S4 /goal：每轮读 conversation.goal 注入 <current_goal>，使设目标后 AI 每轮自动对齐。
       //   goal 为空/未设时 build 跳过该段（无副作用）。
       goal: (rootState as any).conversation?.goal || undefined,

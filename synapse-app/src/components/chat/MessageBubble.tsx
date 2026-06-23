@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, FileText, ExternalLink, ListChecks, Undo2, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
+import { Copy, Check, User, Bot, Wrench, MessageSquare, Pencil, RefreshCw, Trash2, FilePlus, FilePenLine, FileX2, FileText, ExternalLink, ListChecks, Undo2, GitBranch, ChevronDown, ChevronUp, ChevronRight } from 'lucide-react';
 import { memo, useDeferredValue, useState, useCallback, useEffect, useRef } from 'react';
 import { ToolCallCard } from './ToolCallCard';
 import { WorkflowCard } from './WorkflowCard';
@@ -167,6 +167,11 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
   const [workflowSummaryOpen, setWorkflowSummaryOpen] = useState(false);
   // ★ M5-1 压缩归一：原 role==='system' 压缩摘要卡片的折叠 state 已删除（不再渲染 system 摘要卡片）。
   const [now, setNow] = useState(() => Date.now());
+  // ★ B4（反馈#11）：user 长消息折叠/展开（仿 CC）。expanded=用户已点「展开」；overflow=内容实测超过折叠阈值才需展开按钮。
+  //   用 ref 测内容容器 scrollHeight 判断是否超高——超阈值才显「展开」，短消息不显。
+  const [userMsgExpanded, setUserMsgExpanded] = useState(false);
+  const [userMsgOverflow, setUserMsgOverflow] = useState(false);
+  const userMsgContentRef = useRef<HTMLDivElement>(null);
   // ★ C6：editRef(textarea) 移除，改 editRichRef(RichTextInput)。
   const live = isStreaming || streamState === 'pending' || streamState === 'streaming';
   // ★ M7 性能 D1：markdown 渲染用 deferredContent（滞后一拍的低优先级值）——把长尾 markdown 解析标记为
@@ -190,6 +195,16 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
   useEffect(() => {
     if (thinking?.collapsed !== undefined) setThinkingOpen(!thinking.collapsed);
   }, [thinking?.collapsed]);
+
+  // ★ B4：测 user 消息内容是否超过折叠阈值（与 CSS .message-text-collapsible 折叠态 max-height 同值）。
+  //   超高才显「展开」按钮；内容/编辑态变化后重测。editing 态不折叠（编辑框需完整展开）。
+  const USER_MSG_COLLAPSE_PX = 200;
+  useEffect(() => {
+    if (role !== 'user' || isEditing) { setUserMsgOverflow(false); return; }
+    const el = userMsgContentRef.current;
+    if (!el) return;
+    setUserMsgOverflow(el.scrollHeight > USER_MSG_COLLAPSE_PX + 4);
+  }, [role, isEditing, content, richTokens]);
 
   const handleStartEdit = useCallback(() => {
     setIsEditing(true);
@@ -471,17 +486,34 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
             ) : (
               // ★ M6 验收 bug6：已发 user 消息复用 buildRichParts 把 @ 占位还原成只读高亮 chip（与编辑态口径一致）。
               //   只读：不加 contentEditable/data-token（避免被任何编辑逻辑误判）；旧消息无 richTokens 时降级为整段纯文本。
-              <p className="message-text">
-                {buildRichParts(content, richTokens).map((part, i) =>
-                  typeof part === 'string'
-                    ? part
-                    : (
-                      <span key={i} className={`rt-token rt-token-${part.type} rt-token-readonly`}>
-                        {'@' + (part.displayLabel ?? part.value)}
-                      </span>
-                    )
+              // ★ B4（反馈#11）：超阈值的 user 长消息默认折叠（CSS max-height + 渐隐遮罩），点「展开」看全文。
+              //   ref 挂在内容 <p> 上测 scrollHeight；折叠态加 .is-collapsed，遮罩与展开按钮仅在 userMsgOverflow 时出现。
+              <div className="message-text-collapsible">
+                <p
+                  ref={userMsgContentRef}
+                  className={`message-text${userMsgOverflow && !userMsgExpanded ? ' is-collapsed' : ''}`}
+                >
+                  {buildRichParts(content, richTokens).map((part, i) =>
+                    typeof part === 'string'
+                      ? part
+                      : (
+                        <span key={i} className={`rt-token rt-token-${part.type} rt-token-readonly`}>
+                          {'@' + (part.displayLabel ?? part.value)}
+                        </span>
+                      )
+                  )}
+                </p>
+                {userMsgOverflow && (
+                  <button
+                    className="message-expand-btn"
+                    onClick={() => setUserMsgExpanded(v => !v)}
+                  >
+                    {userMsgExpanded
+                      ? <><ChevronUp size={13} />收起</>
+                      : <><ChevronDown size={13} />展开</>}
+                  </button>
                 )}
-              </p>
+              </div>
             )
           ) : workflowRunId ? (
             // ★ M3-3a：工作流汇总消息——实时四色卡片为主视图，纯文本汇总折叠为 fallback。
@@ -642,6 +674,37 @@ function MessageBubbleImpl({ id, role, content, timestamp, model, isStreaming, s
             {toolCalls.map((tc) => (
               <ToolCallCard key={tc.id} toolCall={tc} />
             ))}
+          </div>
+        )}
+
+        {/* ★ B3（反馈#5）：AI 消息右下角再放一份操作按钮（与顶部 .message-actions 同款回调），
+            读完长消息不必翻回顶部。仅 assistant、非流式时出现；hover 显隐由 .message:hover 控制。
+            复用现有回调，不新造逻辑：复制走 handleCopy；回溯/重试/分支/删除直接传本条 id。 */}
+        {!isUser && !isStreaming && (
+          <div className="message-actions message-actions-bottom">
+            <button className="message-action-btn" onClick={handleCopy} title="复制">
+              {copied ? <Check size={12} /> : <Copy size={12} />}
+            </button>
+            {onUndoToMessage && (
+              <button className="message-action-btn" onClick={() => onUndoToMessage(id)} title="回溯：清掉这条及之后">
+                <Undo2 size={12} />
+              </button>
+            )}
+            {onRetry && (
+              <button className="message-action-btn" onClick={() => onRetry(id)} title="重新生成回答">
+                <RefreshCw size={12} />
+              </button>
+            )}
+            {onBranch && (
+              <button className="message-action-btn" onClick={() => onBranch(id)} title="从此分支为新对话">
+                <GitBranch size={12} />
+              </button>
+            )}
+            {onDelete && (
+              <button className="message-action-btn danger" onClick={() => onDelete(id)} title="删除">
+                <Trash2 size={12} />
+              </button>
+            )}
           </div>
         )}
       </div>

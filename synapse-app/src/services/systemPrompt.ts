@@ -22,6 +22,15 @@ interface PromptContext {
   //   非空时 build 输出 <referenced_conversation> 段。这是【本轮临时附加上下文】（发送后即清），
   //   经 agentLoop.run 的 opts.injectedContext 透传至此——不污染可见对话流，也不重复落库。
   referencedContext?: string;
+  // ★ 反馈#8a 当前对话 ID 注入：把当前对话 ID 直接写进 system prompt，让 AI 引用本对话 / 写记忆来源时
+  //   无需先调 read_conversation(conversationId='') 探测。由 agentLoop.run 每轮从 store 取
+  //   conversation.id（草稿态 null 时回退 AUTOSAVE_ID 'autosave-current'）传入。
+  //   ★ prompt cache：conversationId 在【同一对话内恒定不变】，故进 system prompt 不会引入对话内的前缀漂移
+  //   （与 goal 同口径：低频/对话内稳定字段可安全进 apiMessages[0]）；仅跨对话才不同，本就不共享 cache 前缀。
+  conversationId?: string;
+  // ★ 反馈#8a：true 表示当前对话尚未持久化（id 为 null，走 AUTOSAVE_ID 草稿态）——渲染时附注「未持久化草稿」，
+  //   提示 AI 此 ID 为临时草稿标识，正式落库后会变更。
+  conversationIsDraft?: boolean;
   // ★ M4-5 审查 medium#2：原 openFiles / activeFilePath 字段已移除——<open_files> 不再由 build 注入 system prompt，
   //   改由 renderOpenFilesSection（导出函数）渲染、agentLoop 注入到 messages 末尾以保 cache 前缀稳定。
   promptInjection?: {
@@ -83,6 +92,17 @@ export class SystemPromptBuilder {
     if (injection.injectIdentity ?? true) {
       const identity = context.mode === 'fast' ? FAST_IDENTITY : PLAN_IDENTITY;
       sections.push(identity);
+    }
+
+    // ★ 反馈#8a 当前对话 ID 注入：紧跟 identity 放高位，让 AI 引用本对话 / 写记忆来源时直接用此 ID，
+    //   不必先调 read_conversation(conversationId='') 探测。用 injectContext gating（与 workspace/goal 同口径）。
+    //   ★ prompt cache：conversationId 同一对话内恒定，进 system prompt 不引入对话内前缀漂移（cache 友好）。
+    if ((injection.injectContext ?? true) && context.conversationId && context.conversationId.trim()) {
+      const draftNote = context.conversationIsDraft ? '（未持久化草稿，正式保存后此 ID 会变更）' : '';
+      sections.push(`<conversation_meta>
+当前对话 ID：${context.conversationId.trim()}${draftNote}
+引用本对话、记录记忆来源或调用需要 conversationId 的工具时可直接使用此 ID，无需调用工具查询。
+</conversation_meta>`);
     }
 
     // ★ M4-6-S4 /goal：当前对话目标段——紧跟 identity 放高位，让 AI 每轮都对齐用户设定的目标。

@@ -540,6 +540,51 @@
   background: rgba(239, 68, 68, 0.1);
 }
 
+/* ★ B3（反馈#5）：AI 消息右下角的底部操作按钮（与顶部 .message-actions 同款）。
+   一行、右对齐、hover 显隐（沿用 .message:hover .message-actions 规则）。
+   .message-actions 默认 margin-left:auto 在 message-header 里靠右；这里是独立块，
+   补 justify-content:flex-end 让整行按钮贴右，并加少量上间距与正文拉开。 */
+.message-actions-bottom {
+  justify-content: flex-end;
+  margin-top: 6px;
+  margin-left: 0;
+}
+
+/* ★ B4（反馈#11）：user 长消息折叠/展开容器（仿 CC）。
+   折叠态用 max-height 截断 + 底部渐隐遮罩；超阈值时才出现「展开」按钮。 */
+.message-text-collapsible {
+  position: relative;
+}
+
+/* 折叠态：max-height 截断 + 用 mask 让底部文字本身渐隐（不依赖背景色，
+   玻璃/透明背景下也不会露出一道色块——比纯色 ::after 遮罩更稳）。 */
+.message-text.is-collapsed {
+  max-height: 200px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent);
+}
+
+.message-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--syn-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--syn-transition-fast);
+}
+
+.message-expand-btn:hover {
+  color: var(--syn-primary-light);
+  background: var(--syn-bg-hover);
+}
+
 /* Inline Edit Area */
 .message-edit-area {
   display: flex;

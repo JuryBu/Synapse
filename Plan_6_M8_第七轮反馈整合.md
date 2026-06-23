@@ -11,13 +11,13 @@
 | 2 | 原生读 office/pdf 可用、效果极好 | — | ✅ 主人验收 |
 | 3 | 标题变迁历史浮层太透、文字和底重合 | Stage B | ✅ 已修（0.97 不透+独立模糊+阴影） |
 | 4 | MCP web-fetcher/sandbox AI 看不到、无系统引导 | Stage A | 🔧 子代理修中（事件驱动注册+引导） |
-| 5 | AI 消息右下角也要操作按钮（长消息翻上去麻烦） | Stage B | ⬜ |
+| 5 | AI 消息右下角也要操作按钮（长消息翻上去麻烦） | Stage B | ✅ 已修（底部按钮+handler 轮锚映射） |
 | 6 | Enter 发送 / Ctrl+Enter 换行 设置里可切换 | Stage C | ⬜ |
 | 7 | 原生沙盒 + 子代理 worktree/分支机制 | Stage E | ⬜（worktree 有、子代理自动隔离+原生沙盒缺） |
 | 8 | 对话 ID 注入 + 顶部栏右键菜单 + 对话状态颜色 + 一批对话操作 | Stage C/D | ⬜（大功能） |
 | 9 | 原生 browser-use（仿 Codex Chrome 插件） | Stage G | ⬜ 不急 |
-| 10 | 切 Plan/Context 再切回 Chat 滚动位置丢失 | Stage B | ⬜ |
-| 11 | 用户长消息可展开收叠（仿 CC） | Stage B | ⬜ |
+| 10 | 切 Plan/Context 再切回 Chat 滚动位置丢失 | Stage B | ✅ 已修（scrollTop 记录/恢复） |
+| 11 | 用户长消息可展开收叠（仿 CC） | Stage B | ✅ 已修（折叠+mask 渐隐+展开） |
 | 12 | 预压缩（主人撤销，不成立） | — | ✅ 撤销 |
 | 13 | 上传文件/图片冗余 → 统一加号小工具窗（附件/提及/工作流） | Stage C | ⬜ |
 
@@ -29,13 +29,13 @@
 
 ### Stage B — UI bug / 小修（P1）
 - B1 #3 历史浮层透明度【✅ 已修】
-- B2 #10 切页（Chat↔Plan↔Context）滚动位置保持（记录/恢复 scrollTop）
-- B3 #5 AI 消息**右下角**也加操作按钮（复制/回溯/重试/分支/删除），与左上角并存
-- B4 #11 用户长消息可展开收叠（超 N 行折叠 + 「展开」）
+- B2 #10 切页滚动位置保持【✅ 已修：chatScrollTopRef 持续记录 + useLayoutEffect 切回 chat 恢复】
+- B3 #5 AI 消息**右下角**操作按钮【✅ 已修：assistant 非流式渲染底部按钮；回溯/重试经 resolveRoundUserAnchor 把 AI id 映射到所在轮 user 锚，语义=重生成该轮/回到该轮前】
+- B4 #11 用户长消息可展开收叠【✅ 已修：scrollHeight>200 测超高 + max-height 折叠 + mask-image 渐隐 + 展开/收起】
 
 ### Stage C — 交互/设置增强（P1）
 - C1 #6 Enter/Ctrl+Enter 发送换行 设置开关（agentSettings + handleKeyDown 分支 + SettingsPanel）
-- C2 #8a 当前对话 ID 注入系统提示（promptBuilder 注入 conversationId，AI 不用工具查）
+- C2 #8a 当前对话 ID 注入系统提示【✅ 已修：systemPrompt 加 conversation_meta 段 + agentLoop 传 conversationId，草稿态标注未持久化；对话内 ID 恒定不破坏 prompt cache】
 - C3 #13 上传入口统一：加号点击 → 小工具窗（上传附件 / 提及@ / 选择工作流），替代现冗余的上传文件+上传图片两按钮
 
 ### Stage D — 对话管理大功能（P2，#8 核心）
@@ -68,6 +68,9 @@
 - browser-use（Stage G）何时启动
 
 ## 四、当前进展（实时）
-- ✅ A2 #1 / B1 #3 主线已改
-- 🔧 A1 #4 子代理 a0a90d44 修中（MCP 事件驱动 + systemPrompt 引导）
-- ⬜ 其余按 Stage 推进
+- ✅ Stage A：A1 #4 MCP 事件驱动注册（待重启 CDP 验证 AI 能看到 mcp__*）、A2 #1 开场白归属
+- ✅ Stage B：B1 #3 浮层、B2 #10 切页滚动、B3 #5 AI 消息底部按钮、B4 #11 长消息折叠（双编译 EXIT 0）
+- ✅ Stage C：C2 #8a 对话 ID 注入（双编译 EXIT 0）
+- ⬜ Stage C：C1 #6 Enter/Ctrl+Enter 开关、C3 #13 上传统一加号小窗
+- ⬜ Stage D/E/F/G：待主人拍板范围
+- 🔬 下一步：重启 dev server（带 CDP 9222）真机验证 A1 MCP + B2/B3/B4 + C2
